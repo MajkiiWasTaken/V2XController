@@ -1,0 +1,152 @@
+﻿<Window x:Class="V2XController.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:local="clr-namespace:V2XController"
+        mc:Ignorable="d"
+        Title="V2X Controller" Height="900" Width="1600"
+        MouseWheel="Window_MouseWheel"
+        PreviewKeyDown="Window_PreviewKeyDown"
+        KeyboardNavigation.DirectionalNavigation="None"
+        ResizeMode="NoResize"
+        WindowStartupLocation="CenterScreen"
+        WindowStyle="SingleBorderWindow">
+
+
+    <Grid>
+        <Grid Margin="0,-4,0,4">
+            <Label x:Name="CamOkLabel" Content="CAM OK: 0" HorizontalAlignment="Left" Height="27" Margin="592,478,0,0" VerticalAlignment="Top" Width="105"/>
+            <Label x:Name="CamErrorLabel" Content="CAM Error: 0" HorizontalAlignment="Left" Height="27" Margin="592,505,0,0" VerticalAlignment="Top" Width="105"/>
+            <Label x:Name="CamIdLabel" Content="CAM ID: 0" HorizontalAlignment="Left" Height="27" Margin="592,532,0,0" VerticalAlignment="Top" Width="105"/>
+            <Label x:Name="SrvOkLabel" Content="SRV OK: 0" HorizontalAlignment="Left" Height="27" Margin="697,478,0,0" VerticalAlignment="Top" Width="103"/>
+            <Label x:Name="SrvErrorLabel" Content="SRV Error: 0" HorizontalAlignment="Left" Height="27" Margin="697,505,0,0" VerticalAlignment="Top" Width="103"/>
+            <Label x:Name="SrvIdLabel" Content="SRV ID: 0" HorizontalAlignment="Left" Height="27" Margin="697,532,0,0" VerticalAlignment="Top" Width="103"/>
+            <Label x:Name="LastSrvLabel" Content="Last SRV: --:--:--" HorizontalAlignment="Left" Height="28" Margin="702,559,0,0" VerticalAlignment="Top" Width="115"/>
+            <CheckBox x:Name="CircleCheckBox" FontWeight="Bold" Content="Circle around RSU" HorizontalAlignment="Left" Height="18" Margin="83,163,0,0" VerticalAlignment="Top" Width="136" Checked="CheckBox_Checked" Unchecked="CheckBox_Unchecked"/>
+            <ComboBox x:Name="RadiusComboBox" IsEnabled="False" HorizontalAlignment="Left" Height="24" Margin="224,160,0,0" VerticalAlignment="Top" Width="83" SelectionChanged="RadiusComboBox_SelectionChanged">
+                <ComboBoxItem Content="250" />
+                <ComboBoxItem Content="300" />
+            </ComboBox>
+            <Button x:Name="ClearButton" Content="Clear all objects" HorizontalAlignment="Left" Height="36" Margin="1312,813,0,0" VerticalAlignment="Top" Width="124" Click="ClearButton_Click"/>
+            <TextBox x:Name="Tram1TB" HorizontalAlignment="Left" Height="29" Margin="377,172,0,0" TextWrapping="Wrap" Text="TextBox" VerticalAlignment="Top" Width="85" TextChanged="Tram1TB_TextChanged"/>
+            <TextBox x:Name="Tram2TB" HorizontalAlignment="Left" Height="29" Margin="508,172,0,0" TextWrapping="Wrap" Text="TextBox" VerticalAlignment="Top" Width="85" TextChanged="Tram2TB_TextChanged"/>
+            <Label Content="Set tram 1 and tram 2 ID (last 4 numbers) for testing." FontWeight="Bold" HorizontalAlignment="Left" Height="30" Margin="366,142,0,0" VerticalAlignment="Top" Width="320"/>
+            <Label Content="Tram 1 (X)"  HorizontalAlignment="Left" Height="28" Margin="382,201,0,0" VerticalAlignment="Top" Width="76"/>
+            <Label Content="Tram 2 (C)" HorizontalAlignment="Left" Height="28" Margin="514,201,0,0" VerticalAlignment="Top" Width="74"/>
+            <Button x:Name="btnPlaybackFile" Content="Select Playback file" HorizontalAlignment="Left" Height="25" Margin="362,287,0,0" VerticalAlignment="Top" Width="115" Click="btnPlaybackFile_Click"/>
+            <ComboBox x:Name="ComPortsComboBox" HorizontalAlignment="Left" Margin="83,116,0,0" VerticalAlignment="Top" Width="100" SelectionChanged="ComPortsComboBox_SelectionChanged"/>
+            <Button x:Name="btnPause" Content="Pause" HorizontalAlignment="Left" Height="25" Margin="624,247,0,0" VerticalAlignment="Top" Width="115" Click="btnPause_Click"/>
+            <Button x:Name="btnPlay" Content="Play" HorizontalAlignment="Left" Height="25" Margin="624,287,0,0" VerticalAlignment="Top" Width="115" Click="btnPlay_Click"/>
+            <Label x:Name="TimerLabel" Content="--:--:--" HorizontalAlignment="Left" Height="33" Margin="570,337,0,0" VerticalAlignment="Top" Width="169"/>
+            <Button Content="Refresh ports" Click="RefreshComPorts_Click" HorizontalAlignment="Left" Height="29" Margin="330,66,0,0" VerticalAlignment="Top" Width="90"/>
+            <CheckBox x:Name="LoopCheckbox" FontWeight="Bold" Content="Loop playback" HorizontalAlignment="Left" Height="20" Margin="572,375,0,0" VerticalAlignment="Top" Width="125" Checked="LoopCheckbox_Checked"/>
+            <Border BorderBrush="Black" BorderThickness="1" HorizontalAlignment="Left" Height="280" Margin="342,142,0,0" VerticalAlignment="Top" Width="418">
+                <Label Content="Simulated Tram speed" HorizontalAlignment="Left" Height="28" Margin="282,59,0,0" VerticalAlignment="Top" Width="135"/>
+            </Border>
+            <TextBox x:Name="SpeedBox" Text="0" HorizontalAlignment="Left" Height="29" Margin="634,172,0,0" TextWrapping="Wrap" VerticalAlignment="Top" Width="105" TextChanged="SpeedBox_TextChanged"/>
+            <Button x:Name="SendSrv" Content="Send SRV message" HorizontalAlignment="Left" Height="29" Margin="433,66,0,0" VerticalAlignment="Top" Width="118" Click="SendSrv_Click"/>
+            <CheckBox x:Name="SrvCheckBox" Content="Send SRV message every minute" HorizontalAlignment="Left" Height="29" Margin="572,74,0,0" VerticalAlignment="Top" Width="217" Checked="SrvCheckBox_Checked"/>
+
+            <DataGrid x:Name="ActivationZonesDataGrid" ItemsSource="{Binding ActivationZonesCollection}" AutoGenerateColumns="False" CanUserAddRows="False" IsReadOnly="False" HorizontalAlignment="Left" Height="225" Margin="30,616,0,0" VerticalAlignment="Top" Width="775">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="75"/>
+                    <DataGridTextColumn Header="Latitude [°]" Binding="{Binding Latitude, StringFormat=F6}" IsReadOnly="True" Width="125"/>
+                    <DataGridTextColumn Header="Longitude [°]" Binding="{Binding Longitude, StringFormat=F6}" IsReadOnly="True" Width="125"/>
+                    <DataGridTextColumn Header="Azimuth [°]" Binding="{Binding Azimuth}" Width="75"/>
+                    <DataGridTextColumn Header="Width [m]" Binding="{Binding Width}" Width="75"/>
+                    <DataGridTextColumn Header="Height [m]" Binding="{Binding Height}" Width="75"/>
+                    <DataGridTextColumn Header="Last Tram ID" Binding="{Binding LastTramId}" IsReadOnly="True" Width="75"/>
+                    <DataGridCheckBoxColumn Header="Activated" Binding="{Binding IsActive}" IsReadOnly="True" Width="75"/>
+                    <DataGridComboBoxColumn Header="Color" SelectedItemBinding="{Binding Color, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="75">
+                        <DataGridComboBoxColumn.ItemsSource>
+                            <x:Array Type="{x:Type sys:String}" xmlns:sys="clr-namespace:System;assembly=mscorlib">
+                                <sys:String>Red</sys:String>
+                                <sys:String>Green</sys:String>
+                                <sys:String>Blue</sys:String>
+                                <sys:String>Yellow</sys:String>
+                                <sys:String>Orange</sys:String>
+                                <sys:String>Cyan</sys:String>
+                                <sys:String>Magenta</sys:String>
+                                <sys:String>Black</sys:String>
+                            </x:Array>
+                        </DataGridComboBoxColumn.ItemsSource>
+                    </DataGridComboBoxColumn>
+                </DataGrid.Columns>
+            </DataGrid>
+            <DataGrid  AutoGenerateColumns="False" ItemsSource="{Binding TramTable}" IsReadOnly="True" HorizontalAlignment="Left" Height="116" Margin="224,460,0,0" VerticalAlignment="Top" Width="320" >
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="Tram ID" Binding="{Binding VehicleId}" IsReadOnly="True" Width="75"/>
+                    <DataGridTextColumn Header="Last CAM Time" Binding="{Binding LastCamTime}" IsReadOnly="True" Width="100"/>
+                    <DataGridTextColumn Header="Seconds since last CAM" Binding="{Binding SecondsSinceLastCam}" IsReadOnly="True" Width="140"/>
+                </DataGrid.Columns>
+            </DataGrid>
+
+
+        </Grid>
+
+
+        <Border BorderBrush="Black" BorderThickness="1" Margin="84,205,1257,466">
+
+        </Border>
+        <Label Content="Drawing and Saving objects" FontWeight="Bold" HorizontalAlignment="Left" Height="38" Margin="130,210,0,0" VerticalAlignment="Top" Width="168"/>
+
+        <Canvas x:Name="TileCanvas"
+                Width="694" Height="694"
+                ClipToBounds="True"
+                Background="Transparent"
+                MouseLeftButtonDown="TileCanvas_MouseLeftButtonDown"
+                MouseMove="TileCanvas_MouseMove"
+                MouseLeftButtonUp="TileCanvas_MouseLeftButtonUp"
+                HorizontalAlignment="Left"
+                VerticalAlignment="Center" Margin="835,0,0,0"/>
+        <TextBox x:Name="LatitudeBox" HorizontalAlignment="Left" Height="28" Margin="45,477,0,0" TextWrapping="Wrap" Text="TextBox" VerticalAlignment="Top" Width="114" TextChanged="LatitudeBox_TextChanged"/>
+        <TextBox x:Name="LongitudeBox" HorizontalAlignment="Left" Height="29" Margin="45,532,0,0" TextWrapping="Wrap" Text="TextBox" VerticalAlignment="Top" Width="114" TextChanged="LongitudeBox_TextChanged"/>
+        <Label Content="Latitude" FontWeight="Bold" HorizontalAlignment="Left" Height="23" Margin="45,454,0,0" VerticalAlignment="Top" Width="111"/>
+        <Label Content="Longitude" FontWeight="Bold" HorizontalAlignment="Left" Height="27" Margin="45,505,0,0" VerticalAlignment="Top" Width="111"/>
+        <Button x:Name="rectButton" Content="Activation Zone" HorizontalAlignment="Left" Height="24" Margin="100,248,0,0" VerticalAlignment="Top" Width="100" Click="rectButton_Click" RenderTransformOrigin="0.51,0.627"/>
+        <Button x:Name="StopDrawing" Content="Stop Drawing" HorizontalAlignment="Left" Height="24" Margin="102,283,0,0" VerticalAlignment="Top" Width="100" Click="StopDrawing_Click" RenderTransformOrigin="0.495,0.553"/>
+        <Button x:Name="RailwayButton"  Content="Railway" HorizontalAlignment="Left" Height="24" Margin="214,248,0,0" VerticalAlignment="Top" Width="100" Click="RailwayButton_Click" RenderTransformOrigin="0.495,0.553"/>
+        <Button x:Name="DrawPoints" Content="Tram Simulation" HorizontalAlignment="Left" Height="24" Margin="214,283,0,0" VerticalAlignment="Top" Width="100" Click="DrawPoints_Click" RenderTransformOrigin="0.495,0.553"/>
+        <Slider x:Name="PlaybackSlider" Margin="361,335,1063,504" 
+                Minimum="0"
+                Maximum="1"
+                Value="0"
+                TickFrequency="1"
+                IsSnapToTickEnabled="True"
+                ValueChanged="PlaybackSlider_ValueChanged"
+                PreviewMouseLeftButtonDown="PlaybackSlider_PreviewMouseLeftButtonDown"
+                PreviewMouseLeftButtonUp="PlaybackSlider_PreviewMouseLeftButtonUp"/>
+        <Label Content="Map" FontWeight="Bold" HorizontalAlignment="Left" Height="43" Margin="835,54,0,0" VerticalAlignment="Top" Width="110"/>
+        <Label Content="Point rollback" HorizontalAlignment="Left" Height="28" Margin="405,362,0,0" VerticalAlignment="Top" Width="88"/>
+        <Border BorderBrush="Black" BorderThickness="1" Margin="816,47,32,60"/>
+        <Button x:Name="btnRefreshMap" Content="Refresh map" Margin="816,813,690,18" Click="RefreshMap_Click"/>
+        <Button x:Name="btnExportMap" Content="Export map into an image" Margin="932,812,504,18" Click="ExportMap_Click"/>
+        <Button x:Name="SaveToXML" Content="Save To XML" HorizontalAlignment="Left" Height="25" Margin="102,345,0,0" VerticalAlignment="Top" Width="100" Click="SaveToXML_Click"/>
+        <Button x:Name="LoadFromXML" Content="Load From XML" HorizontalAlignment="Left" Height="25" Margin="214,345,0,0" VerticalAlignment="Top" Width="100" Click="LoadFromXML_Click"/>
+        <Button x:Name="btnStartRecording" Content="Record movement" HorizontalAlignment="Left" Height="25" Margin="361,243,0,0" VerticalAlignment="Top" Width="115" Click="btnRecordMovement_Click"/>
+        <Button x:Name="PlayMovement" Content="Play movement" HorizontalAlignment="Left" Height="25" Margin="492,283,0,0" VerticalAlignment="Top" Width="116" Click="PlayMovement_Click"/>
+        <Button x:Name="btnStopRecording" Content="Stop recording" HorizontalAlignment="Left" Height="25" Margin="492,243,0,0" VerticalAlignment="Top" Width="115" Click="btnStopRecording_Click"/>
+        <Button Content="Connect"
+        Click="Connect_Click"
+        Width="100"
+        Margin="84,30,0,0"
+        HorizontalAlignment="Left"
+        VerticalAlignment="Top" Height="37" FontWeight="Bold" FontSize="18"/>
+
+        <Button x:Name="MapControls" Content="Map controls" HorizontalAlignment="Left" Height="39" Margin="1459,810,0,0" VerticalAlignment="Top" Width="93" Click="MapControls_Click"/>
+        <Button Content="Disconnect"
+            Click="Disconnect_Click"
+            Width="100"
+            Margin="212,30,0,0"
+            HorizontalAlignment="Left"
+            VerticalAlignment="Top" Height="37" FontWeight="Bold" FontSize="18"/>
+        <TextBox x:Name="BaudrateTB" Text="57600" HorizontalAlignment="Left" Height="21" Margin="212,111,0,0" TextWrapping="Wrap" VerticalAlignment="Top" Width="75" TextChanged="BaudrateTB_TextChanged"/>
+        <Label Content="Port" FontWeight="Bold" HorizontalAlignment="Left" Height="23" Margin="84,88,0,0" VerticalAlignment="Top" Width="111"/>
+        <Label Content="Baudrate" FontWeight="Bold" HorizontalAlignment="Left" Height="23" Margin="212,88,0,0" VerticalAlignment="Top" Width="111"/>
+
+
+    </Grid>
+</Window>
+
+

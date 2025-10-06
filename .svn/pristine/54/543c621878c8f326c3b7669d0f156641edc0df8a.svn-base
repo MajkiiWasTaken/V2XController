@@ -1,0 +1,169 @@
+﻿<Window x:Class="V2XController.ExportWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Export" Height="500" Width="370"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False">
+
+    <Grid>
+        <!--Buttons-->
+        <Button x:Name="SaveButton" Content="Save" HorizontalAlignment="Left" Margin="115,83,0,0" VerticalAlignment="Top" Height="25" Width="68" Click="SaveButton_Click"/>
+        <Button x:Name="RenameButton" Content="Rename" HorizontalAlignment="Left" Margin="187,83,0,0" VerticalAlignment="Top" Height="25" Width="68" Click="RenameButton_Click"/>
+        <Button x:Name="DeleteButton" Content="Delete" HorizontalAlignment="Left" Margin="260,83,0,0" VerticalAlignment="Top" Height="25" Width="68" Click="DeleteButton_Click"/>
+        <Button x:Name="Start" Content="Start exporting" HorizontalAlignment="Left" Height="25" Margin="12,424,0,0" VerticalAlignment="Top" Width="83" Click="Start_Click"/>
+        <Button x:Name="Exit" Content="Exit" HorizontalAlignment="Left" Height="25" Margin="277,424,0,0" VerticalAlignment="Top" Width="67" Click="Exit_Click"/>
+        <Button x:Name="NewButton" Content="New profile" HorizontalAlignment="Left" Margin="42,83,0,0" VerticalAlignment="Top" Height="25" Width="68" Click="NewButton_Click"/>
+
+        <!--Borders (transparent, behind content)-->
+        <Border BorderBrush="Black" BorderThickness="1" Background="Transparent"
+                HorizontalAlignment="Center" Height="105" Margin="0,10,0,0"
+                VerticalAlignment="Top" Width="310" Panel.ZIndex="-151515"/>
+
+        <!--Comboboxes (on top of borders)-->
+        <ComboBox x:Name="SelectComboBox"
+                  Margin="42,32,42,0"
+                  VerticalAlignment="Top"
+                  Height="30"
+                  HorizontalAlignment="Stretch"
+                  Panel.ZIndex="10"
+                  HorizontalContentAlignment="Center"
+                  VerticalContentAlignment="Center"
+                  FontWeight="Bold"
+                  FontSize="14"
+                  SelectionChanged="SelectComboBox_SelectionChanged"/>
+
+        <ComboBox x:Name="ConnectionComboBox"
+                  Margin="42,150,42,0"
+                  VerticalAlignment="Top"
+                  Height="30"
+                  HorizontalAlignment="Stretch"
+                  Panel.ZIndex="10"
+                  HorizontalContentAlignment="Center"
+                  VerticalContentAlignment="Center"
+                  FontWeight="Bold"
+                  FontSize="14"
+                  SelectionChanged="ConnectionComboBox_SelectionChanged">
+            <ComboBoxItem Content="TCP/IP"/>
+            <ComboBoxItem Content="Serial port"/>
+        </ComboBox>
+
+        <!-- TCP/IP fields (2 TextBoxy) -->
+        <Grid x:Name="TcpFields"
+              Margin="42,190,42,0"
+              VerticalAlignment="Top"
+              Panel.ZIndex="10"
+              Visibility="Collapsed">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="8"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <StackPanel Orientation="Horizontal">
+                <TextBlock Text="Host:" Width="70" VerticalAlignment="Center"/>
+                <TextBox x:Name="TcpHostTextBox" Height="24" Width="100"/>
+            </StackPanel>
+
+            <StackPanel Grid.Row="2" Orientation="Horizontal">
+                <TextBlock Text="Port:" Width="70" VerticalAlignment="Center"/>
+                <TextBox x:Name="TcpPortTextBox" Height="24" Width="100"/>
+            </StackPanel>
+        </Grid>
+
+        <!-- Serial fields (6 TextBoxů) -->
+        <Grid x:Name="SerialFields"
+              Margin="42,190,42,0"
+              VerticalAlignment="Top"
+              Panel.ZIndex="10"
+              Visibility="Collapsed">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="6"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="6"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="6"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="6"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="6"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <StackPanel Orientation="Horizontal">
+                <TextBlock Text="Port:" Width="90" VerticalAlignment="Center"/>
+                <TextBox x:Name="SerialPortTextBox" Height="24" Width="160"/>
+            </StackPanel>
+
+            <StackPanel Grid.Row="2" Orientation="Horizontal">
+                <TextBlock Text="Baudrate:" Width="90" VerticalAlignment="Center"/>
+                <TextBox x:Name="SerialBaudTextBox" Height="24" Width="160"/>
+            </StackPanel>
+
+            <StackPanel Grid.Row="4" Orientation="Horizontal">
+                <TextBlock Text="Data bits:" Width="90" VerticalAlignment="Center"/>
+                <TextBox x:Name="SerialDataBitsTextBox" Height="24" Width="160"/>
+            </StackPanel>
+
+            <StackPanel Grid.Row="6" Orientation="Horizontal">
+                <TextBlock Text="Parity:" Width="90" VerticalAlignment="Center"/>
+                <TextBox x:Name="SerialParityTextBox" Height="24" Width="160"/>
+            </StackPanel>
+
+            <StackPanel Grid.Row="8" Orientation="Horizontal">
+                <TextBlock Text="Stop bits:" Width="90" VerticalAlignment="Center"/>
+                <TextBox x:Name="SerialStopBitsTextBox" Height="24" Width="160"/>
+            </StackPanel>
+
+
+        </Grid>
+
+        <TextBlock x:Name="ModemTextBlock"
+                   Margin="42,376,258,0"
+                   VerticalAlignment="Top"
+                   Height="25"
+                   TextWrapping="Wrap"
+                   TextAlignment="Left"
+                   Text="Module:"
+                   Panel.ZIndex="10"/>
+
+        <TextBox x:Name="ModemTextBox"
+                 Text="0xAB"
+         Height="24"
+         Width="160"
+         HorizontalAlignment="Left"
+         VerticalAlignment="Top"
+         Margin="112,376,0,0"
+         Panel.ZIndex="10"/>
+        <Border BorderBrush="Black" BorderThickness="1" HorizontalAlignment="Center" Height="277" Margin="0,133,0,0" VerticalAlignment="Top" Width="310"/>
+        <Label Content="Connection type" HorizontalAlignment="Left" Background="White" Height="30" Margin="42,120,0,0" VerticalAlignment="Top" Width="98"/>
+        <Label Content="Connection" HorizontalAlignment="Left" Background="White" Height="30" Margin="42,0,0,0" VerticalAlignment="Top" Width="70"/>
+        <Button x:Name="ReadButton" Content="Read registers" HorizontalAlignment="Left" Height="25" Margin="100,424,0,0" VerticalAlignment="Top" Width="83" Click="ReadButton_Click" RenderTransformOrigin="0.506,-0.19"/>
+        <Button x:Name="ReinitMPC" Content="Reinit MPC" HorizontalAlignment="Left" Height="25" Margin="188,424,0,0" VerticalAlignment="Top" Width="84" Click="ReinitMPC_Click"/>
+
+        <Grid x:Name="BusyOverlay"
+      Background="#80000000"
+      Visibility="Collapsed"
+      Panel.ZIndex="999">
+            <Border CornerRadius="6"
+            Background="White"
+            Padding="16"
+            HorizontalAlignment="Center"
+            VerticalAlignment="Center">
+                <StackPanel Orientation="Vertical"
+                    HorizontalAlignment="Center">
+                    <TextBlock x:Name="BusyText"
+                       Text="Working..."
+                       FontWeight="Bold"
+                       FontSize="14"
+                       Margin="0,0,0,8"
+                       TextAlignment="Center"/>
+                    <ProgressBar IsIndeterminate="True"
+                         Width="220"
+                         Height="16"/>
+                </StackPanel>
+            </Border>
+        </Grid>
+    </Grid>
+</Window>

@@ -1,0 +1,4485 @@
+﻿using System.Collections.ObjectModel;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Globalization;
+using System.IO;
+using System.IO.Ports;
+using System.Net.Http;
+using System.Net.Sockets;
+using System.Printing;
+using System.Reflection.Metadata;
+using System.Security.AccessControl;
+using System.Security.Policy;
+using System.Text;
+using System.Threading.Tasks;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Data;
+using System.Windows.Documents;
+using System.Windows.Controls.Primitives;
+using System.Windows.Input;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
+using System.Windows.Navigation;
+using System.Windows.Shapes;
+using System.Windows.Threading;
+using System.Xml;
+using System.Xml.Linq;
+using Windows.Devices.WiFiDirect;
+using Windows.UI.StartScreen;
+using DrawPointF = System.Drawing.PointF;
+using WinPoint = System.Windows.Point;
+using WinRect = System.Windows.Shapes.Rectangle;
+
+
+//TODO:
+
+// EVERYTHING DONE!!! :)
+
+
+
+namespace V2XController
+{
+    public partial class MainWindow : Window
+    {
+        //||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+        // all the variables and objects used in the application
+
+        //!!!!!!PORT and BAUDRATE!!!!!!!!!
+        private SerialPort serialPort = new SerialPort("COM10", 57600);
+        private readonly object _serialIoLock = new();
+
+        //Everything for the map 
+        private int zoom = 18;
+        private double latitude = 49.842432;
+        private double longitude = 18.276736;
+
+        //Grid
+        private const int TileSize = 256;
+        const int TileCount = 3;
+        const int CanvasSize = 694;
+        const int TilePixelSize = CanvasSize / TileCount;
+
+        private int _currentTopLeftTileX;
+        private int _currentTopLeftTileY;
+
+        //tram table
+        public ObservableCollection<TramInfo> TramTable { get; set; }
+        private Dictionary<string, DateTime> lastCamTimes = new();
+        private Dictionary<string, DateTime> prevCamTimes = new();
+
+        //TIME ZONE
+        TimeZoneInfo czechTimeZone = TimeZoneInfo.FindSystemTimeZoneById("Central European Standard Time");
+
+        //points
+        private Point DragStart;
+        private TranslateTransform translate = new TranslateTransform();
+        private ScaleTransform scale = new ScaleTransform(1, 1);
+        private TransformGroup transformGroup = new TransformGroup();
+
+        public ObservableCollection<Table> Records { get; set; }
+        public ICollectionView RecordsView;
+
+        //drawing
+        private List<MapRectangle> mapRectangles = new List<MapRectangle>();
+        private MapRectangle _currentMapRectangle;
+
+        private enum RectangleDrawPhase
+        {
+            None,
+            HeightDefinition,
+            WidthDefinition
+        }
+
+        private RectangleDrawPhase rectPhase = RectangleDrawPhase.None;
+
+        private Point rectFirstPoint;
+        private Point rectSecondPoint;
+        private Point rectWidthPoint;
+
+        private Line tempHeightLine;
+        private Line tempWidthLine;
+        private Polygon previewRect;
+        private Ellipse startPointEllipse;
+        private Ellipse secondPointEllipse;
+
+        private List<string> recordedCamMessages = new();
+
+        private enum DrawingMode
+        {
+            None,
+            Rectangle,
+            Railway,
+            Point           //drawing selection
+        }
+
+        private DrawingMode currentDrawingMode = DrawingMode.None;
+        private bool isDrawing = false;
+        private Rectangle currentRect;
+        private Point startPoint;
+        private Point lineStartPoint;
+        private Line currentLine;
+        private List<Line> railwayLines = new List<Line>();
+
+        private List<Point> trailPoints = new List<Point>();
+        private Polyline tramTrail;
+
+        private Brush _strokeBrush = Brushes.Red; //default brush color
+
+        private List<MapPoint> points = new();
+        private Polyline connectionLine = new Polyline
+        {
+            Stroke = Brushes.Red,
+            StrokeThickness = 2
+        };
+        private int pointCounter = 1; //point counter for naming
+
+        private Point? _rectangleStartPoint = null;
+        private Rectangle? _currentRectangle = null;
+        private TextBlock? _currentSizeLabel = null;
+        private bool isSelectionMode = false;
+        private Rectangle selectedRectangle = null;
+
+
+        private MapPoint[] drawnTrams = new MapPoint[2]; // 0 = X, 1 = C
+        private int currentDrawnTramIndex = 0; // 0 = X, 1 = C
+        private string[] drawnTramIds = new[] { "0000009999", "0000001111" };
+        private string[] drawnTramNames = new[] { "tram-test1", "tram-test2" };
+        private Brush[] drawnTramColors = new[] { Brushes.Red, Brushes.Blue };
+        private Polyline[] drawnTramTrails = new Polyline[2];
+        private List<Point>[] drawnTramTrailPoints = new List<Point>[2] { new List<Point>(), new List<Point>() };
+        private readonly Dictionary<string, CancellationTokenSource> vehicleTrailCleanupTokens = new();
+
+        //moving objects (RMB)
+        private UIElement selectedElement = null;
+        private Point mouseOffset;
+
+        //rectangle dimensions textblock
+        private TextBlock dimensionTextBlock;
+
+        //snapping
+        private const double SnapThreshold = 10.0;
+
+        private Stack<Action> undoStack = new();
+        private Stack<Action> redoStack = new();
+
+        //recording movement
+        private bool isPlaying = false;
+        private DateTime playbackStartTime;
+        private DispatcherTimer playbackTimer;
+        private TimeSpan playbackElapsedTime;
+        private bool isRecording = false;
+        private DateTime recordingStartTime;
+
+        private Dictionary<string, MapPoint> activeVehicles = new();
+
+        //panning
+        private Point panStart;
+        private bool isPanning = false;
+        private Point middleMousePanStart;
+        private bool isMiddleMousePanning = false;
+
+        private string[] controls = {
+            "Zoom: MWheel",
+            "Pan: Press MWhell (MB3)",
+            "Draw: LMB",
+            "Move objects: RMB",
+            "Delete objects: RMB + Del",
+            "Undo: Ctrl + Z",
+            "Redo: Ctrl + Y"
+        };
+        private string ControlsMessage => string.Join(" \n", controls);
+
+        //CAM STATUSES
+        int camOkCount = 0;
+        int camErrorCount = 0;
+        private V2XMessage? lastV2XMessage = null;
+
+
+        //SRV STATUSES
+        SRVMessage msg;
+        int srvOkCount = 0;
+        int srvErrorCount = 0;
+        private double? srvLatitude = null;
+        private double? srvLongitude = null;
+
+
+        //Activation zones
+        private Dictionary<Rectangle, ActivationZone> activationZones = new();
+        private Ellipse radiusEllipse;
+        public ObservableCollection<ActivationZone> ActivationZonesCollection { get; set; } = new();
+
+
+        //dict for last cam updates 
+        Dictionary<string, DateTime> lastCamUpdates = new Dictionary<string, DateTime>();
+        private DispatcherTimer cleanupTimer;
+
+        //colors for tram points
+        private readonly List<Brush> vehicleColors = new List<Brush>
+        {
+            Brushes.DarkViolet,
+            Brushes.Blue,
+            Brushes.Green,
+            Brushes.Orange,
+            Brushes.Purple,
+            Brushes.Cyan,
+            Brushes.Magenta,
+            Brushes.Brown,
+            Brushes.Yellow,
+            Brushes.Pink
+        };
+        private readonly Dictionary<string, Brush> vehicleColorMap = new Dictionary<string, Brush>();
+
+        //timer for cam updates (seconds)
+        private DispatcherTimer camTimer;
+
+        // xml files
+        private string loadedFileName;
+        // In TileCanvas_MouseLeftButtonDown, replace the RectangleDrawPhase.WidthDefinition block with:
+
+        private bool isDirty = false; // to track if the map has been modified
+
+
+        private bool isUpdatingActivationZone = false;
+
+        private const double playbackSpeedFactor = 1; // 0.5 = 2× pomalejší, 0.25 = 4× pomalejší, 1.0 = původní rychlost
+        private TimeSpan playbackMaxTime = TimeSpan.Zero;
+        private bool isSliderDragging = false;
+        private bool wasPlayingBeforeSliderDrag = false;
+
+
+        private bool _suppressTramTextChanged;
+
+        //||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+        //Main window constructor
+        public MainWindow()
+        {
+            InitializeComponent();
+            LoadAvailableComPorts();
+
+            Console.SetOut(new TextBoxWriter(DebugTextBox));
+            Console.WriteLine("Application started.");
+
+            //main data context
+            this.DataContext = this;
+
+            //timer for cleanup of old vehicles
+            StartCleanupTimer();
+
+            Loaded += (s, e) => Keyboard.Focus(this);
+
+            //trams
+            Tram1TB.Text = "9999";
+            Tram2TB.Text = "1111";
+            drawnTramIds[0] = "0000009999";
+            drawnTramIds[1] = "0000001111";
+
+            Tram1TB.MaxLength = 4;
+            Tram2TB.MaxLength = 4;
+
+            //latitude and longitude boxes (6 decimal places)
+            LatitudeBox.Text = Mapsettings.Latitude.ToString("F6");
+            LongitudeBox.Text = Mapsettings.Longitude.ToString("F6");
+
+            //moving the map
+            transformGroup.Children.Add(scale);
+            transformGroup.Children.Add(translate);
+            TileCanvas.RenderTransform = transformGroup;
+
+            //loading map tiles on the grid
+            var (centerX, centerY) = LatLonToTileXY(latitude, longitude, zoom);
+            _ = LoadTiles(centerX - TileCount / 2, centerY - TileCount / 2);
+
+            //Mouse wheel events for zooming
+            TileCanvas.MouseWheel += TileCanvas_MouseWheel;
+            this.MouseWheel += Window_MouseWheel;
+
+            //records table (not in the app anymore)
+            TramTable = new ObservableCollection<TramInfo>();
+
+            //cam timer
+            camTimer = new DispatcherTimer();
+            camTimer.Interval = TimeSpan.FromSeconds(1);
+            camTimer.Tick += (s, e) =>
+            {
+                foreach (var tram in TramTable)
+                {
+                    tram.SecondsSinceLastCam++;
+                }
+            };
+            camTimer.Start();
+
+
+            //csv loading
+            var filePath = "export.csv";
+            //LoadFromCSV(filePath);
+
+            //RMB
+            TileCanvas.MouseRightButtonDown += TileCanvas_MouseRightButtonDown;
+            TileCanvas.MouseMove += TileCanvas_MouseMoveForDrag;
+            TileCanvas.MouseRightButtonUp += TileCanvas_MouseRightButtonUp;
+
+            //MB3
+            TileCanvas.PreviewMouseDown += TileCanvas_PreviewMouseDown;
+            TileCanvas.MouseMove += TileCanvas_MouseMove_MiddlePan;
+            TileCanvas.PreviewMouseUp += TileCanvas_PreviewMouseUp;
+
+            //check if the points are still active (65 seconds)
+            var cleanupTimer = new DispatcherTimer();
+            cleanupTimer.Interval = TimeSpan.FromSeconds(5);
+            cleanupTimer.Tick += CleanupOldVehicles;
+            cleanupTimer.Start();
+
+            //point connection line
+            TileCanvas.Children.Add(connectionLine);
+
+            this.PreviewKeyDown += Window_PreviewKeyDown;
+
+            //rectangle dimensions under the mouse
+            dimensionTextBlock = new TextBlock
+            {
+                Foreground = Brushes.Black,
+                Background = Brushes.White,
+                FontSize = 12,
+                FontWeight = FontWeights.Bold,
+                Visibility = Visibility.Collapsed
+            };
+
+            //Z index of all elements to prevent them from overlapping with map grid
+            Panel.SetZIndex(dimensionTextBlock, int.MaxValue);
+            TileCanvas.Children.Add(dimensionTextBlock);
+
+            this.Closing += MainWindow_Closing;
+
+        }
+
+        private void MainWindow_Closing(object sender, CancelEventArgs e)
+        {
+            if (isDirty)
+            {
+                var result = MessageBox.Show(
+                    "You have unsaved changes. Do you want to save before closing?",
+                    "Unsaved changes",
+                    MessageBoxButton.YesNoCancel,
+                    MessageBoxImage.Warning);
+
+                if (result == MessageBoxResult.Cancel)
+                {
+                    e.Cancel = true;
+                    return;
+                }
+                else if (result == MessageBoxResult.Yes)
+                {
+                    SaveToXML_Click(null, null);
+                    // Pokud uživatel zruší uložení v dialogu, zůstaň v aplikaci
+                    if (isDirty) // SaveToXML_Click nastaví isDirty = false jen při úspěšném uložení
+                    {
+                        e.Cancel = true;
+                        return;
+                    }
+                }
+                // Pokud zvolí No, pokračuj v zavírání bez uložení
+            }
+        }
+
+        private void LoadAvailableComPorts()
+        {
+            ComPortsComboBox.Items.Clear();
+            var ports = SerialPort.GetPortNames().OrderBy(p => p).ToArray();
+            foreach (var port in ports)
+                ComPortsComboBox.Items.Add(port);
+
+            if (ComPortsComboBox.Items.Count > 0)
+                ComPortsComboBox.SelectedIndex = 0;
+        }
+
+
+        //||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+        // METHODS FOR THE MAP
+
+        //calculating tile location
+        private static (int tileX, int tileY) LatLonToTileXY(double lat, double lon, int zoom)
+        {
+            int tileX = (int)Math.Floor((lon + 180.0) / 360.0 * (1 << zoom));
+            double latRad = lat * Math.PI / 180.0;
+            int tileY = (int)Math.Floor(
+                (1.0 - Math.Log(Math.Tan(latRad) + 1.0 / Math.Cos(latRad)) / Math.PI) / 2.0 * (1 << zoom)
+            );
+            return (tileX, tileY);
+        }
+
+
+        //Position on the map
+        //Position on the map
+        private (double x, double y) ConvertLatLonToCanvasXY(double lat, double lon)
+        {
+            // fractional tile coords
+            double u = LonToTileX(lon, zoom);
+            double v = LatToTileY(lat, zoom);
+
+            double x = (u - _currentTopLeftTileX) * TilePixelSize;
+            double y = (v - _currentTopLeftTileY) * TilePixelSize;
+            return (x, y);
+        }
+
+
+        //CONVERT PIXELS TO LAT/LON
+        public (double Latitude, double Longitude) ConvertCanvasXYToLatLon(double x, double y, int zoom)
+        {
+            const double tileSize = 256.0;
+            double n = Math.Pow(2, zoom);
+
+            double lon = x / (tileSize * n) * 360.0 - 180.0;
+
+            double latRad = Math.Atan(Math.Sinh(Math.PI * (1 - 2 * y / (tileSize * n))));
+            double lat = latRad * 180.0 / Math.PI;
+
+            return (lat, lon);
+        }
+
+
+        //Loading map tiles on the grid
+        private async Task LoadTiles(int startX, int startY)
+        {
+            _currentTopLeftTileX = startX;
+            _currentTopLeftTileY = startY;
+
+            //remove all existing images from the canvas
+            TileCanvas.Children
+                .OfType<Image>()
+                .ToList()
+                .ForEach(img => TileCanvas.Children.Remove(img));
+
+            isDrawing = false; //false drawing because we are loading tiles and not drawing objects
+            currentRect = null;
+            _currentMapRectangle = null;
+
+            using HttpClient client = new HttpClient();
+            client.DefaultRequestHeaders.UserAgent.Clear();
+            client.DefaultRequestHeaders.UserAgent.ParseAdd("V2XController/1.0 (Michal.Svrcek@hrosistavby.cz)"); //needed for authentication (Downloading tiles)
+
+            var images = new List<Image>();
+
+            for (int x = 0; x < TileCount; x++)
+            {
+                for (int y = 0; y < TileCount; y++)
+                {
+                    int tileX = startX + x;
+                    int tileY = startY + y;
+                    string url = $"https://tile.openstreetmap.org/{zoom}/{tileX}/{tileY}.png"; //OpenStreetMap tile URL
+
+                    try
+                    {
+                        //Download the tile image into byte array
+                        byte[] data = await client.GetByteArrayAsync(url);
+                        BitmapImage bitmap = new BitmapImage();
+                        bitmap.BeginInit();
+                        bitmap.StreamSource = new MemoryStream(data);
+                        bitmap.DecodePixelWidth = TilePixelSize;
+                        bitmap.DecodePixelHeight = TilePixelSize;
+                        bitmap.EndInit();
+
+                        Image image = new Image
+                        {
+                            Width = TilePixelSize,
+                            Height = TilePixelSize,
+                            Source = bitmap
+                        };
+
+                        Canvas.SetLeft(image, x * TilePixelSize);
+                        Canvas.SetTop(image, y * TilePixelSize);
+                        Panel.SetZIndex(image, 0);
+                        images.Add(image); //add the tile image into the list
+
+                        await Task.Delay(200); //to prevent overwhelming the server with requests
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Error while loading {url}: {ex.Message}");
+                    }
+                }
+            }
+
+            // Add all tiles to the canvas
+            foreach (var img in images)
+                TileCanvas.Children.Add(img);
+
+            //Now redraw all elements on the map
+            if (!TileCanvas.Children.Contains(connectionLine)) TileCanvas.Children.Add(connectionLine);
+
+            //functions to reload points and rectangles
+            foreach (var pt in points)
+            {
+                if (!TileCanvas.Children.Contains(pt.Ellipse))
+                    TileCanvas.Children.Add(pt.Ellipse);
+
+                if (!TileCanvas.Children.Contains(pt.Text))
+                    TileCanvas.Children.Add(pt.Text);
+            }
+
+            foreach (var rect in mapRectangles)
+            {
+                if (!TileCanvas.Children.Contains(rect.Shape))
+                    TileCanvas.Children.Add(rect.Shape);
+                Panel.SetZIndex(rect.Shape, 100);
+            }
+            foreach (var pt in points)
+            {
+                Panel.SetZIndex(pt.Ellipse, 200); //setting Z Index for points above the map
+                Panel.SetZIndex(pt.Text, 201);
+            }
+            Panel.SetZIndex(connectionLine, 150);
+
+            RedrawVehicleTrails(); //redrawing vehicle trails after loading tiles
+            BringAllOverlaysToFront(); //bringing all overlays to the front
+        }
+
+        private void TileCanvas_MouseWheel(object sender, MouseWheelEventArgs e) { }
+
+
+        //zooming on the map
+        private void Window_MouseWheel(object sender, MouseWheelEventArgs e)
+        {
+            int delta = e.Delta > 0 ? 1 : -1;
+            int newZoom = zoom + delta;
+            if (newZoom < 1 || newZoom >= 19) return;
+
+            zoom = newZoom;
+            var (centerX, centerY) = LatLonToTileXY(latitude, longitude, zoom);
+            _ = LoadTiles(centerX - TileCount / 2, centerY - TileCount / 2);
+
+            DrawRadiusCircle();
+
+            if (lastV2XMessage != null)
+            {
+                UpdateVehicleTrail(lastV2XMessage);
+            }
+        }
+
+
+        //Dragging the map with MMB
+        private void TileCanvas_PreviewMouseDown(object sender, MouseButtonEventArgs e)
+        {
+            if (e.ChangedButton == MouseButton.Middle)
+            {
+                middleMousePanStart = e.GetPosition(this);
+                isMiddleMousePanning = true;
+                isPanning = true;
+                TileCanvas.CaptureMouse();
+                e.Handled = true;
+            }
+        }
+
+
+        //stop panning
+        private void TileCanvas_PreviewMouseUp(object sender, MouseButtonEventArgs e)
+        {
+            if (e.ChangedButton == MouseButton.Middle)
+            {
+                isMiddleMousePanning = false;
+                TileCanvas.ReleaseMouseCapture();
+                isPanning = false;
+
+                var (centerX, centerY) = LatLonToTileXY(latitude, longitude, zoom);
+                _ = LoadTiles(centerX - TileCount / 2, centerY - TileCount / 2);
+                e.Handled = true;
+            }
+        }
+
+
+        //calculating new position after panning
+        private void TileCanvas_MouseMove_MiddlePan(object sender, MouseEventArgs e)
+        {
+            if (!isMiddleMousePanning) return;
+
+            Point current = e.GetPosition(this);
+            Vector delta = current - middleMousePanStart;
+            middleMousePanStart = current;
+
+            double lonDelta = -delta.X / TilePixelSize * 360.0 / (1 << zoom);
+            double latDelta = delta.Y / TilePixelSize * 170.1022 / (1 << zoom);
+
+            latitude += latDelta;
+            longitude += lonDelta;
+
+            latitude = Math.Max(-85, Math.Min(85, latitude));
+            longitude = (longitude + 180) % 360 - 180;
+
+            e.Handled = true;
+        }
+
+
+        //method for map refreshing
+        private async void RefreshMap()
+        {
+            // Use Mapsettings as the source of truth and sync fields
+            latitude = Mapsettings.Latitude;
+            longitude = Mapsettings.Longitude;
+
+            var (centerX, centerY) = LatLonToTileXY(latitude, longitude, zoom);
+            await LoadTiles(centerX - TileCount / 2, centerY - TileCount / 2);
+
+            await Task.Delay(200);
+            RedrawVehicleTrails();
+            BringAllOverlaysToFront();
+        }
+
+        //Meters per px
+        private double MetersPerPixel(double latitude, int zoom)
+        {
+            double earthCircumference = 40075016.686; // in meters
+            double latitudeRad = latitude * Math.PI / 180.0;
+            return earthCircumference * Math.Cos(latitudeRad) / Math.Pow(2, zoom + 8); // +8 because of 256 px
+        }
+
+
+        //Get the parenet element in the canvas of an object
+        private UIElement GetParentElementInCanvas(UIElement element)
+        {
+            while (element != null && !TileCanvas.Children.Contains(element))
+            {
+                element = VisualTreeHelper.GetParent(element) as UIElement;
+            }
+            return element;
+        }
+
+        //||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+        // METHODS FOR DRAWING AND MOUSE EVENTS
+
+        //LMB pressed
+
+        private void TileCanvas_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            var pos = e.GetPosition(TileCanvas);
+
+            if (currentDrawingMode == DrawingMode.Point)
+            {
+                e.Handled = true;
+                isDrawing = true;
+                startPoint = pos;
+
+                int idx = currentDrawnTramIndex;
+                
+
+                if (drawnTrams[idx] == null)
+                {
+                    // Vytvoření nové tramvaje
+                    var ellipse = new Ellipse
+                    {
+                        Width = 12,
+                        Height = 12,
+                        Fill = drawnTramColors[idx],
+                        IsHitTestVisible = false
+                    };
+
+                    var text = new TextBlock
+                    {
+                        Text = drawnTramNames[idx],
+                        Foreground = drawnTramColors[idx],
+                        FontWeight = FontWeights.Bold,
+                        FontSize = 12,
+                        IsHitTestVisible = false
+                    };
+
+                    TileCanvas.Children.Add(ellipse);
+                    TileCanvas.Children.Add(text);
+
+                    drawnTrams[idx] = new MapPoint
+                    {
+                        Position = startPoint,
+                        Label = drawnTramIds[idx],
+                        Ellipse = ellipse,
+                        Text = text,
+                        Speed = null,
+                        TrailDots = new List<Ellipse>(),
+                        IsRecorded = isRecording
+                    };
+
+                    // Trail polyline
+                    drawnTramTrails[idx] = new Polyline
+                    {
+                        Stroke = drawnTramColors[idx],
+                        StrokeThickness = 2,
+                        IsHitTestVisible = false
+                    };
+                    TileCanvas.Children.Add(drawnTramTrails[idx]);
+                }
+
+                drawnTrams[idx].LastUpdate = DateTime.Now;
+
+                var tram = drawnTrams[idx];
+
+                // Trail tečka na předchozí pozici
+                if (drawnTramTrailPoints[idx].Count > 0)
+                {
+                    var prevPos = drawnTramTrailPoints[idx].Last();
+                    var dot = new Ellipse
+                    {
+                        Width = 5,
+                        Height = 5,
+                        Fill = Brushes.Black,
+                        IsHitTestVisible = false
+                    };
+                    Canvas.SetLeft(dot, prevPos.X - 2.5);
+                    Canvas.SetTop(dot, prevPos.Y - 2.5);
+
+                    tram.TrailDots.Add(dot);
+                    TileCanvas.Children.Add(dot);
+
+                    while (tram.TrailDots.Count > 5)
+                    {
+                        TileCanvas.Children.Remove(tram.TrailDots[0]);
+                        tram.TrailDots.RemoveAt(0);
+                    }
+                }
+
+                // Aktualizace pozice tramvaje
+                UpdateVehicleCanvasPosition(tram, pos, drawnTramColors[idx], false, tram.Label, 0);
+
+                if (isRecording)
+                {
+                    tram.MovementFrames.Add(new MovementFrame
+                    {
+                        Timestamp = DateTime.Now - recordingStartTime,
+                        Position = pos
+                    });
+                }
+
+                // Trail polyline body
+                drawnTramTrailPoints[idx].Add(pos);
+                if (drawnTramTrailPoints[idx].Count > 6)
+                    drawnTramTrailPoints[idx].RemoveAt(0);
+
+                drawnTramTrails[idx].Points.Clear();
+                foreach (var p in drawnTramTrailPoints[idx])
+                    drawnTramTrails[idx].Points.Add(p);
+
+                // Aktualizace pozice tramvaje
+                UpdateVehicleCanvasPosition(tram, pos, drawnTramColors[idx], false, tram.Label);
+
+                // Aktualizace času poslední aktivity
+                tram.LastUpdate = DateTime.Now;
+
+                // Odeslání CAM zprávy
+                var latlon = CanvasPixelsToLatLon(pos, latitude, longitude, zoom);
+                double latitudeWgs = latlon.Y;
+                double longitudeWgs = latlon.X;
+                SendPointAsCamMessage(drawnTramIds[idx], latitudeWgs, longitudeWgs);
+
+
+                return;
+            }
+
+            //selection mode
+            if (isSelectionMode)
+            {
+                var clicked = e.OriginalSource as UIElement;
+                var element = GetParentElementInCanvas(clicked);
+
+                if (element != null)
+                {
+                    SelectElement(element);
+                }
+                else
+                {
+                    DeselectElement();
+                }
+
+                return;
+            }
+
+            isDrawing = true;
+            startPoint = pos;
+
+            if (currentDrawingMode == DrawingMode.Rectangle)
+            {
+                Console.WriteLine($"rectPhase = {rectPhase}");
+                if (rectPhase == RectangleDrawPhase.None)
+                {
+                    if (startPointEllipse != null && ArePointsClose(pos, rectFirstPoint))
+                        return;
+
+                    rectFirstPoint = pos;
+
+                    if (startPointEllipse != null)
+                        TileCanvas.Children.Remove(startPointEllipse);
+
+                    startPointEllipse = new Ellipse
+                    {
+                        Width = 8,
+                        Height = 8,
+                        Fill = Brushes.Red,
+                        Stroke = Brushes.Black,
+                        StrokeThickness = 1
+                    };
+                    Canvas.SetLeft(startPointEllipse, pos.X - 4);
+                    Canvas.SetTop(startPointEllipse, pos.Y - 4);
+                    TileCanvas.Children.Add(startPointEllipse);
+
+                    tempHeightLine = new Line
+                    {
+                        Stroke = Brushes.Red,
+                        StrokeThickness = 2,
+                        X1 = pos.X,
+                        Y1 = pos.Y,
+                        X2 = pos.X,
+                        Y2 = pos.Y
+                    };
+                    TileCanvas.Children.Add(tempHeightLine);
+
+                    rectPhase = RectangleDrawPhase.HeightDefinition;
+                }
+                else if (rectPhase == RectangleDrawPhase.HeightDefinition)
+                {
+                    rectSecondPoint = pos;
+
+                    tempHeightLine.X2 = pos.X;
+                    tempHeightLine.Y2 = pos.Y;
+
+                    if (secondPointEllipse != null)
+                        TileCanvas.Children.Remove(secondPointEllipse);
+
+                    secondPointEllipse = new Ellipse
+                    {
+                        Width = 8,
+                        Height = 8,
+                        Fill = Brushes.Green,
+                        Stroke = Brushes.Black,
+                        StrokeThickness = 1
+                    };
+                    Canvas.SetLeft(secondPointEllipse, pos.X - 4);
+                    Canvas.SetTop(secondPointEllipse, pos.Y - 4);
+                    TileCanvas.Children.Add(secondPointEllipse);
+
+                    tempWidthLine = new Line
+                    {
+                        Stroke = Brushes.Green,
+                        StrokeThickness = 2,
+                        X1 = pos.X,
+                        Y1 = pos.Y,
+                        X2 = pos.X,
+                        Y2 = pos.Y
+                    };
+                    TileCanvas.Children.Add(tempWidthLine);
+
+                    rectPhase = RectangleDrawPhase.WidthDefinition;
+                }
+                else if (rectPhase == RectangleDrawPhase.WidthDefinition)
+                {
+                    rectWidthPoint = pos;
+
+                    // Výpočet parametrů obdélníku
+                    var axis = rectSecondPoint - rectFirstPoint;
+                    if (axis.Length == 0)
+                        return;
+                    double heightPx = axis.Length;
+                    axis.Normalize();
+                    var perp = new Vector(-axis.Y, axis.X);
+                    double halfWidth = (rectWidthPoint - rectSecondPoint) * perp;
+                    double widthPx = Math.Abs(halfWidth) * 2;
+
+                    // Výpočet středu
+                    var center = new Point(
+                        (rectFirstPoint.X + rectSecondPoint.X) / 2,
+                        (rectFirstPoint.Y + rectSecondPoint.Y) / 2);
+
+                    // Vytvoření obdélníku
+                    var rect = new Rectangle
+                    {
+                        Width = widthPx,
+                        Height = heightPx,
+                        Stroke = _strokeBrush,
+                        StrokeThickness = 2,
+                        Fill = Brushes.Transparent,
+                        IsHitTestVisible = true
+                    };
+
+                    // Nastavení pozice
+                    Canvas.SetLeft(rect, center.X - widthPx / 2);
+                    Canvas.SetTop(rect, center.Y - heightPx / 2);
+
+                    // Rotace
+                    double angle = CalculateAzimuth(rectFirstPoint, rectSecondPoint);
+                    var transformGroup = new TransformGroup();
+                    transformGroup.Children.Add(new RotateTransform(angle, widthPx / 2, heightPx / 2));
+                    rect.RenderTransform = transformGroup;
+
+                    // Přidání do canvasu a kolekce mapRectangles
+                    TileCanvas.Children.Add(rect);
+                    mapRectangles.Add(new MapRectangle(rect));
+                    isDirty = true; // Mark as modified
+
+                    // Převod pixelů na metry
+                    double mpp = MetersPerPixel(latitude, zoom);
+                    double widthMeters = widthPx * mpp;
+                    double heightMeters = heightPx * mpp;
+
+                    // Výpočet zeměpisné pozice (použijte např. CanvasPixelsToLatLon)
+                    var latlon = CanvasPixelsToLatLon(rectFirstPoint, latitude, longitude, zoom);
+
+                    // Vytvoření ActivationZone
+                    var activationZone = new ActivationZone
+                    {
+                        Name = $"Zone {activationZones.Count + 1}",
+                        Rectangle = rect,
+                        Width = Math.Round(widthMeters, 2),
+                        Height = Math.Round(heightMeters, 2),
+                        LastTramId = "-",
+                        Bounds = new Rect(center.X - widthPx / 2, center.Y - heightPx / 2, widthPx, heightPx),
+                        StartPoint = rectFirstPoint,
+                        Latitude = latlon.Y,
+                        Longitude = latlon.X,
+                        Azimuth = (int)angle
+                    };
+
+                    activationZones[rect] = activationZone;
+                    ActivationZonesCollection.Add(activationZone);
+                    activationZone.PropertyChanged += ActivationZone_PropertyChanged;
+
+                    // Eventy pro výběr a pohyb
+                    rect.MouseEnter += Rectangle_MouseEnter;
+                    rect.MouseLeave += Rectangle_MouseLeave;
+                    rect.MouseLeftButtonDown += Rectangle_MouseLeftButtonDown;
+
+                    // Úklid dočasných prvků
+                    ClearTempElements();
+                    rectPhase = RectangleDrawPhase.None;
+                }
+            }
+
+            if (currentDrawingMode == DrawingMode.Railway)
+            {
+                isDrawing = true;
+                startPoint = pos;
+
+                currentLine = new Line
+                {
+                    Stroke = Brushes.Black,
+                    StrokeThickness = 2,
+                    X1 = startPoint.X,
+                    Y1 = startPoint.Y,
+                    X2 = startPoint.X,
+                    Y2 = startPoint.Y,
+                    IsHitTestVisible = false
+                };
+
+                TileCanvas.Children.Add(currentLine);
+
+                return;
+
+            }
+        }
+
+
+
+        private void UpdateRectanglePositionFromStartPoint(ActivationZone zone)
+        {
+            double width = zone.Rectangle.Width;
+            double height = zone.Rectangle.Height;
+
+            // Nastav levý horní roh tak, aby [W/2, H] (střed základny) byl v StartPoint
+            double left = zone.StartPoint.X - width / 2.0;
+            double top = zone.StartPoint.Y - height;
+
+            Canvas.SetLeft(zone.Rectangle, left);
+            Canvas.SetTop(zone.Rectangle, top);
+
+            // Rotace kolem středu základny
+            ApplyZoneRotation(zone);
+        }
+
+
+
+
+        private void TileCanvas_MouseMove(object sender, MouseEventArgs e)
+        {
+            var pos = e.GetPosition(TileCanvas);
+
+            if (rectPhase == RectangleDrawPhase.HeightDefinition && tempHeightLine != null)
+            {
+                tempHeightLine.X2 = pos.X;
+                tempHeightLine.Y2 = pos.Y;
+
+                double heightPx = (pos - rectFirstPoint).Length;
+                double widthPx = 0;
+
+                double mpp = MetersPerPixel(latitude, zoom);
+                double widthMeters = widthPx * mpp;
+                double heightMeters = heightPx * mpp;
+
+                dimensionTextBlock.Text = $"{widthMeters:F1} m × {heightMeters:F1} m";
+                dimensionTextBlock.Visibility = Visibility.Visible;
+                Canvas.SetLeft(dimensionTextBlock, pos.X + 10);
+                Canvas.SetTop(dimensionTextBlock, pos.Y + 10);
+            }
+            else if (rectPhase == RectangleDrawPhase.WidthDefinition && tempWidthLine != null)
+            {
+                var axis = rectSecondPoint - rectFirstPoint;
+                if (axis.Length == 0)
+                    return;
+
+                axis.Normalize();
+                var perp = new Vector(-axis.Y, axis.X);
+
+                double halfWidth = (pos - rectSecondPoint) * perp;
+
+                Point end = rectSecondPoint + perp * halfWidth;
+                tempWidthLine.X2 = end.X;
+                tempWidthLine.Y2 = end.Y;
+
+                ShowPreviewRectangle(halfWidth);
+
+                double widthPx = Math.Abs(halfWidth) * 2;
+                double heightPx = (rectSecondPoint - rectFirstPoint).Length;
+
+                double mpp = MetersPerPixel(latitude, zoom);
+                double widthMeters = widthPx * mpp;
+                double heightMeters = heightPx * mpp;
+
+                dimensionTextBlock.Text = $"{widthMeters:F1} m × {heightMeters:F1} m";
+                dimensionTextBlock.Visibility = Visibility.Visible;
+                Canvas.SetLeft(dimensionTextBlock, pos.X + 10);
+                Canvas.SetTop(dimensionTextBlock, pos.Y + 10);
+            }
+            
+            else if (currentDrawingMode == DrawingMode.Railway && currentLine != null)
+            {
+                currentLine.X2 = pos.X;
+                currentLine.Y2 = pos.Y;
+            }
+            else
+            {
+                dimensionTextBlock.Visibility = Visibility.Collapsed;
+            }
+        }
+
+
+
+
+
+
+
+
+
+
+
+
+        //stop drawing when mouse button is released
+        private void TileCanvas_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+        {
+
+
+            AddUndoRedo(
+                undo: () =>
+                {
+                    TileCanvas.Children.Remove(currentLine);
+                    railwayLines.Remove(currentLine);
+                },
+                redo: () =>
+                {
+                    TileCanvas.Children.Add(currentLine);
+                    railwayLines.Add(currentLine);
+
+
+                }
+            );
+
+
+
+            if (currentDrawingMode == DrawingMode.Railway && currentLine != null)
+            {
+                currentLine.IsHitTestVisible = true;
+
+                railwayLines.Add(currentLine);
+
+                isDirty = true; // Mark as modified
+
+                currentLine = null;
+            }
+        }
+
+
+        private void CreateRectangleFromAxes()
+        {
+            var axis = rectSecondPoint - rectFirstPoint;
+            if (axis.Length == 0)
+                return;
+            double height = axis.Length;
+            axis.Normalize();
+
+            var perp = new Vector(-axis.Y, axis.X);
+            double halfWidth = (rectWidthPoint - rectSecondPoint) * perp;
+
+            Point center = new Point(
+                (rectFirstPoint.X + rectSecondPoint.X) / 2,
+                (rectFirstPoint.Y + rectSecondPoint.Y) / 2);
+
+            Point p1 = new Point(center.X - axis.X * (height / 2) - perp.X * halfWidth,
+                                 center.Y - axis.Y * (height / 2) - perp.Y * halfWidth);
+
+            Point p2 = new Point(center.X + axis.X * (height / 2) - perp.X * halfWidth,
+                                 center.Y + axis.Y * (height / 2) - perp.Y * halfWidth);
+
+            Point p3 = new Point(center.X + axis.X * (height / 2) + perp.X * halfWidth,
+                                 center.Y + axis.Y * (height / 2) + perp.Y * halfWidth);
+
+            Point p4 = new Point(center.X - axis.X * (height / 2) + perp.X * halfWidth,
+                                 center.Y - axis.Y * (height / 2) + perp.Y * halfWidth);
+
+            Polygon rect = new Polygon
+            {
+                Stroke = Brushes.Red,
+                StrokeThickness = 2,
+                Fill = Brushes.Transparent,  // žádná výplň
+                Points = new PointCollection { p1, p2, p3, p4 }
+            };
+
+            TileCanvas.Children.Add(rect);
+        }
+
+
+        private void ShowPreviewRectangle(double halfWidth)
+        {
+            var axis = rectSecondPoint - rectFirstPoint;
+            if (axis.Length == 0)
+                return;
+
+            axis.Normalize();
+
+            var perp = new Vector(-axis.Y, axis.X);
+
+            Point center = new Point(
+                (rectFirstPoint.X + rectSecondPoint.X) / 2,
+                (rectFirstPoint.Y + rectSecondPoint.Y) / 2);
+
+            Point p1 = new Point(center.X - axis.X * (axis.Length / 2) - perp.X * halfWidth,
+                                 center.Y - axis.Y * (axis.Length / 2) - perp.Y * halfWidth);
+
+            Point p2 = new Point(center.X + axis.X * (axis.Length / 2) - perp.X * halfWidth,
+                                 center.Y + axis.Y * (axis.Length / 2) - perp.Y * halfWidth);
+
+            Point p3 = new Point(center.X + axis.X * (axis.Length / 2) + perp.X * halfWidth,
+                                 center.Y + axis.Y * (axis.Length / 2) + perp.Y * halfWidth);
+
+            Point p4 = new Point(center.X - axis.X * (axis.Length / 2) + perp.X * halfWidth,
+                                 center.Y - axis.Y * (axis.Length / 2) + perp.Y * halfWidth);
+
+            if (previewRect != null)
+                TileCanvas.Children.Remove(previewRect);
+
+            previewRect = new Polygon
+            {
+                Stroke = Brushes.Blue,
+                StrokeThickness = 1,
+                StrokeDashArray = new DoubleCollection { 4, 2 },
+                Points = new PointCollection { p1, p2, p3, p4 }
+            };
+            TileCanvas.Children.Add(previewRect);
+        }
+
+        private void ClearTempElements()
+        {
+            // Vymazat pomocné prvky až po dokončení celého obdélníku, tedy po 3. kliknutí
+            if (tempHeightLine != null)
+            {
+                TileCanvas.Children.Remove(tempHeightLine);
+                tempHeightLine = null;
+            }
+            if (tempWidthLine != null)
+            {
+                TileCanvas.Children.Remove(tempWidthLine);
+                tempWidthLine = null;
+            }
+            if (startPointEllipse != null)
+            {
+                TileCanvas.Children.Remove(startPointEllipse);
+                startPointEllipse = null;
+            }
+            if (secondPointEllipse != null)
+            {
+                TileCanvas.Children.Remove(secondPointEllipse);
+                secondPointEllipse = null;
+            }
+            if (previewRect != null)
+            {
+                TileCanvas.Children.Remove(previewRect);
+                previewRect = null;
+            }
+        }
+
+        private int CalculateAzimuth(Point start, Point end)
+        {
+            double dx = end.X - start.X;
+            double dy = start.Y - end.Y; // invert Y protože nahoře je Y=0
+
+            double angleRad = Math.Atan2(dx, dy); // dx, dy pro sever = 0°
+            double angleDeg = angleRad * (180.0 / Math.PI);
+
+            if (angleDeg < 0)
+                angleDeg += 360.0; // aby byl v rozsahu 0–360°
+
+            return (int)Math.Round(angleDeg);
+        }
+
+
+
+
+        //moving objects with RMB
+        private void TileCanvas_MouseRightButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            var position = e.GetPosition(TileCanvas);
+            var hit = VisualTreeHelper.HitTest(TileCanvas, position);
+
+            if (hit == null) return;
+
+            if (hit.VisualHit is Rectangle or Ellipse or TextBlock or Line)
+            {
+                selectedElement = hit.VisualHit as UIElement;
+                mouseOffset = position;
+
+                TileCanvas.Cursor = Cursors.SizeAll;
+
+                e.Handled = true;
+            }
+        }
+
+
+        //mouse dragging
+        private void TileCanvas_MouseMoveForDrag(object sender, MouseEventArgs e)
+        {
+            if (selectedElement == null || e.RightButton != MouseButtonState.Pressed) return;
+
+            var currentPos = e.GetPosition(TileCanvas);
+            var dx = currentPos.X - mouseOffset.X;
+            var dy = currentPos.Y - mouseOffset.Y;
+
+            if (selectedElement is FrameworkElement element)
+            {
+                double left = Canvas.GetLeft(element);
+                double top = Canvas.GetTop(element);
+
+                double newLeft = left + dx;
+                double newTop = top + dy;
+
+                Canvas.SetLeft(element, newLeft);
+                Canvas.SetTop(element, newTop);
+
+                if (selectedElement is TextBlock tb)
+                {
+                    var matchingPoint = points.FirstOrDefault(p => p.Text == tb);
+                    if (matchingPoint != null)
+                    {
+                        var newPos = new Point(newLeft + 5, newTop + 10);
+                        matchingPoint.Position = newPos;
+                        RecalculateConnectionLine();
+
+                        if (isRecording)
+                        {
+                            matchingPoint.MovementFrames.Add(new MovementFrame
+                            {
+                                Timestamp = DateTime.Now - recordingStartTime,
+                                Position = newPos
+                            });
+                        }
+                    }
+                }
+
+                mouseOffset = currentPos;
+            }
+            if (selectedElement is Rectangle rect && activationZones.TryGetValue(rect, out var zone))
+            {
+                // Update StartPoint
+                var newStartPoint = new Point(Canvas.GetLeft(rect), Canvas.GetTop(rect));
+                zone.StartPoint = newStartPoint;
+
+                // Update Latitude/Longitude based on new position
+                var latlon = CanvasPixelsToLatLon(newStartPoint, latitude, longitude, zoom);
+                zone.Longitude = latlon.X;
+                zone.Latitude = latlon.Y;
+                UpdateActivationZoneBounds(zone);
+            }
+        }
+
+
+        //RMB release updater
+        private void TileCanvas_MouseRightButtonUp(object sender, MouseButtonEventArgs e)
+        {
+            if (selectedElement is Rectangle rect)
+            {
+
+            }
+            selectedElement = null;
+            TileCanvas.Cursor = Cursors.Arrow;
+        }
+
+
+
+        //Keystrokes (esc, arrows, etc.)
+        private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
+        {
+            //exit
+            if (e.Key == Key.Escape)
+            {
+                Application.Current.Shutdown();
+                e.Handled = true;
+                return;
+            }
+
+            //undo
+            if (e.Key == Key.Z && Keyboard.Modifiers.HasFlag(ModifierKeys.Control))
+            {
+                Undo();
+                e.Handled = true;
+                return;
+            }
+
+            //redo
+            if (e.Key == Key.Y && Keyboard.Modifiers.HasFlag(ModifierKeys.Control))
+            {
+                Redo();
+                e.Handled = true;
+                return;
+            }
+
+            //deletion
+            if (e.Key == Key.Delete && selectedElement != null)
+            {
+                TileCanvas.Children.Remove(selectedElement);
+
+                if (selectedElement is Ellipse ellipse)
+                {
+                    var pointToRemove = points.FirstOrDefault(p => p.Ellipse == ellipse);
+                    if (pointToRemove != null)
+                    {
+                        TileCanvas.Children.Remove(pointToRemove.Text);
+                        points.Remove(pointToRemove);
+                        RecalculateConnectionLine(); //recalculate the connection line after removing the point
+                    }
+                }
+                else if (selectedElement is TextBlock tb)
+                {
+                    var pointToRemove = points.FirstOrDefault(p => p.Text == tb);
+                    if (pointToRemove != null)
+                    {
+                        TileCanvas.Children.Remove(pointToRemove.Ellipse);
+                        points.Remove(pointToRemove);
+                        RecalculateConnectionLine();
+                    }
+                }
+                else if (selectedElement is Rectangle rect)
+                {
+                    var mapRect = mapRectangles.FirstOrDefault(r => r.Shape == rect);
+                    if (mapRect != null)
+                        mapRectangles.Remove(mapRect);
+
+                    if (activationZones.TryGetValue(rect, out var zone))
+                    {
+                        ActivationZonesCollection.Remove(zone);
+                        activationZones.Remove(rect);
+                    }
+
+                    TileCanvas.Children.Remove(rect);
+                }
+
+                selectedElement = null;
+                e.Handled = true;
+            }
+
+            //switching between trams
+            if (e.Key == Key.X)
+            {
+                currentDrawnTramIndex = 0;
+                e.Handled = true;
+                return;
+            }
+            if (e.Key == Key.C)
+            {
+                currentDrawnTramIndex = 1;
+                e.Handled = true;
+                return;
+            }
+        }
+
+
+        //checking for close points => drawing only one point on one place
+        private bool ArePointsClose(Point p1, Point p2, double threshold = 2.0)
+        {
+            return Math.Abs(p1.X - p2.X) < threshold && Math.Abs(p1.Y - p2.Y) < threshold;
+        }
+
+
+        //rewind drawing steps
+        private void LoadDawingStep(int step)
+        {
+            if (points.Count == 0) return;
+
+            foreach (var pt in points)
+            {
+                TileCanvas.Children.Remove(pt.Ellipse);
+                TileCanvas.Children.Remove(pt.Text);
+            }
+
+            connectionLine.Points.Clear();
+
+            for (int i = 0; i < Math.Min(step, points.Count); i++)
+            {
+                var pt = points[i];
+
+                if (!TileCanvas.Children.Contains(pt.Ellipse))
+                    TileCanvas.Children.Add(pt.Ellipse);
+
+                if (!TileCanvas.Children.Contains(pt.Text))
+                    TileCanvas.Children.Add(pt.Text);
+
+                connectionLine.Points.Add(pt.Position);
+            }
+        }
+
+       
+        //recalculating connection line between points after dragging or removing point(s)
+        private void RecalculateConnectionLine()
+        {
+            connectionLine.Points.Clear();
+
+            foreach (var pt in points)
+            {
+                connectionLine.Points.Add(pt.Position);
+            }
+        }
+
+
+        //Snapping position for rectangles etc. (main calculation)
+        private Point? GetSnapPosition(Point current)
+        {
+            foreach (var rect in mapRectangles)
+            {
+                var element = rect.Shape;
+
+                double x = Canvas.GetLeft(element);
+                double y = Canvas.GetTop(element);
+                double width = element.Width;
+                double height = element.Height;
+
+                var snapPoints = new List<Point>
+                {
+                    new Point(x, y),
+                    new Point(x + width, y),
+                    new Point(x, y + height),
+                    new Point(x + width, y + height),
+                    new Point(x + width / 2, y + height / 2)
+                };
+
+                foreach (var p in snapPoints)
+                {
+                    if (Math.Abs(p.X - current.X) < SnapThreshold &&
+                        Math.Abs(p.Y - current.Y) < SnapThreshold)
+                    {
+                        return p;
+                    }
+                }
+            }
+
+            return null;
+        }
+
+
+        //updating thickness of rectangles on mouse events
+        private void Rectangle_MouseEnter(object sender, MouseEventArgs e)
+        {
+            if (isSelectionMode)
+            {
+                if (sender is Rectangle rect)
+                {
+                    rect.StrokeThickness = 5;
+                }
+            }
+        }
+
+        private void Rectangle_MouseLeave(object sender, MouseEventArgs e)
+        {
+            if (isSelectionMode)
+            {
+                if (sender is Rectangle rect)
+                {
+                    rect.StrokeThickness = 2;
+                }
+            }
+        }
+
+        private void Rectangle_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            // Výběr povol pouze v režimu výběru
+            if (!isSelectionMode)
+            {
+                // V režimu kreslení neprováděj žádnou akci (neblokuj další kreslení)
+                return;
+            }
+
+            var rectangle = sender as Rectangle;
+            if (rectangle != null)
+            {
+                SelectElement(rectangle);
+            }
+
+            e.Handled = true;
+        }
+
+        private void UpdateHitTestForSelectableElements()
+        {
+            bool allowSelection = isSelectionMode || currentDrawingMode == DrawingMode.Rectangle;
+
+            foreach (var rect in TileCanvas.Children.OfType<Rectangle>())
+            {
+                rect.IsHitTestVisible = allowSelection;
+            }
+
+        }
+
+
+        private void SetDrawingMode(DrawingMode mode)
+        {
+            currentDrawingMode = mode;
+            isSelectionMode = false;
+            UpdateHitTestForSelectableElements();
+        }
+
+
+        private void SetSelectionMode()
+        {
+            isSelectionMode = true;
+            currentDrawingMode = DrawingMode.None;
+            UpdateHitTestForSelectableElements();
+        }
+
+
+        //activation zone handler
+        private void ActivationZone_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            e.Handled = true;
+        }
+
+
+        // srv radius circle drawing
+        private void DrawRadiusCircle()
+        {
+            if (RadiusComboBox.SelectedItem is ComboBoxItem selectedItem &&
+                double.TryParse(selectedItem.Content.ToString(), out double radiusMeters) &&
+                srvLatitude.HasValue && srvLongitude.HasValue)
+            {
+                double mpp = MetersPerPixel(srvLatitude.Value, zoom);
+                double radiusPixels = radiusMeters / mpp;
+
+                var (x, y) = ConvertLatLonToCanvasXY(srvLatitude.Value, srvLongitude.Value);
+                Point rsuCenter = new Point(x, y);
+
+
+                if (radiusEllipse != null)
+                    TileCanvas.Children.Remove(radiusEllipse);
+
+                radiusEllipse = new Ellipse
+                {
+                    Width = radiusPixels * 2,
+                    Height = radiusPixels * 2,
+                    Stroke = Brushes.Black,
+                    StrokeThickness = 1,
+                    Fill = new SolidColorBrush(Color.FromArgb(50, 0, 0, 0)),
+                    IsHitTestVisible = false
+                };
+
+                Canvas.SetLeft(radiusEllipse, rsuCenter.X - radiusPixels);
+                Canvas.SetTop(radiusEllipse, rsuCenter.Y - radiusPixels);
+
+                TileCanvas.Children.Add(radiusEllipse);
+                Panel.SetZIndex(radiusEllipse, 1);
+            }
+            else
+            {
+                Console.WriteLine("Circle cannot be drawn - missing coordinates");
+            }
+        }
+
+
+        // Cleanup old vehicles that haven't been updated in the last 60 seconds
+        private void CleanupOldVehicles(object sender, EventArgs e)
+        {
+            var now = DateTime.Now;
+
+            // 1. Mazání běžných tramvají z tabulky a canvasu po 23 s
+            var toRemoveFromTable = TramTable
+                .Where(t => (now - t.LastMessageTimestamp)?.TotalSeconds > 23)
+                .ToList();
+
+            foreach (var item in toRemoveFromTable)
+            {
+                // Pokud je to ručně kreslená tramvaj, NEMAŽ z tabulky (řešíme níže)
+                if (drawnTramIds.Any(id => id.EndsWith(item.VehicleId)))
+                    continue;
+
+                // Najdi odpovídající MapPoint v activeVehicles a smaž z canvasu
+                var vehicleId = activeVehicles.Keys.FirstOrDefault(k => k.EndsWith(item.VehicleId));
+                if (vehicleId != null && activeVehicles.TryGetValue(vehicleId, out var vehicle))
+                {
+                    RemoveVehicleCompletely(vehicleId, vehicle);
+                }
+                TramTable.Remove(item);
+            }
+
+            // 2. Mazání drawnTrams (ručně kreslené tramvaje) podle timeoutu
+            for (int i = 0; i < drawnTrams.Length; i++)
+            {
+                var tram = drawnTrams[i];
+                if (tram == null) continue;
+
+                if (tram.IsRecorded)
+                {
+                    // IMPORTANT: do not remove recorded (playback) trams while playback is running
+                    if (isPlaying) continue;
+
+                    if ((now - tram.LastUpdate).TotalSeconds > 60)
+                    {
+                        RemoveDrawnTramCompletely(i, tram);
+                    }
+                }
+                else
+                {
+                    // existing non-recorded cleanup ...
+                    if ((now - tram.LastUpdate).TotalSeconds > 10 && drawnTramTrails[i] != null && drawnTramTrails[i].Points.Count > 0)
+                    {
+                        string tramKey = $"drawn_{i}_trail";
+                        if (!vehicleTrailCleanupTokens.ContainsKey(tramKey))
+                        {
+                            var cts = new CancellationTokenSource();
+                            vehicleTrailCleanupTokens[tramKey] = cts;
+                            _ = RemoveDrawnTramTrailGradually(i, tram, cts.Token);
+                        }
+                    }
+
+                    if ((now - tram.LastUpdate).TotalSeconds > 23)
+                    {
+                        RemoveDrawnTramCompletely(i, tram);
+                    }
+                }
+            }
+
+            // 3. Mazání ostatních vozidel z activeVehicles po 10 s (např. auta, která nejsou tramvaje)
+            var toRemove = activeVehicles
+                .Where(kvp => (now - kvp.Value.LastUpdate).TotalSeconds > 10)
+                .Select(kvp => kvp.Key)
+                .ToList();
+
+            foreach (var vehicleId in toRemove)
+            {
+                if (!activeVehicles.TryGetValue(vehicleId, out var vehicle))
+                    continue;
+
+                if (vehicle.Ellipse?.Tag?.ToString() == "Srv")
+                    continue;
+
+                bool isTram = vehicle.Ellipse?.Tag?.ToString() == "Tram";
+                if (!isTram)
+                {
+                    RemoveVehicleCompletely(vehicleId, vehicle);
+                    continue;
+                }
+
+                double speed = -1;
+                if (vehicle.Speed != null && double.TryParse(vehicle.Speed.Text.Replace("km/h", "").Trim(), out double parsedSpeed))
+                    speed = parsedSpeed;
+
+                if (vehicleTrailCleanupTokens.ContainsKey(vehicleId))
+                    continue;
+
+                if (speed == 0 || speed < 0)
+                {
+                    var cts = new CancellationTokenSource();
+                    vehicleTrailCleanupTokens[vehicleId] = cts;
+                    _ = RemoveTrailGradually(vehicleId, vehicle, cts.Token);
+                }
+                else
+                {
+                    RemoveVehicleCompletely(vehicleId, vehicle);
+                }
+            }
+        }
+
+        private void RemoveVehicleCompletely(string vehicleId, MapPoint vehicle)
+        {
+            Dispatcher.Invoke(() =>
+            {
+                TileCanvas.Children.Remove(vehicle.Ellipse);
+                TileCanvas.Children.Remove(vehicle.Text);
+                if (vehicle.Speed != null)
+                    TileCanvas.Children.Remove(vehicle.Speed);
+
+                var linesToRemove = TileCanvas.Children.OfType<Polyline>()
+                    .Where(pl => pl.Tag != null && string.Equals(pl.Tag.ToString(), $"tram_trail_{vehicleId}", StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+
+                foreach (var line in linesToRemove)
+                    TileCanvas.Children.Remove(line);
+
+                if (vehicle.TrailDots != null)
+                {
+                    foreach (var dot in vehicle.TrailDots)
+                        TileCanvas.Children.Remove(dot);
+                    vehicle.TrailDots.Clear();
+                }
+
+                activeVehicles.Remove(vehicleId);
+
+                // Bezpečně zrušit a odstranit cleanup token
+                if (vehicleTrailCleanupTokens.TryGetValue(vehicleId, out var cts))
+                {
+                    cts.Cancel();
+                    cts.Dispose();
+                    vehicleTrailCleanupTokens.Remove(vehicleId);
+                }
+
+                // Odstranění záznamu z TramTable
+                var tramInfo = TramTable.FirstOrDefault(t => t.VehicleId == (vehicleId.Length > 4 ? vehicleId[^4..] : vehicleId));
+                if (tramInfo != null)
+                    TramTable.Remove(tramInfo);
+            });
+        }
+
+        private void RemoveDrawnTramCompletely(int idx, MapPoint tram)
+        {
+            Dispatcher.Invoke(() =>
+            {
+                if (tram.Ellipse != null)
+                    TileCanvas.Children.Remove(tram.Ellipse);
+                if (tram.Text != null)
+                    TileCanvas.Children.Remove(tram.Text);
+                if (drawnTramTrails[idx] != null)
+                    TileCanvas.Children.Remove(drawnTramTrails[idx]);
+                if (tram.TrailDots != null)
+                {
+                    foreach (var dot in tram.TrailDots)
+                        TileCanvas.Children.Remove(dot);
+                    tram.TrailDots.Clear();
+                }
+
+                if (tram.Speed != null)
+                    TileCanvas.Children.Remove(tram.Speed);
+
+                drawnTramTrailPoints[idx].Clear();
+                drawnTrams[idx] = null;
+
+                // Bezpečně zrušit a odstranit cleanup token
+                string tramKey = $"drawn_{idx}";
+                if (vehicleTrailCleanupTokens.TryGetValue(tramKey, out var cts))
+                {
+                    cts.Cancel();
+                    cts.Dispose();
+                    vehicleTrailCleanupTokens.Remove(tramKey);
+                }
+
+                // Odstranění záznamu z TramTable
+                var tramInfo = TramTable.FirstOrDefault(t => t.VehicleId == (tram.Label.Length > 4 ? tram.Label[^4..] : tram.Label));
+                if (tramInfo != null)
+                    TramTable.Remove(tramInfo);
+            });
+        }
+
+        // Asynchronní metoda pro postupné mazání trailu (od konce)
+        private async Task RemoveTrailGradually(string vehicleId, MapPoint vehicle, CancellationToken token)
+        {
+            try
+            {
+                while (true)
+                {
+                    bool hadTrail = false;
+                    Dispatcher.Invoke(() =>
+                    {
+                        var trail = TileCanvas.Children.OfType<Polyline>()
+                            .FirstOrDefault(pl => pl.Tag != null && pl.Tag.ToString() == $"tram_trail_{vehicleId}");
+
+                        if (trail != null && trail.Points.Count > 1)
+                        {
+                            trail.Points.RemoveAt(0);
+                            hadTrail = true;
+
+                            if (vehicle.TrailDots != null && vehicle.TrailDots.Count > 0)
+                            {
+                                TileCanvas.Children.Remove(vehicle.TrailDots[0]);
+                                vehicle.TrailDots.RemoveAt(0);
+                            }
+                        }
+                        else if (trail != null && trail.Points.Count == 1)
+                        {
+                            TileCanvas.Children.Remove(trail);
+                            hadTrail = true;
+                        }
+                    });
+
+                    if (!hadTrail)
+                        break;
+
+                    await Task.Delay(2000, token);
+                }
+
+                // POZOR: Po skončení cyklu smaž všechny zbývající tečky!
+                Dispatcher.Invoke(() =>
+                {
+                    if (vehicle.TrailDots != null && vehicle.TrailDots.Count > 0)
+                    {
+                        foreach (var dot in vehicle.TrailDots.ToList())
+                        {
+                            TileCanvas.Children.Remove(dot);
+                        }
+                        vehicle.TrailDots.Clear();
+                    }
+                });
+
+                RemoveVehicleCompletely(vehicleId, vehicle);
+            }
+            catch (TaskCanceledException)
+            {
+                // Přerušeno (přišla nová zpráva)
+            }
+        }
+
+        private async Task RemoveDrawnTramTrailGradually(int idx, MapPoint tram, CancellationToken token)
+        {
+            try
+            {
+                while (true)
+                {
+                    bool hadTrail = false;
+                    Dispatcher.Invoke(() =>
+                    {
+                        var trail = drawnTramTrails[idx];
+
+                        if (trail != null && trail.Points.Count > 1)
+                        {
+                            trail.Points.RemoveAt(0);
+                            hadTrail = true;
+
+                            if (tram.TrailDots != null && tram.TrailDots.Count > 0)
+                            {
+                                TileCanvas.Children.Remove(tram.TrailDots[0]);
+                                tram.TrailDots.RemoveAt(0);
+                            }
+                        }
+                        else if (trail != null && trail.Points.Count == 1)
+                        {
+                            TileCanvas.Children.Remove(trail);
+                            hadTrail = true;
+                        }
+                    });
+
+                    if (!hadTrail)
+                        break;
+
+                    await Task.Delay(2000, token);
+                }
+
+                // POZOR: Po skončení cyklu smaž všechny zbývající tečky!
+                Dispatcher.Invoke(() =>
+                {
+                    if (tram.TrailDots != null && tram.TrailDots.Count > 0)
+                    {
+                        foreach (var dot in tram.TrailDots.ToList())
+                        {
+                            TileCanvas.Children.Remove(dot);
+                        }
+                        tram.TrailDots.Clear();
+                    }
+                });
+
+                RemoveDrawnTramCompletely(idx, tram);
+            }
+            catch (TaskCanceledException)
+            {
+                // Přerušeno (přišla nová zpráva)
+            }
+        }
+
+        //Undo and redo (for the key button function via. above)
+        private void AddUndoRedo(Action undo, Action redo)
+        {
+            undoStack.Push(undo);
+            redoStack.Clear();
+        }
+
+
+        private void Undo()
+        {
+            if (undoStack.Count > 0)
+            {
+                var action = undoStack.Pop();
+                action.Invoke();
+                redoStack.Push(action);
+            }
+        }
+
+
+        private void Redo()
+        {
+            if (redoStack.Count > 0)
+            {
+                var action = redoStack.Pop();
+                action.Invoke();
+                undoStack.Push(action);
+            }
+        }
+
+
+        //element selection and deselection
+        private void SelectElement(UIElement element)
+        {
+            // Deselect only if selecting a different element
+            if (selectedElement != null && selectedElement != element)
+                DeselectElement();
+
+            selectedElement = element;
+
+            if (element is Rectangle rect)
+            {
+                selectedRectangle = rect;
+                rect.Stroke = Brushes.Gold;
+            }
+            else
+            {
+                selectedRectangle = null;
+            }
+        }
+
+        private void DeselectElement()
+        {
+            if (selectedElement is Rectangle rect)
+            {
+                // Restore the color from the ActivationZone if available
+                if (activationZones.TryGetValue(rect, out var zone))
+                {
+                    try
+                    {
+                        var brush = (Brush)new BrushConverter().ConvertFromString(zone.Color);
+                        rect.Stroke = brush;
+                    }
+                    catch
+                    {
+                        rect.Stroke = Brushes.Red; // fallback color
+                    }
+                }
+                else
+                {
+                    rect.Stroke = Brushes.Red; // fallback color if not in activationZones
+                }
+            }
+            else if (selectedElement is Shape shape)
+            {
+                shape.Stroke = Brushes.Red; // fallback for other shapes
+            }
+
+            selectedElement = null;
+            selectedRectangle = null;
+        }
+
+
+        //||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+        // METHODS FOR THE CAM AND SRV STATUSES
+
+        // increment cam ok messages count (crc must be ok)
+        private void IncrementCamOkCount()
+        {
+            camOkCount++;
+
+            Dispatcher.Invoke(() =>
+                CamOkLabel.Content = $"CAM OK: {camOkCount}");
+        }
+
+        //increment cam error messages count (crc is not ok)
+        private void IncrementCamErrorCount()
+        {
+            camErrorCount++;
+
+            Dispatcher.Invoke(() =>
+            {
+                CamErrorLabel.Content = $"CAM Errors: {camErrorCount}";
+            });
+        }
+
+        // increment srv ok messages count
+        private void IncrementSrvOkCount()
+        {
+            srvOkCount++;
+
+            Dispatcher.Invoke(() =>
+                SrvOkLabel.Content = $"SRV OK: {srvOkCount}");
+        }
+
+        // increment srv error messages count
+        private void IncrementSrvErrorCount()
+        {
+            srvErrorCount++;
+            Dispatcher.Invoke(() =>
+                SrvErrorLabel.Content = $"SRV Errors: {srvErrorCount}");
+        }
+
+
+
+        //||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+        // METHODS FOR EXPORTING AND SAVING
+
+
+        //Exporting canvas into an image
+        private void ExportCanvasToPng(Canvas canvas, string filePath)
+        {
+            int width = (int)canvas.ActualWidth;
+            int height = (int)canvas.ActualHeight;
+            int dpi = 96;
+
+            if (width == 0 || height == 0)
+            {
+                Console.WriteLine("Canvas size is zero, export skipped.");
+                return;
+            }
+
+            canvas.Measure(new Size(width, height));
+            canvas.Arrange(new Rect(new Size(width, height)));
+            canvas.UpdateLayout();
+
+            RenderTargetBitmap rtb = new RenderTargetBitmap(width, height, dpi, dpi, PixelFormats.Pbgra32);
+
+            var dv = new DrawingVisual();
+
+            using (var dc = dv.RenderOpen())
+            {
+                dc.PushTransform(canvas.RenderTransform);
+
+                var vb = new VisualBrush(canvas);
+                dc.DrawRectangle(vb, null, new Rect(new Point(), new Size(width, height)));
+
+                dc.Pop();
+            }
+
+            rtb.Render(dv);
+
+            PngBitmapEncoder encoder = new PngBitmapEncoder();
+            encoder.Frames.Add(BitmapFrame.Create(rtb));
+
+            using (var stream = new FileStream(filePath, FileMode.Create))
+            {
+                encoder.Save(stream);
+            }
+
+            Console.WriteLine($"Export completed: {filePath}");
+        }
+
+
+        //saving map into an XML file (lines, rectangles, points)
+        private void SaveXML(string filePath)
+        {
+            // Uložení středu mapy do XML (InvariantCulture)
+            XElement root = new XElement("MapData",
+                new XAttribute("CenterLatitude", latitude.ToString(CultureInfo.InvariantCulture)),
+                new XAttribute("CenterLongitude", longitude.ToString(CultureInfo.InvariantCulture)),
+                new XAttribute("Zoom", zoom.ToString(CultureInfo.InvariantCulture))
+            );
+
+            // Uložení aktivačních zón
+            XElement zonesElement = new XElement("ActivationZones");
+            foreach (var kvp in activationZones)
+            {
+                var zone = kvp.Value;
+                double startX = zone.StartPoint.X;
+                double startY = zone.StartPoint.Y;
+                var latlon = CanvasPixelsToLatLon(new Point(startX, startY), latitude, longitude, zoom);
+
+                zonesElement.Add(new XElement("Zone",
+                    new XAttribute("Name", zone.Name),
+                    new XAttribute("Latitude", latlon.Y.ToString(CultureInfo.InvariantCulture)),
+                    new XAttribute("Longitude", latlon.X.ToString(CultureInfo.InvariantCulture)),
+                    new XAttribute("StartX", startX.ToString(CultureInfo.InvariantCulture)),
+                    new XAttribute("StartY", startY.ToString(CultureInfo.InvariantCulture)),
+                    new XAttribute("Width", zone.Width.ToString(CultureInfo.InvariantCulture)),
+                    new XAttribute("Height", zone.Height.ToString(CultureInfo.InvariantCulture)),
+                    new XAttribute("Azimuth", zone.Azimuth.ToString(CultureInfo.InvariantCulture)),
+                    new XAttribute("Color", zone.Color)
+                ));
+            }
+            root.Add(zonesElement);
+
+            // Uložení kolejí (Line) – také InvariantCulture
+            XElement railwaysElement = new XElement("Railways");
+            foreach (var line in railwayLines)
+            {
+                railwaysElement.Add(new XElement("Line",
+                    new XAttribute("X1", line.X1.ToString(CultureInfo.InvariantCulture)),
+                    new XAttribute("Y1", line.Y1.ToString(CultureInfo.InvariantCulture)),
+                    new XAttribute("X2", line.X2.ToString(CultureInfo.InvariantCulture)),
+                    new XAttribute("Y2", line.Y2.ToString(CultureInfo.InvariantCulture)),
+                    new XAttribute("Stroke", ((SolidColorBrush)line.Stroke).Color.ToString()),
+                    new XAttribute("StrokeThickness", line.StrokeThickness.ToString(CultureInfo.InvariantCulture))
+                ));
+            }
+            root.Add(railwaysElement);
+
+            if (recordedCamMessages.Count > 0)
+            {
+                XElement camMessagesElement = new XElement("CamMessages");
+                foreach (var cam in recordedCamMessages)
+                    camMessagesElement.Add(XElement.Parse(cam));
+                root.Add(camMessagesElement);
+            }
+
+            using (var writer = XmlWriter.Create(filePath, new XmlWriterSettings { Indent = true, OmitXmlDeclaration = true }))
+            {
+                root.Save(writer);
+            }
+        }
+
+
+        //loading XML file
+        private async void LoadXML(string filePath)
+        {
+            if (!File.Exists(filePath)) return;
+
+            isPlaying = false;
+            playbackTimer?.Stop();
+
+            XElement root = XElement.Load(filePath);
+
+            // Nastav střed mapy a zoom podle uložených hodnot
+            // In LoadXML, right after parsing CenterLatitude/CenterLongitude/Zoom and before LoadTiles(...)
+            if (root.Attribute("CenterLatitude") != null)
+                latitude = double.Parse(root.Attribute("CenterLatitude").Value, CultureInfo.InvariantCulture);
+            if (root.Attribute("CenterLongitude") != null)
+                longitude = double.Parse(root.Attribute("CenterLongitude").Value, CultureInfo.InvariantCulture);
+            if (root.Attribute("Zoom") != null)
+                zoom = int.Parse(root.Attribute("Zoom").Value, CultureInfo.InvariantCulture);
+
+            // Sync Mapsettings and TextBoxes to loaded center without firing RefreshMap
+            Mapsettings.Latitude = latitude;
+            Mapsettings.Longitude = longitude;
+            LatitudeBox.TextChanged -= LatitudeBox_TextChanged;
+            LongitudeBox.TextChanged -= LongitudeBox_TextChanged;
+            LatitudeBox.Text = latitude.ToString("F6", CultureInfo.InvariantCulture);
+            LongitudeBox.Text = longitude.ToString("F6", CultureInfo.InvariantCulture);
+            LatitudeBox.TextChanged += LatitudeBox_TextChanged;
+            LongitudeBox.TextChanged += LongitudeBox_TextChanged;
+
+            // Now load tiles for the loaded center/zoom
+            var (centerX, centerY) = LatLonToTileXY(latitude, longitude, zoom);
+            await LoadTiles(centerX - TileCount / 2, centerY - TileCount / 2);
+
+            // Načtení aktivačních zón
+            var zonesElement = root.Element("ActivationZones");
+            if (zonesElement != null)
+            {
+                foreach (var zoneElem in zonesElement.Elements("Zone"))
+                {
+                    string name = zoneElem.Attribute("Name")?.Value ?? "Unnamed";
+                    double latitudeZone = double.Parse(zoneElem.Attribute("Latitude")?.Value ?? "0", CultureInfo.InvariantCulture);
+                    double longitudeZone = double.Parse(zoneElem.Attribute("Longitude")?.Value ?? "0", CultureInfo.InvariantCulture);
+                    double width = double.Parse(zoneElem.Attribute("Width")?.Value ?? "0", CultureInfo.InvariantCulture);
+                    double height = double.Parse(zoneElem.Attribute("Height")?.Value ?? "0", CultureInfo.InvariantCulture);
+                    int azimuth = int.Parse(zoneElem.Attribute("Azimuth")?.Value ?? "0");
+                    string color = zoneElem.Attribute("Color")?.Value ?? "#FF0000";
+
+                    double startXZone = double.Parse(zoneElem.Attribute("StartX")?.Value ?? "0", CultureInfo.InvariantCulture);
+                    double startYZone = double.Parse(zoneElem.Attribute("StartY")?.Value ?? "0", CultureInfo.InvariantCulture);
+                    Point startPoint = new Point(startXZone, startYZone);
+
+                    Console.WriteLine($"[LoadXML] Zone '{name}' StartPoint: X={startPoint.X:F2}, Y={startPoint.Y:F2}");
+
+                    double mpp = MetersPerPixel(latitude, zoom);
+                    double widthPx = width / mpp;
+                    double heightPx = height / mpp;
+
+                    var rect = new Rectangle
+                    {
+                        Stroke = (SolidColorBrush)(new BrushConverter().ConvertFromString(color)),
+                        StrokeThickness = 2,
+                        Fill = Brushes.Transparent,
+                        Tag = "DrawnRectangle",
+                        Uid = name,
+                        Width = widthPx,
+                        Height = heightPx
+                    };
+
+                    var activationZone = new ActivationZone
+                    {
+                        Name = name,
+                        Latitude = latitudeZone,
+                        Longitude = longitudeZone,
+                        Width = width,
+                        Height = height,
+                        Azimuth = azimuth,
+                        Color = color,
+                        Rectangle = rect,
+                        StartPoint = startPoint
+                    };
+
+                    // Nastav Bounds podle pozice na Canvasu
+                    activationZones[rect] = activationZone;
+                    ActivationZonesCollection.Add(activationZone);
+                    activationZone.PropertyChanged += ActivationZone_PropertyChanged;
+
+                    UpdateRectanglePositionFromStartPoint(activationZone);
+                    TileCanvas.Children.Add(rect);
+                    UpdateActivationZoneBounds(activationZone);
+
+                }
+
+                recordedCamMessages.Clear();
+                var camMessagesElement = root.Element("CamMessages");
+                if (camMessagesElement != null)
+                {
+                    foreach (var camElem in camMessagesElement.Elements("CAM"))
+                    {
+                        // Ulož původní XML text včetně formátování
+                        recordedCamMessages.Add(camElem.ToString(SaveOptions.DisableFormatting));
+                    }
+                }
+
+                isDirty = false;
+
+                
+            }
+
+            // Načtení kolejí (Line)
+            var railwaysElement = root.Element("Railways");
+            if (railwaysElement != null)
+            {
+                railwayLines.Clear();
+                foreach (var lineElem in railwaysElement.Elements("Line"))
+                {
+                    Line line = new Line
+                    {
+                        X1 = double.Parse(lineElem.Attribute("X1")?.Value ?? "0", CultureInfo.InvariantCulture),
+                        Y1 = double.Parse(lineElem.Attribute("Y1")?.Value ?? "0", CultureInfo.InvariantCulture),
+                        X2 = double.Parse(lineElem.Attribute("X2")?.Value ?? "0", CultureInfo.InvariantCulture),
+                        Y2 = double.Parse(lineElem.Attribute("Y2")?.Value ?? "0", CultureInfo.InvariantCulture),
+                        Stroke = new SolidColorBrush(
+                            (Color)ColorConverter.ConvertFromString(lineElem.Attribute("Stroke")?.Value ?? "#000000")),
+                        StrokeThickness = double.Parse(lineElem.Attribute("StrokeThickness")?.Value ?? "1", CultureInfo.InvariantCulture),
+                        IsHitTestVisible = false
+                    };
+                    TileCanvas.Children.Add(line);
+                    railwayLines.Add(line);
+                }
+            }
+
+            foreach (var vehicle in activeVehicles.Values)
+            {
+                CheckActivationZones(vehicle.Position, vehicle.Label);
+            }
+
+            Console.WriteLine($"Loaded file: {filePath}");
+        }
+
+        private void UpdateActivationZoneBounds(ActivationZone zone)
+        {
+            var rect = zone.Rectangle;
+            double left = Canvas.GetLeft(rect);
+            double top = Canvas.GetTop(rect);
+            double width = rect.Width;
+            double height = rect.Height;
+            double angle = zone.Azimuth;
+
+            // Střed rotace (podle tvého kódu)
+            double centerX = left + width / 2.0;
+            double centerY = top + height;
+
+            // Rohy obdélníku před rotací (v Canvas souřadnicích)
+            var corners = new[]
+            {
+                new Point(left, top),
+                new Point(left + width, top),
+                new Point(left + width, top + height),
+                new Point(left, top + height)
+            };
+
+            // Rotace kolem (centerX, centerY)
+            double rad = angle * Math.PI / 180.0;
+            double cos = Math.Cos(rad);
+            double sin = Math.Sin(rad);
+
+            Point Rotate(Point p)
+            {
+                double dx = p.X - centerX;
+                double dy = p.Y - centerY;
+                double rx = dx * cos - dy * sin + centerX;
+                double ry = dx * sin + dy * cos + centerY;
+                return new Point(rx, ry);
+            }
+
+            var rotated = corners.Select(Rotate).ToArray();
+
+            double minX = rotated.Min(pt => pt.X);
+            double maxX = rotated.Max(pt => pt.X);
+            double minY = rotated.Min(pt => pt.Y);
+            double maxY = rotated.Max(pt => pt.Y);
+
+            zone.Bounds = new Rect(minX, minY, maxX - minX, maxY - minY);
+        }
+
+        //||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+        // PLAYBACK METHODS
+
+        //linear interpolation for playback
+        private double Lerp(double a, double b, double t)
+        {
+            return a + (b - a) * t;
+        }
+
+
+        //Playback timer ticks
+        private void PlaybackTimer_Tick(object? sender, EventArgs e)
+        {
+            Console.WriteLine($"Playback tick: {playbackElapsedTime}, tram1 frames: {drawnTrams[0]?.MovementFrames?.Count}, tram2 frames: {drawnTrams[1]?.MovementFrames?.Count}");
+            playbackElapsedTime = TimeSpan.FromTicks((long)((DateTime.Now - playbackStartTime).Ticks * playbackSpeedFactor));
+
+            UpdateTimerLabel();
+
+            // Přehrávání pro body
+            foreach (var pt in points)
+            {
+                if (pt.MovementFrames.Count == 0) continue;
+
+                var nextFrame = pt.MovementFrames.FirstOrDefault(f => f.Timestamp > playbackElapsedTime);
+
+                if (nextFrame == null)
+                {
+                    var last = pt.MovementFrames.Last();
+                    UpdatePointPosition(pt, last.Position);
+                    CheckActivationZones(last.Position, pt.Label);
+                    continue;
+                }
+
+                var prevFrame = pt.MovementFrames.LastOrDefault(f => f.Timestamp <= playbackElapsedTime);
+
+                if (prevFrame != null)
+                {
+                    double progress = (playbackElapsedTime - prevFrame.Timestamp).TotalMilliseconds /
+                                      (nextFrame.Timestamp - prevFrame.Timestamp).TotalMilliseconds;
+
+                    var interpolated = new Point(
+                        Lerp(prevFrame.Position.X, nextFrame.Position.X, progress),
+                        Lerp(prevFrame.Position.Y, nextFrame.Position.Y, progress)
+                    );
+
+                    UpdatePointPosition(pt, interpolated);
+                    CheckActivationZones(interpolated, pt.Label);
+                }
+            }
+
+            // Přehrávání pro ručně kreslené tramvaje
+            for (int idx = 0; idx < drawnTrams.Length; idx++)
+            {
+                var tram = drawnTrams[idx];
+                if (tram == null || tram.MovementFrames == null || tram.MovementFrames.Count == 0) continue;
+
+                MovementFrame prevFrame = null, nextFrame = null;
+                foreach (var frame in tram.MovementFrames)
+                {
+                    if (frame.Timestamp > playbackElapsedTime)
+                    {
+                        nextFrame = frame;
+                        break;
+                    }
+                    prevFrame = frame;
+                }
+
+                Point pos;
+                if (nextFrame == null && prevFrame != null)
+                {
+                    pos = prevFrame.Position;
+                }
+                else if (prevFrame != null && nextFrame != null)
+                {
+                    double progress = (playbackElapsedTime - prevFrame.Timestamp).TotalMilliseconds /
+                                      (nextFrame.Timestamp - prevFrame.Timestamp).TotalMilliseconds;
+                    pos = new Point(
+                        Lerp(prevFrame.Position.X, nextFrame.Position.X, progress),
+                        Lerp(prevFrame.Position.Y, nextFrame.Position.Y, progress)
+                    );
+                }
+                else
+                {
+                    continue;
+                }
+
+                if (tram.Ellipse != null) TileCanvas.Children.Remove(tram.Ellipse);
+                if (tram.Text != null) TileCanvas.Children.Remove(tram.Text);
+                if (drawnTramTrails[idx] != null) TileCanvas.Children.Remove(drawnTramTrails[idx]);
+                if (tram.TrailDots != null)
+                {
+                    foreach (var dot in tram.TrailDots)
+                        TileCanvas.Children.Remove(dot);
+                    tram.TrailDots.Clear();
+                }
+                else
+                {
+                    tram.TrailDots = new List<Ellipse>();
+                }
+
+                var ellipse = new Ellipse
+                {
+                    Width = 12,
+                    Height = 12,
+                    Fill = drawnTramColors[idx],
+                    Stroke = Brushes.Black,
+                    StrokeThickness = 1,
+                    IsHitTestVisible = false
+                };
+                Canvas.SetLeft(ellipse, pos.X - 6);
+                Canvas.SetTop(ellipse, pos.Y - 6);
+                TileCanvas.Children.Add(ellipse);
+
+                var text = new TextBlock
+                {
+                    Text = tram.Label?.Length > 4 ? tram.Label[^4..] : tram.Label,
+                    Foreground = drawnTramColors[idx],
+                    FontWeight = FontWeights.Bold,
+                    FontSize = 12,
+                    IsHitTestVisible = false
+                };
+                Canvas.SetLeft(text, pos.X + 5);
+                Canvas.SetTop(text, pos.Y - 10);
+                TileCanvas.Children.Add(text);
+
+                var trail = new Polyline
+                {
+                    Stroke = drawnTramColors[idx],
+                    StrokeThickness = 2,
+                    IsHitTestVisible = false
+                };
+                var playedFrames = tram.MovementFrames.Where(f => f.Timestamp <= playbackElapsedTime).ToList();
+                foreach (var frame in playedFrames)
+                    trail.Points.Add(frame.Position);
+                TileCanvas.Children.Add(trail);
+
+                for (int i = 0; i < playedFrames.Count - 1; i++)
+                {
+                    var dotPos = playedFrames[i].Position;
+                    var dot = new Ellipse { Width = 5, Height = 5, Fill = Brushes.Black, IsHitTestVisible = false };
+                    Canvas.SetLeft(dot, dotPos.X - 2.5);
+                    Canvas.SetTop(dot, dotPos.Y - 2.5);
+                    TileCanvas.Children.Add(dot);
+                    tram.TrailDots.Add(dot);
+                    Panel.SetZIndex(dot, 1001);
+                }
+
+                tram.Ellipse = ellipse;
+                tram.Text = text;
+                drawnTramTrails[idx] = trail;
+
+                CheckActivationZones(pos, tram.Label);
+                tram.LastUpdate = DateTime.Now;
+            }
+
+            bool allPointsDone = points.All(p => playbackElapsedTime > p.MovementFrames.LastOrDefault()?.Timestamp);
+            bool allTramsDone = drawnTrams.All(tram => tram == null || playbackElapsedTime > tram.MovementFrames.LastOrDefault()?.Timestamp);
+
+            if (allPointsDone && allTramsDone)
+            {
+                // LOOP: pokud je zaškrtnuto, resetuj a pokračuj
+                if (LoopCheckbox?.IsChecked == true && playbackMaxTime > TimeSpan.Zero)
+                {
+                    playbackElapsedTime = TimeSpan.Zero;
+                    playbackStartTime = DateTime.Now;
+                    if (!isSliderDragging)
+                        PlaybackSlider.Value = 0;
+                    UpdateTimerLabel();
+                    return; // timer běží dál, isPlaying zůstává true
+                }
+
+                playbackTimer.Stop();
+                isPlaying = false;
+
+                playbackElapsedTime = playbackMaxTime;
+                UpdateTimerLabel();
+            }
+
+            if (!isSliderDragging)
+            {
+                PlaybackSlider.Value = Math.Min(playbackElapsedTime.TotalSeconds, playbackMaxTime.TotalSeconds);
+            }
+        }
+
+
+        //start recording method
+        private void StartRecording()
+        {
+
+            MessageBox.Show("Recording started.");
+            isRecording = true;
+            recordingStartTime = DateTime.Now;
+            foreach (var pt in points)
+                pt.MovementFrames.Clear();
+        }
+
+
+        private void StopRecording()
+        {
+            isRecording = false;
+
+            // Nothing to save?
+            bool hasCam = recordedCamMessages.Count > 0;
+            bool hasZones = activationZones?.Count > 0;
+            bool hasRail = railwayLines?.Count > 0;
+
+            if (!hasCam && !hasZones && !hasRail)
+            {
+                MessageBox.Show("Nothing to save.");
+                return;
+            }
+
+            var dlg = new Microsoft.Win32.SaveFileDialog
+            {
+                FileName = "recording_with_zones.xml",
+                DefaultExt = ".xml",
+                Filter = "XML files (*.xml)|*.xml|All files (*.*)|*.*",
+                Title = "Save (Activation zones + CAM recording)"
+            };
+
+            bool? result = dlg.ShowDialog();
+            if (result == true)
+            {
+                SaveZonesAndCamRecording(dlg.FileName);
+                MessageBox.Show("Saved to:\n" + dlg.FileName, "Saved", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+
+            // Clear CAM buffer after offering to save
+            recordedCamMessages.Clear();
+        }
+
+
+        //updating point position on the map
+        private void UpdatePointPosition(MapPoint pt, Point pos)
+        {
+            Canvas.SetLeft(pt.Ellipse, pos.X - pt.Ellipse.Width / 2);
+            Canvas.SetTop(pt.Ellipse, pos.Y - pt.Ellipse.Height / 2);
+
+            Canvas.SetLeft(pt.Text, pos.X + 5);
+            Canvas.SetTop(pt.Text, pos.Y - 10);
+
+            pt.Position = pos;
+            RecalculateConnectionLine();
+        }
+
+        // Same structure as SaveXML, but also embeds recorded CAM messages in one go
+        private void SaveZonesAndCamRecording(string filePath)
+        {
+            XElement root = new XElement("MapData",
+                new XAttribute("CenterLatitude", latitude.ToString(CultureInfo.InvariantCulture)),
+                new XAttribute("CenterLongitude", longitude.ToString(CultureInfo.InvariantCulture)),
+                new XAttribute("Zoom", zoom.ToString(CultureInfo.InvariantCulture))
+            );
+
+            XElement zonesElement = new XElement("ActivationZones");
+            foreach (var kvp in activationZones)
+            {
+                var zone = kvp.Value;
+                double startX = zone.StartPoint.X;
+                double startY = zone.StartPoint.Y;
+                var latlon = CanvasPixelsToLatLon(new Point(startX, startY), latitude, longitude, zoom);
+
+                zonesElement.Add(new XElement("Zone",
+                    new XAttribute("Name", zone.Name),
+                    new XAttribute("Latitude", latlon.Y.ToString(CultureInfo.InvariantCulture)),
+                    new XAttribute("Longitude", latlon.X.ToString(CultureInfo.InvariantCulture)),
+                    new XAttribute("StartX", startX.ToString(CultureInfo.InvariantCulture)),
+                    new XAttribute("StartY", startY.ToString(CultureInfo.InvariantCulture)),
+                    new XAttribute("Width", zone.Width.ToString(CultureInfo.InvariantCulture)),
+                    new XAttribute("Height", zone.Height.ToString(CultureInfo.InvariantCulture)),
+                    new XAttribute("Azimuth", zone.Azimuth.ToString(CultureInfo.InvariantCulture)),
+                    new XAttribute("Color", zone.Color)
+                ));
+            }
+            root.Add(zonesElement);
+
+            // Railways – přidej vždy; prázdný Railways bude <Railways />
+            XElement railwaysElement = new XElement("Railways");
+            foreach (var line in railwayLines)
+            {
+                railwaysElement.Add(new XElement("Line",
+                    new XAttribute("X1", line.X1.ToString(CultureInfo.InvariantCulture)),
+                    new XAttribute("Y1", line.Y1.ToString(CultureInfo.InvariantCulture)),
+                    new XAttribute("X2", line.X2.ToString(CultureInfo.InvariantCulture)),
+                    new XAttribute("Y2", line.Y2.ToString(CultureInfo.InvariantCulture)),
+                    new XAttribute("Stroke", ((SolidColorBrush)line.Stroke).Color.ToString()),
+                    new XAttribute("StrokeThickness", line.StrokeThickness.ToString(CultureInfo.InvariantCulture))
+                ));
+            }
+            root.Add(railwaysElement);
+
+            if (recordedCamMessages.Count > 0)
+            {
+                XElement camMessagesElement = new XElement("CamMessages");
+                foreach (var cam in recordedCamMessages)
+                    camMessagesElement.Add(XElement.Parse(cam));
+                root.Add(camMessagesElement);
+            }
+
+            using (var writer = XmlWriter.Create(filePath, new XmlWriterSettings { Indent = true, OmitXmlDeclaration = true }))
+            {
+                root.Save(writer);
+            }
+        }
+
+        //||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+        // V2X MESSAGE METHODS
+
+
+        //V2X Listener !!!!
+        private async Task StartV2XListenerAsync(string portName, int baudRate)
+        {
+            try
+            {
+                serialPort = new SerialPort(portName, baudRate);
+                serialPort.NewLine = "\r\n"; //ending symbols for new line
+                serialPort.Encoding = Encoding.ASCII; //set encoding to ASCII
+                // serialPort.RtsEnable = true; //only if the port needs direction control
+
+                serialPort.Open();
+
+                while (serialPort.IsOpen)
+                {
+                    string rawLine = await ReadLineAsync(serialPort);
+                    if (string.IsNullOrWhiteSpace(rawLine)) continue;
+
+                    // Extract XML part (find first '<')
+                    int xmlStart = rawLine.IndexOf('<');
+                    if (xmlStart < 0) continue; // No XML found
+                    string rawXml = rawLine.Substring(xmlStart);
+
+                    try
+                    {
+                        var msg = V2XMessageParser.ParseV2XMessage(rawXml);
+
+                        if (msg.MessageType == "CAM")
+                        {
+                            if (IsValidCamMessage(rawXml))
+                                IncrementCamOkCount();
+                            else
+                                IncrementCamErrorCount();
+                        }
+
+                        Console.WriteLine($"[{msg.Timestamp:HH:mm:ss}] {msg.MessageType} ID={msg.MessageID}");
+                        //RedrawVehicleTrails();
+                        Dispatcher.Invoke(() => HandleV2XMessage(msg, rawXml));
+                    }
+                    catch (Exception ex)
+                    {
+                        IncrementCamErrorCount();
+                        Console.WriteLine($"Error parsing message: {ex.Message}\n {ex.StackTrace}");
+
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Dispatcher.Invoke(() =>
+                    MessageBox.Show($"Serial Port Listener Error: {ex.Message}")
+                );
+            }
+        }
+
+
+        //Asynchronous read line from serial port
+        private Task<string> ReadLineAsync(SerialPort port)
+        {
+            return Task.Run(() => port.ReadLine());
+        }
+
+
+        //Handling V2X messages !!!!!!!
+        private void HandleV2XMessage(V2XMessage msg, string rawXml)
+        {
+            if (msg.IsManual)
+                return;
+
+            if (msg.MessageType == "CAM" && msg.VehicleID.Length < 10)
+                return; // Ignore CAM messages with short VehicleID
+            
+
+            if (msg.MessageType == "CAM")
+            {
+                // přidání barev pro tramvaje
+                if (!vehicleColorMap.TryGetValue(msg.VehicleID, out Brush tramColor))
+                {
+                    int colorIndex = vehicleColorMap.Count % vehicleColors.Count;
+                    tramColor = vehicleColors[colorIndex];
+                    vehicleColorMap[msg.VehicleID] = tramColor;
+                }
+
+                if (!(msg.VehicleID?.StartsWith("000000") ?? false) || isPlaying == true)
+                {
+                    if (activeVehicles.TryGetValue(msg.VehicleID, out var point))
+                    {
+                        var (x, y) = ConvertLatLonToCanvasXY(msg.Latitude, msg.Longitude);
+                        point.Position = new Point(x, y);
+                        point.LastUpdate = DateTime.Now;
+                        UpdateVehicleCanvasPosition(point, new Point(x, y), tramColor, false, point.Label, msg.Speed);
+                    }
+                
+                    else
+                    {
+                        // převod GPS na souřadnice na canvasu
+                        var (x, y) = ConvertLatLonToCanvasXY(msg.Latitude, msg.Longitude);
+
+                        var ellipse = new Ellipse
+                        {
+                            Width = 12,
+                            Height = 12,
+                            Fill = tramColor,
+                            Tag = "Tram"
+                        };
+                        Canvas.SetLeft(ellipse, x - ellipse.Width / 2);
+                        Canvas.SetTop(ellipse, y - ellipse.Height / 2);
+
+                        var text = new TextBlock
+                        {
+                            Text = msg.VehicleID,
+                            Foreground = tramColor,
+                            FontWeight = FontWeights.Bold,
+                            Tag = "Tram"
+                        };
+                        Canvas.SetLeft(text, x + 8); 
+                        Canvas.SetTop(text, y - 6);
+
+                        var speedText = new TextBlock
+                        {
+                            Text = $"{msg.Speed:F1} km/h",
+                            Foreground = tramColor,
+                            FontWeight = FontWeights.Bold,
+                            Tag = "Tram"
+                        };
+                        Canvas.SetLeft(speedText, x + 8);
+                        Canvas.SetTop(speedText, y + 6);
+
+                        var newPoint = new MapPoint
+                        {
+                            Position = new Point(x, y),
+                            Label = msg.VehicleID,
+                            Ellipse = ellipse,
+                            Text = text,
+                            Speed = speedText,
+                            LastUpdate = DateTime.Now,
+                            VehicleColor = tramColor
+                        };
+
+                        activeVehicles[msg.VehicleID] = newPoint;
+
+                        TileCanvas.Children.Add(ellipse);
+                        TileCanvas.Children.Add(text);
+                        TileCanvas.Children.Add(speedText);
+                    }
+                }
+
+                // CAM times for the interval
+                if (lastCamTimes.TryGetValue(msg.VehicleID, out var lastTime))
+                {
+                    prevCamTimes[msg.VehicleID] = lastTime;
+                }
+                lastCamTimes[msg.VehicleID] = msg.Timestamp;
+
+                // Parsing XML
+                string statId = string.IsNullOrEmpty(msg.VehicleID) ? "-" : msg.VehicleID;
+                string lastRecTime = "-";
+
+                Console.WriteLine($"[CAM] statId={statId} lastRec={lastRecTime} {rawXml}");
+
+                string camIdShort = statId.Length > 4 ? statId[^4..] : statId;
+                CamIdLabel.Content = $"TRAM ID: {camIdShort}";
+
+                // Aktualizace datové tabulky
+                UpdateOrAddVehicleData(camIdShort, msg.Speed, msg.Timestamp);
+
+                // Valid cam messages count
+                bool isValid = IsValidCamMessage(rawXml);
+                if (isValid)
+                    IncrementCamOkCount();
+                else
+                    IncrementCamErrorCount();
+
+                if (!(msg.VehicleID?.StartsWith("000000") ?? false))
+                    UpdateVehicleTrail(msg);
+            }
+            else if (msg.MessageType == "SRV")
+            {
+                // logika pro SRV zůstává stejná
+                SRVMessage srvMsg = null;
+                bool isValid = false;
+                string logicalId = "-";
+                string lastRecTime = "-";
+
+                try
+                {
+                    srvMsg = SRVMessage.ParseSrvMessage(rawXml);
+                    if (srvMsg != null)
+                    {
+                        logicalId = srvMsg.LogicalId ?? "-";
+                        lastRecTime = srvMsg.Dt.ToString("HH:mm:ss");
+                        isValid = !string.IsNullOrEmpty(srvMsg.Crc) && srvMsg.Crc != "0";
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine("SRV XML parse error: " + ex.Message);
+                }
+
+                LastSrvLabel.Content = $"Last SRV: {lastRecTime}";
+                SrvIdLabel.Content = $"SRV ID: {logicalId}";
+
+                if (isValid)
+                    IncrementSrvOkCount();
+                else
+                    IncrementSrvErrorCount();
+
+                if (!string.IsNullOrEmpty(logicalId))
+                {
+                    var srvV2xMsg = new V2XMessage
+                    {
+                        VehicleID = logicalId,
+                        Timestamp = srvMsg?.Dt ?? DateTime.Now,
+                        Latitude = srvMsg?.Latitude ?? 0,
+                        Longitude = srvMsg?.Longitude ?? 0,
+                        MessageType = "SRV"
+                    };
+
+                    if (srvV2xMsg.Latitude != 0 && srvV2xMsg.Longitude != 0)
+                    {
+                        srvLatitude = srvV2xMsg.Latitude;
+                        srvLongitude = srvV2xMsg.Longitude;
+                    }
+
+                    if (activeVehicles.TryGetValue(srvV2xMsg.VehicleID, out var point))
+                    {
+                        point.Position = new Point(srvV2xMsg.Longitude, srvV2xMsg.Latitude);
+                        point.LastUpdate = DateTime.Now;
+                    }
+                    else
+                    {
+                        var ellipse = new Ellipse
+                        {
+                            Width = 12,
+                            Height = 12,
+                            Fill = Brushes.Red,
+                            Tag = "Srv"
+                        };
+
+                        var text = new TextBlock
+                        {
+                            Text = srvV2xMsg.VehicleID,
+                            FontWeight = FontWeights.Bold,
+                            Foreground = Brushes.Black,
+                            Tag = "Srv"
+                        };
+
+                        var newPoint = new MapPoint
+                        {
+                            Position = new Point(srvV2xMsg.Longitude, srvV2xMsg.Latitude),
+                            Label = srvV2xMsg.VehicleID,
+                            Ellipse = ellipse,
+                            Text = text,
+                            LastUpdate = DateTime.Now
+                        };
+
+                        activeVehicles[srvV2xMsg.VehicleID] = newPoint;
+
+                        TileCanvas.Children.Add(ellipse);
+                        TileCanvas.Children.Add(text);
+                    }
+
+                    UpdateVehicleTrail(srvV2xMsg);
+                }
+            }
+        }
+
+
+
+        // updating points and vehicle trails on the map
+        private void UpdateVehicleTrail(V2XMessage msg)
+        {
+            var isSrv = msg.MessageType == "SRV";
+
+            if (msg.IsManual)
+                return;
+
+            Brush tramColor;
+            if (isSrv)
+            {
+                tramColor = Brushes.Red; // RSU always red
+            }
+            else
+            {
+                if (!vehicleColorMap.TryGetValue(msg.VehicleID, out tramColor))
+                {
+                    int colorIndex = vehicleColorMap.Count % vehicleColors.Count;
+                    Brush candidateColor = vehicleColors[colorIndex];
+                    if (candidateColor == Brushes.Red || candidateColor == Brushes.Black)
+                    {
+                        colorIndex = (colorIndex + 1) % vehicleColors.Count;
+                        candidateColor = vehicleColors[colorIndex];
+                    }
+                    tramColor = candidateColor;
+                    vehicleColorMap[msg.VehicleID] = tramColor;
+                }
+            }
+
+            if (!activeVehicles.TryGetValue(msg.VehicleID, out var vehicle))
+            {
+                var ellipse = new Ellipse
+                {
+                    Width = 12,
+                    Height = 12,
+                    Fill = tramColor
+                };
+
+                var text = new TextBlock
+                {
+                    Text = isSrv ? msg.VehicleID : (msg.VehicleID?.Length > 4 ? msg.VehicleID[^4..] : msg.VehicleID),
+                    FontWeight = FontWeights.Bold,
+                    Foreground = isSrv ? Brushes.Black : tramColor
+                };
+
+                var speedtext = new TextBlock
+                {
+                    Text = "",
+                    FontWeight = FontWeights.Bold,
+                    Foreground = isSrv ? Brushes.Black : tramColor
+                };
+
+                TileCanvas.Children.Add(ellipse);
+                TileCanvas.Children.Add(text);
+                TileCanvas.Children.Add(speedtext);
+
+                vehicle = new MapPoint 
+                {
+                    Label = msg.VehicleID,
+                    Ellipse = ellipse,
+                    Speed = speedtext,
+                    Text = text,
+                    MovementFrames = new List<MovementFrame>()
+                };
+
+                activeVehicles[msg.VehicleID] = vehicle;
+            }
+
+            var (x, y) = ConvertLatLonToCanvasXY(msg.Latitude, msg.Longitude);
+
+            var frame = new MovementFrame
+            {
+                Timestamp = msg.Timestamp.TimeOfDay,
+                Position = new Point(x, y)
+            };
+
+            if (vehicle.MovementFrames.Count >= 6)
+                vehicle.MovementFrames.RemoveAt(0);
+
+            vehicle.MovementFrames.Add(frame);
+
+            if (vehicle.TrailDots == null)
+                vehicle.TrailDots = new List<Ellipse>();
+
+            if (vehicle.TrailDots.Count >= 5)
+            {
+                var dotToRemove = vehicle.TrailDots[0];
+                TileCanvas.Children.Remove(dotToRemove);
+                vehicle.TrailDots.RemoveAt(0);
+            }
+
+            if (vehicle.MovementFrames.Count > 1 && !isSrv)
+            {
+                var prevFrame = vehicle.MovementFrames[vehicle.MovementFrames.Count - 2];
+                var trailDot = new Ellipse
+                {
+                    Width = 5,
+                    Height = 5,
+                    Fill = Brushes.Black,
+                    IsHitTestVisible = false
+                };
+                Canvas.SetLeft(trailDot, prevFrame.Position.X - 2.5);
+                Canvas.SetTop(trailDot, prevFrame.Position.Y - 2.5);
+
+                vehicle.TrailDots.Add(trailDot);
+                TileCanvas.Children.Add(trailDot);
+                Panel.SetZIndex(trailDot, 1001);
+
+                while (vehicle.TrailDots.Count > 5)
+                {
+                    TileCanvas.Children.Remove(vehicle.TrailDots[0]);
+                    vehicle.TrailDots.RemoveAt(0);
+                }
+            }
+
+            UpdateVehicleCanvasPosition(vehicle, new Point(x, y), tramColor, isSrv, msg.VehicleID, msg.Speed);
+
+            
+
+            if (!isSrv)
+            {
+                var oldLines = TileCanvas.Children.OfType<Polyline>()
+                    .Where(l => l.Tag is string && (string)l.Tag == $"tram_trail_{msg.VehicleID}")
+                    .ToList();
+
+                foreach (var l in oldLines)
+                    TileCanvas.Children.Remove(l);
+
+                if (vehicle.MovementFrames.Count > 1)
+                {
+                    var polyline = new Polyline
+                    {
+                        Stroke = tramColor,
+                        StrokeThickness = 2,
+                        Tag = $"tram_trail_{msg.VehicleID}"
+                    };
+
+                    foreach (var mf in vehicle.MovementFrames)
+                        polyline.Points.Add(mf.Position);
+
+                    TileCanvas.Children.Add(polyline);
+                    Panel.SetZIndex(polyline, 999);
+                }
+            }
+
+            Panel.SetZIndex(vehicle.Ellipse, 1000);
+            Panel.SetZIndex(vehicle.Text, 1000);
+        }
+
+
+
+        //drawing SRV point on the map
+        private void DrawSrvPoint(SRVMessage msg)
+        {
+            if (msg == null) return;
+
+            var (canvasX, canvasY) = ConvertLatLonToCanvasXY(msg.Latitude, msg.Longitude);
+
+            Ellipse point = new Ellipse
+            {
+                Width = 10,
+                Height = 10,
+                Fill = Brushes.Red,
+                Stroke = Brushes.Black,
+                StrokeThickness = 1,
+                Tag = msg.LogicalId
+            };
+
+            Canvas.SetLeft(point, canvasX - point.Width / 2);
+            Canvas.SetTop(point, canvasY - point.Height / 2);
+
+            TileCanvas.Children.Add(point);
+        }
+
+
+        //checking if the cam message is valid (CRC check, substring check)
+        public static bool IsValidCamMessage(string rawXml)
+        {
+            try
+            {
+                // Find beginning of <vehPt> tag
+                int vehPtStart = rawXml.IndexOf("<vehPt");
+                if (vehPtStart < 0) return false;
+
+                // find <crc> tag
+                int crcTag = rawXml.IndexOf("<crc>");
+                if (crcTag < 0) return false;
+
+                //Find last '>' before <crc>
+                int vehPtEnd = rawXml.LastIndexOf('>', crcTag - 1);
+                if (vehPtEnd < vehPtStart) return false;
+
+                // Take substring for crc including <>
+                string crcInput = rawXml.Substring(vehPtStart, vehPtEnd - vehPtStart + 1);
+
+                // Debug: write the CRC input to console
+                Console.WriteLine($"[DEBUG] CRC input: '{crcInput}'");
+
+                // get value of crc from xml
+                int crcValueStart = crcTag + 5;
+                int crcValueEnd = rawXml.IndexOf("</crc>", crcValueStart);
+                if (crcValueEnd < 0) return false;
+                string providedCrc = rawXml.Substring(crcValueStart, crcValueEnd - crcValueStart).Trim();
+
+                Console.WriteLine($"[DEBUG] Provided CRC: '{providedCrc}'");
+
+                // calculate crc
+                ushort computed = ComputeCRC(crcInput);
+
+                Console.WriteLine($"[DEBUG] Computed CRC: {computed}");
+
+                // Check if provided CRC matches computed CRC
+                return providedCrc == computed.ToString() || providedCrc == computed.ToString("D4");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[DEBUG] CRC Exception: " + ex.Message);
+                return false;
+            }
+        }
+
+
+        //COMPUTING CRC
+        public static ushort ComputeCRC(string data)
+        {
+            ushort crc = 0xFFFF; // MODBUS start value
+            byte[] bytes = Encoding.UTF8.GetBytes(data);
+
+            foreach (byte b in bytes)
+            {
+                crc ^= b;
+                for (int i = 0; i < 8; i++)
+                {
+                    if ((crc & 0x0001) != 0)
+                        crc = (ushort)((crc >> 1) ^ 0xA001); // 0xA001 is bit reversed 0x8005
+                    else
+                        crc >>= 1;
+                }
+            }
+            return crc;
+        }
+
+
+        // Serial port data received event handler
+        private void SerialPort_DataReceived(object sender, SerialDataReceivedEventArgs e)
+        {
+            string line = serialPort.ReadLine();
+            SRVMessage msg = SRVMessage.ParseSrvMessage(line);
+
+            if (msg != null)
+            {
+                Dispatcher.Invoke(() =>
+                {
+                    DrawSrvPoint(msg);
+                });
+            }
+
+        }
+
+        private void SendPointAsCamMessage(string vehicleId, double latitude, double longitude, double speed = 0, double heading = 0, double altitude = 0,
+                                   double dist = 0, string type = "Tram", string typeEx = "", int lineNum = -1, int vehNum = -1, int embarkation = 0)
+        {
+            string vehPt =
+                $"<vehPt statId=\"{vehicleId}\" type=\"{type}\" typeEx=\"{typeEx}\" lat=\"{latitude.ToString(CultureInfo.InvariantCulture)}\" lng=\"{longitude.ToString(CultureInfo.InvariantCulture)}\" alt=\"{altitude.ToString(CultureInfo.InvariantCulture)}\" speed=\"{speed.ToString(CultureInfo.InvariantCulture)}\" heading=\"{heading.ToString(CultureInfo.InvariantCulture)}\" lastRec=\"{DateTime.UtcNow:o}\" dist=\"{dist.ToString(CultureInfo.InvariantCulture)}\" lineNum=\"{lineNum}\" vehNum=\"{vehNum}\" embarkation=\"{embarkation}\" />";
+
+            ushort crc = ComputeCRC(vehPt);
+            string xml = $"<CAM>{vehPt}<crc>{crc}</crc></CAM>";
+
+            // sending to rj485 (only if the port is open)
+            try
+            {
+                if (serialPort != null && serialPort.IsOpen)
+                {
+                    lock (_serialIoLock)
+                    {
+                        // crlf
+                        serialPort.Write(xml);
+                        serialPort.Write(serialPort.NewLine);
+                    }
+                }
+                else
+                {
+                    Console.WriteLine("[TX] Serial port is not open. Skipping CAM transmit.");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[TX] Error sending CAM over serial: " + ex.Message);
+            }
+
+            var msg = V2XMessageParser.ParseV2XMessage(xml);
+            HandleV2XMessage(msg, xml);
+
+            if (isRecording && (vehicleId == drawnTramIds[0] || vehicleId == drawnTramIds[1]))
+            {
+                recordedCamMessages.Add(xml);
+            }
+        }
+
+        private void CheckActivationZones(Point pos, string vehicleId)
+        {
+            foreach (var zone in activationZones.Values)
+            {
+                if (zone.Bounds.Contains(pos))
+                {
+                    zone.LastTramId = vehicleId;
+                    zone.IsActive = true;
+
+                    // always make the rectangle thicker when activated
+                    if (zone.Rectangle != null)
+                        zone.Rectangle.StrokeThickness = 6;
+
+                    // timer for deactivation
+                    var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(0.5) };
+                    timer.Tick += (s, e) =>
+                    {
+                        zone.IsActive = false;
+                        if (zone.Rectangle != null)
+                            zone.Rectangle.StrokeThickness = 2;
+                        ((DispatcherTimer)s).Stop();
+                    };
+                    timer.Start();
+                    break;
+                }
+            }
+        }
+
+
+        private async void LoadPlaybackFile(string fileName)
+        {
+            if (!File.Exists(fileName))
+            {
+                MessageBox.Show("File doesn't exist");
+                return;
+            }
+
+            var doc = XDocument.Load(fileName);
+
+            // If its a full MapData recording, load map center/zoom and zones first
+            if (string.Equals(doc.Root?.Name.LocalName, "MapData", StringComparison.OrdinalIgnoreCase))
+            {
+                var root = doc.Root;
+
+                // Center and zoom
+                var latAttr = root.Attribute("CenterLatitude")?.Value;
+                var lonAttr = root.Attribute("CenterLongitude")?.Value;
+                var zoomAttr = root.Attribute("Zoom")?.Value;
+                // In LoadPlaybackFile, inside the MapData branch after you parse lat/lon/zoom and before LoadTiles(...)
+                if (latAttr != null && lonAttr != null && zoomAttr != null &&
+                    double.TryParse(latAttr, NumberStyles.Any, CultureInfo.InvariantCulture, out var centerLat) &&
+                    double.TryParse(lonAttr, NumberStyles.Any, CultureInfo.InvariantCulture, out var centerLon) &&
+                    int.TryParse(zoomAttr, NumberStyles.Any, CultureInfo.InvariantCulture, out var z))
+                {
+                    latitude = centerLat;
+                    longitude = centerLon;
+                    zoom = z;
+
+                    // Sync Mapsettings and TextBoxes to loaded center without firing RefreshMap
+                    Mapsettings.Latitude = latitude;
+                    Mapsettings.Longitude = longitude;
+                    LatitudeBox.TextChanged -= LatitudeBox_TextChanged;
+                    LongitudeBox.TextChanged -= LongitudeBox_TextChanged;
+                    LatitudeBox.Text = latitude.ToString("F6", CultureInfo.InvariantCulture);
+                    LongitudeBox.Text = longitude.ToString("F6", CultureInfo.InvariantCulture);
+                    LatitudeBox.TextChanged += LatitudeBox_TextChanged;
+                    LongitudeBox.TextChanged += LongitudeBox_TextChanged;
+
+                    var (centerX, centerY) = LatLonToTileXY(latitude, longitude, zoom);
+                    await LoadTiles(centerX - TileCount / 2, centerY - TileCount / 2);
+                }
+
+                // Clear current zones from canvas
+                foreach (var rect in activationZones.Keys.ToList())
+                    TileCanvas.Children.Remove(rect);
+                activationZones.Clear();
+                ActivationZonesCollection.Clear();
+
+                // Load zones (use saved Latitude/Longitude to compute StartPoint in current anchor)
+                var zonesElement = root.Element("ActivationZones");
+                if (zonesElement != null)
+                {
+                    foreach (var zoneElem in zonesElement.Elements("Zone"))
+                    {
+                        string name = zoneElem.Attribute("Name")?.Value ?? "Unnamed";
+                        string color = zoneElem.Attribute("Color")?.Value ?? "#FF0000";
+
+                        double latitudeZone = double.Parse(zoneElem.Attribute("Latitude")?.Value ?? "0", CultureInfo.InvariantCulture);
+                        double longitudeZone = double.Parse(zoneElem.Attribute("Longitude")?.Value ?? "0", CultureInfo.InvariantCulture);
+                        double widthMeters = double.Parse(zoneElem.Attribute("Width")?.Value ?? "0", CultureInfo.InvariantCulture);
+                        double heightMeters = double.Parse(zoneElem.Attribute("Height")?.Value ?? "0", CultureInfo.InvariantCulture);
+                        int azimuth = int.Parse(zoneElem.Attribute("Azimuth")?.Value ?? "0", CultureInfo.InvariantCulture);
+
+                        double mpp = MetersPerPixel(latitude, zoom);
+                        double widthPx = widthMeters / mpp;
+                        double heightPx = heightMeters / mpp;
+
+                        var rect = new Rectangle
+                        {
+                            Stroke = (SolidColorBrush)(new BrushConverter().ConvertFromString(color)),
+                            StrokeThickness = 2,
+                            Fill = Brushes.Transparent,
+                            Tag = "DrawnRectangle",
+                            Uid = name,
+                            Width = widthPx,
+                            Height = heightPx
+                        };
+
+                        // Compute base-center StartPoint from saved lat/lon
+                        var (sx, sy) = ConvertLatLonToCanvasXY(latitudeZone, longitudeZone);
+                        var startPoint = new Point(sx, sy);
+
+                        var activationZone = new ActivationZone
+                        {
+                            Name = name,
+                            Latitude = latitudeZone,
+                            Longitude = longitudeZone,
+                            Width = widthMeters,
+                            Height = heightMeters,
+                            Azimuth = azimuth,
+                            Color = color,
+                            Rectangle = rect,
+                            StartPoint = startPoint
+                        };
+
+                        activationZones[rect] = activationZone;
+                        ActivationZonesCollection.Add(activationZone);
+                        activationZone.PropertyChanged += ActivationZone_PropertyChanged;
+
+                        UpdateRectanglePositionFromStartPoint(activationZone);
+                        TileCanvas.Children.Add(rect);
+                        UpdateActivationZoneBounds(activationZone);
+                    }
+                }
+
+                var railwaysElement = root.Element("Railways");
+                // Remove previously drawn railways from canvas first
+                if (railwayLines != null && railwayLines.Count > 0)
+                {
+                    foreach (var oldLine in railwayLines)
+                        TileCanvas.Children.Remove(oldLine);
+                    railwayLines.Clear();
+                }
+
+                if (railwaysElement != null)
+                {
+                    foreach (var lineElem in railwaysElement.Elements("Line"))
+                    {
+                        Line line = new Line
+                        {
+                            X1 = double.Parse(lineElem.Attribute("X1")?.Value ?? "0", CultureInfo.InvariantCulture),
+                            Y1 = double.Parse(lineElem.Attribute("Y1")?.Value ?? "0", CultureInfo.InvariantCulture),
+                            X2 = double.Parse(lineElem.Attribute("X2")?.Value ?? "0", CultureInfo.InvariantCulture),
+                            Y2 = double.Parse(lineElem.Attribute("Y2")?.Value ?? "0", CultureInfo.InvariantCulture),
+                            Stroke = new SolidColorBrush(
+                                (Color)ColorConverter.ConvertFromString(lineElem.Attribute("Stroke")?.Value ?? "#000000")),
+                            StrokeThickness = double.Parse(lineElem.Attribute("StrokeThickness")?.Value ?? "1", CultureInfo.InvariantCulture),
+                            IsHitTestVisible = false
+                        };
+
+                        TileCanvas.Children.Add(line);
+                        Panel.SetZIndex(line, 90); // keep rails under rectangles/points but above tiles
+                        railwayLines.Add(line);
+                    }
+
+                    // ensure visual order after adding rails
+                    BringAllOverlaysToFront();
+                }
+            }
+
+            // CAM elements – keep existing logic
+            var camElements = doc.Descendants("CAM").ToList();
+            Console.WriteLine($"[DEBUG] CAM count: {camElements.Count}");
+
+            if (camElements.Count == 0)
+            {
+                MessageBox.Show("File is empty.");
+                return;
+            }
+
+            var vehicleIds = camElements
+                .Select(el => el.Element("vehPt")?.Attribute("statId")?.Value)
+                .Where(id => !string.IsNullOrEmpty(id))
+                .Distinct()
+                .Take(2)
+                .ToList();
+
+            for (int i = 0; i < vehicleIds.Count && i < drawnTramIds.Length; i++)
+                drawnTramIds[i] = vehicleIds[i];
+
+            for (int i = 0; i < drawnTrams.Length; i++)
+            {
+                drawnTrams[i] = null;
+                drawnTramTrailPoints[i].Clear();
+                if (drawnTramTrails[i] != null)
+                {
+                    TileCanvas.Children.Remove(drawnTramTrails[i]);
+                    drawnTramTrails[i] = null;
+                }
+            }
+
+            var tramFrames = new List<MovementFrame>[drawnTrams.Length];
+            for (int i = 0; i < tramFrames.Length; i++)
+                tramFrames[i] = new List<MovementFrame>();
+
+            DateTime? firstTime = null;
+            foreach (var el in camElements)
+            {
+                try
+                {
+                    var vehPt = el.Element("vehPt");
+                    if (vehPt == null) continue;
+
+                    string id = vehPt.Attribute("statId")?.Value;
+                    string latStr = vehPt.Attribute("lat")?.Value;
+                    string lngStr = vehPt.Attribute("lng")?.Value;
+                    string lastRecStr = vehPt.Attribute("lastRec")?.Value;
+
+                    if (string.IsNullOrEmpty(id) || string.IsNullOrEmpty(latStr) || string.IsNullOrEmpty(lngStr) || string.IsNullOrEmpty(lastRecStr))
+                        continue;
+
+                    if (!double.TryParse(latStr, NumberStyles.Any, CultureInfo.InvariantCulture, out double lat)) continue;
+                    if (!double.TryParse(lngStr, NumberStyles.Any, CultureInfo.InvariantCulture, out double lng)) continue;
+                    if (!DateTime.TryParse(lastRecStr, null, DateTimeStyles.RoundtripKind, out DateTime timestamp)) continue;
+
+                    int idx = Array.IndexOf(drawnTramIds, id);
+                    if (idx >= 0)
+                    {
+                        if (firstTime == null) firstTime = timestamp;
+                        var (x, y) = ConvertLatLonToCanvasXY(lat, lng);
+                        tramFrames[idx].Add(new MovementFrame
+                        {
+                            Timestamp = timestamp - firstTime.Value,
+                            Position = new Point(x, y)
+                        });
+                    }
+                }
+                catch { }
+            }
+
+            for (int i = 0; i < drawnTrams.Length; i++)
+            {
+                if (tramFrames[i].Count > 0)
+                {
+                    var first = tramFrames[i][0];
+                    var ellipse = new Ellipse
+                    {
+                        Width = 12,
+                        Height = 12,
+                        Fill = drawnTramColors[i],
+                        Stroke = Brushes.Black,
+                        StrokeThickness = 1,
+                        IsHitTestVisible = false
+                    };
+                    Canvas.SetLeft(ellipse, first.Position.X - 6);
+                    Canvas.SetTop(ellipse, first.Position.Y - 6);
+
+                    var text = new TextBlock
+                    {
+                        Text = drawnTramNames[i],
+                        Foreground = drawnTramColors[i],
+                        FontWeight = FontWeights.Bold,
+                        FontSize = 12,
+                        IsHitTestVisible = false
+                    };
+                    Canvas.SetLeft(text, first.Position.X + 5);
+                    Canvas.SetTop(text, first.Position.Y - 10);
+
+                    drawnTrams[i] = new MapPoint
+                    {
+                        Position = first.Position,
+                        Label = drawnTramIds[i],
+                        Ellipse = ellipse,
+                        Text = text,
+                        Speed = null,
+                        TrailDots = new List<Ellipse>(),
+                        IsRecorded = true,
+                        MovementFrames = tramFrames[i],
+                        LastUpdate = DateTime.Now
+                    };
+
+                    TileCanvas.Children.Add(ellipse);
+                    TileCanvas.Children.Add(text);
+                }
+            }
+
+            playbackMaxTime = tramFrames.Max(frames => frames.Count > 0 ? frames.Last().Timestamp : TimeSpan.Zero);
+            PlaybackSlider.Minimum = 0;
+            PlaybackSlider.Maximum = playbackMaxTime.TotalSeconds;
+            PlaybackSlider.Value = 0;
+
+            MessageBox.Show("Playback data loaded. Use Play button to start playback.", "Playback ready", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+
+        private void UpdateVehicleCanvasPosition(MapPoint vehicle, Point newPos, Brush color, bool isSrv, string label, double? speed = null)
+        {
+            Canvas.SetLeft(vehicle.Ellipse, newPos.X - 6);
+            Canvas.SetTop(vehicle.Ellipse, newPos.Y - 6);
+
+            // always display label with id
+            vehicle.Text.Text = isSrv ? label : (label?.Length > 4 ? label[^4..] : label);
+            vehicle.Text.Foreground = isSrv ? Brushes.Black : color;
+            Canvas.SetLeft(vehicle.Text, newPos.X + 5);
+            Canvas.SetTop(vehicle.Text, newPos.Y - 10);
+            if (!TileCanvas.Children.Contains(vehicle.Text))
+                TileCanvas.Children.Add(vehicle.Text);
+
+            if (!isSrv && speed.HasValue && vehicle.Speed != null && !drawnTramIds.Contains(vehicle.Label))
+            {
+                vehicle.Speed.Text = $"{speed.Value:F1} km/h";
+                vehicle.Speed.Foreground = color;
+                Canvas.SetLeft(vehicle.Speed, newPos.X + 5);
+                Canvas.SetTop(vehicle.Speed, newPos.Y + 5);
+                Panel.SetZIndex(vehicle.Speed, 1100);
+                if (!TileCanvas.Children.Contains(vehicle.Speed))
+                    TileCanvas.Children.Add(vehicle.Speed);
+            }
+            else if (vehicle.Speed != null && drawnTramIds.Contains(vehicle.Label))
+            {
+                // if there is speed hide it
+                TileCanvas.Children.Remove(vehicle.Speed);
+            }
+
+            vehicle.Position = newPos;
+
+            CheckActivationZones(vehicle.Position, vehicle.Label);
+
+            // only drawn trams
+            if (isRecording && (vehicle.Label == drawnTramIds[0] || vehicle.Label == drawnTramIds[1]))
+            {
+                vehicle.MovementFrames.Add(new MovementFrame
+                {
+                    Timestamp = DateTime.Now - recordingStartTime,
+                    Position = newPos
+                });
+            }
+        }
+
+
+        // Updating or adding vehicle data in the table
+        private void UpdateOrAddVehicleData(string vehicleId, double speed, DateTime messageTime)
+        {
+
+            DateTime czechTime = TimeZoneInfo.ConvertTimeFromUtc(messageTime.ToUniversalTime(), czechTimeZone);
+
+            var existing = TramTable.FirstOrDefault(t => t.VehicleId == vehicleId);
+            string camTimeStr = czechTime.ToString("HH:mm:ss");
+
+            if (existing == null)
+            {
+                TramTable.Add(new TramInfo
+                {
+                    VehicleId = vehicleId,
+                    Speed = speed,
+                    LastCamTime = camTimeStr,
+                    SecondsSinceLastCam = 0,
+                    LastMessageTimestamp = czechTime
+                });
+            }
+            else
+            {
+                existing.Speed = speed;
+                existing.LastCamTime = camTimeStr;
+                existing.SecondsSinceLastCam = 0; //Reset timer
+                existing.LastMessageTimestamp = czechTime;
+            }
+        }
+
+
+        // cam cleanup timer
+        private void StartCleanupTimer()
+        {
+            cleanupTimer = new DispatcherTimer();
+            cleanupTimer.Interval = TimeSpan.FromSeconds(1);
+            cleanupTimer.Tick += CleanupOldVehicles;
+            cleanupTimer.Start();
+        }
+
+
+        // changing properties of the activation zone table
+        private void ActivationZone_PropertyChanged(object sender, PropertyChangedEventArgs e)
+        {
+            if (isUpdatingActivationZone) return;
+            isUpdatingActivationZone = true;
+
+            try
+            {
+                var zone = sender as ActivationZone;
+                if (zone == null || zone.Rectangle == null) return;
+
+                double mpp = MetersPerPixel(latitude, zoom);
+
+                if (e.PropertyName == nameof(ActivationZone.Width) || e.PropertyName == nameof(ActivationZone.Height))
+                {
+                    double widthPx = zone.Width / mpp;
+                    double heightPx = zone.Height / mpp;
+
+                    zone.Rectangle.Width = widthPx;
+                    zone.Rectangle.Height = heightPx;
+
+                    // anchor
+                    UpdateRectanglePositionFromStartPoint(zone);
+                    UpdateActivationZoneBounds(zone);
+
+                    var baseCenterPoint = new Point(
+                        Canvas.GetLeft(zone.Rectangle) + zone.Rectangle.Width / 2.0,
+                        Canvas.GetTop(zone.Rectangle) + zone.Rectangle.Height);
+
+                    var latlon = CanvasPixelsToLatLon(baseCenterPoint, latitude, longitude, zoom);
+                    zone.Latitude = latlon.Y;
+                    zone.Longitude = latlon.X;
+                }
+                else if (e.PropertyName == nameof(ActivationZone.Azimuth))
+                {
+                    // change angle without pivot
+                    ApplyZoneRotation(zone);
+                    UpdateActivationZoneBounds(zone);
+                }
+                else if (e.PropertyName == nameof(ActivationZone.Color))
+                {
+                    try
+                    {
+                        var brush = (Brush)new BrushConverter().ConvertFromString(zone.Color);
+                        zone.Rectangle.Stroke = brush;
+                    }
+                    catch { }
+                }
+            }
+            finally
+            {
+                isUpdatingActivationZone = false;
+            }
+        }
+
+
+        //|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+        //Methods for rotating rectangles around their base center
+        private void RotateRectangleAroundStartPoint(Rectangle rect, double angleDegrees, Point startPointCanvas, double rectWidth, double rectHeight)
+        {
+            if (rect == null) return;
+            rect.RenderTransform = new RotateTransform(angleDegrees, rect.Width / 2.0, rect.Height);
+        }
+
+
+
+
+        private double LonToTileX(double lon, int zoom)
+        {
+            return (lon + 180.0) / 360.0 * (1 << zoom);
+        }
+
+        private double LatToTileY(double lat, int zoom)
+        {
+            double latRad = lat * Math.PI / 180.0;
+            return (1.0 - Math.Log(Math.Tan(latRad) + 1.0 / Math.Cos(latRad)) / Math.PI) / 2.0 * (1 << zoom);
+        }
+
+        private double TileXToLon(double x, int zoom)
+        {
+            return x / Math.Pow(2, zoom) * 360.0 - 180.0;
+        }
+
+        private double TileYToLat(double y, int zoom)
+        {
+            double n = Math.PI - (2.0 * Math.PI * y) / Math.Pow(2, zoom);
+            return 180.0 / Math.PI * Math.Atan(0.5 * (Math.Exp(n) - Math.Exp(-n)));
+        }
+
+        private Point CanvasPixelsToLatLon(Point pixelPoint, double centerLat, double centerLon, int zoom)
+        {
+            // Use the actual loaded top-left tile anchor
+            double tileX = _currentTopLeftTileX + (pixelPoint.X / TilePixelSize);
+            double tileY = _currentTopLeftTileY + (pixelPoint.Y / TilePixelSize);
+
+            double lon = TileXToLon(tileX, zoom);
+            double lat = TileYToLat(tileY, zoom);
+            return new Point(lon, lat);
+        }
+
+
+        private void ApplyZoneRotation(ActivationZone zone)
+        {
+            if (zone?.Rectangle == null) return;
+
+            var rect = zone.Rectangle;
+            double w = rect.Width;
+            double h = rect.Height;
+
+            // Pivot = [W/2, H] => kotví StartPoint (střed základny) bez posunu
+            rect.RenderTransform = new RotateTransform(zone.Azimuth, w / 2.0, h);
+        }
+        //|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+        //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+        //WPF Component methods
+
+        private void LatitudeBox_TextChanged(object sender, TextChangedEventArgs e)
+        {
+            if (double.TryParse(LatitudeBox.Text, out double lat))
+            {
+                Mapsettings.Latitude = lat;
+                latitude = lat; // keep conversion center in sync
+                RefreshMap();
+            }
+        }
+
+        private void LongitudeBox_TextChanged(object sender, TextChangedEventArgs e)
+        {
+            if (double.TryParse(LongitudeBox.Text, out double lon))
+            {
+                Mapsettings.Longitude = lon;
+                longitude = lon; // keep conversion center in sync
+                RefreshMap();
+            }
+        }
+
+        private void rectButton_Click(object sender, RoutedEventArgs e)
+        {
+            SetDrawingMode(DrawingMode.Rectangle);
+            Keyboard.Focus(this);
+        }
+
+        private void StopDrawing_Click(object sender, RoutedEventArgs e)
+        {
+            SetSelectionMode();
+            isSelectionMode = true;
+        }
+
+        private void RailwayButton_Click(object sender, RoutedEventArgs e)
+        {
+            isSelectionMode = false;
+            currentDrawingMode = DrawingMode.Railway;
+            Keyboard.Focus(this);
+        }
+
+        private void DrawPoints_Click(object sender, RoutedEventArgs e)
+        {
+            SetDrawingMode(DrawingMode.Point);
+            Keyboard.Focus(this);
+        }
+
+        private void PlaybackSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+        {
+            if (!isSliderDragging && isPlaying)
+            {
+                playbackElapsedTime = TimeSpan.FromSeconds(PlaybackSlider.Value);
+                playbackStartTime = DateTime.Now - TimeSpan.FromTicks((long)(playbackElapsedTime.Ticks / playbackSpeedFactor));
+
+                RedrawPlaybackToTime(playbackElapsedTime);
+            }
+        }
+
+        private void PlaybackSlider_DragStarted(object sender, System.Windows.Controls.Primitives.DragStartedEventArgs e)
+        {
+            isSliderDragging = true;
+            wasPlayingBeforeSliderDrag = isPlaying && playbackTimer != null && playbackTimer.IsEnabled;
+            if (playbackTimer != null)
+                playbackTimer.Stop();
+        }
+
+        private void PlaybackSlider_DragCompleted(object sender, System.Windows.Controls.Primitives.DragCompletedEventArgs e)
+        {
+            isSliderDragging = false;
+            playbackElapsedTime = TimeSpan.FromSeconds(PlaybackSlider.Value);
+            playbackStartTime = DateTime.Now - TimeSpan.FromTicks((long)(playbackElapsedTime.Ticks / playbackSpeedFactor));
+            RedrawPlaybackToTime(playbackElapsedTime);
+            // Only resume if it was playing before the drag
+            if (wasPlayingBeforeSliderDrag && isPlaying && playbackTimer != null)
+                playbackTimer.Start();
+        }
+
+        private void RedrawPlaybackToTime(TimeSpan time)
+        {
+            playbackElapsedTime = time;
+
+            // Přehrávání pro body
+            foreach (var pt in points)
+            {
+                if (pt.MovementFrames.Count == 0) continue;
+
+                var nextFrame = pt.MovementFrames.FirstOrDefault(f => f.Timestamp > time);
+
+                if (nextFrame == null)
+                {
+                    var last = pt.MovementFrames.Last();
+                    UpdatePointPosition(pt, last.Position);
+                    CheckActivationZones(last.Position, pt.Label);
+                    continue;
+                }
+
+                var prevFrame = pt.MovementFrames.LastOrDefault(f => f.Timestamp <= time);
+
+                if (prevFrame != null)
+                {
+                    double progress = (time - prevFrame.Timestamp).TotalMilliseconds /
+                                      (nextFrame.Timestamp - prevFrame.Timestamp).TotalMilliseconds;
+
+                    var interpolated = new Point(
+                        Lerp(prevFrame.Position.X, nextFrame.Position.X, progress),
+                        Lerp(prevFrame.Position.Y, nextFrame.Position.Y, progress)
+                    );
+
+                    UpdatePointPosition(pt, interpolated);
+                    CheckActivationZones(interpolated, pt.Label);
+                }
+            }
+
+            // Přehrávání pro ručně kreslené tramvaje
+            for (int idx = 0; idx < drawnTrams.Length; idx++)
+            {
+                var tram = drawnTrams[idx];
+                if (tram == null || tram.MovementFrames == null || tram.MovementFrames.Count == 0) continue;
+
+                MovementFrame prevFrame = null, nextFrame = null;
+                foreach (var frame in tram.MovementFrames)
+                {
+                    if (frame.Timestamp > time)
+                    {
+                        nextFrame = frame;
+                        break;
+                    }
+                    prevFrame = frame;
+                }
+
+                Point pos;
+                if (nextFrame == null && prevFrame != null)
+                {
+                    pos = prevFrame.Position;
+                }
+                else if (prevFrame != null && nextFrame != null)
+                {
+                    double progress = (time - prevFrame.Timestamp).TotalMilliseconds /
+                                      (nextFrame.Timestamp - prevFrame.Timestamp).TotalMilliseconds;
+                    pos = new Point(
+                        Lerp(prevFrame.Position.X, nextFrame.Position.X, progress),
+                        Lerp(prevFrame.Position.Y, nextFrame.Position.Y, progress)
+                    );
+                }
+                else
+                {
+                    continue;
+                }
+
+                if (tram.Ellipse != null) TileCanvas.Children.Remove(tram.Ellipse);
+                if (tram.Text != null) TileCanvas.Children.Remove(tram.Text);
+                if (drawnTramTrails[idx] != null) TileCanvas.Children.Remove(drawnTramTrails[idx]);
+                if (tram.TrailDots != null)
+                {
+                    foreach (var dot in tram.TrailDots)
+                        TileCanvas.Children.Remove(dot);
+                    tram.TrailDots.Clear();
+                }
+                else
+                {
+                    tram.TrailDots = new List<Ellipse>();
+                }
+
+                var ellipse = new Ellipse
+                {
+                    Width = 12,
+                    Height = 12,
+                    Fill = drawnTramColors[idx],
+                    Stroke = Brushes.Black,
+                    StrokeThickness = 1,
+                    IsHitTestVisible = false
+                };
+                Canvas.SetLeft(ellipse, pos.X - 6);
+                Canvas.SetTop(ellipse, pos.Y - 6);
+                TileCanvas.Children.Add(ellipse);
+
+                var text = new TextBlock
+                {
+                    Text = tram.Label?.Length > 4 ? tram.Label[^4..] : tram.Label,
+                    Foreground = drawnTramColors[idx],
+                    FontWeight = FontWeights.Bold,
+                    FontSize = 12,
+                    IsHitTestVisible = false
+                };
+                Canvas.SetLeft(text, pos.X + 5);
+                Canvas.SetTop(text, pos.Y - 10);
+                TileCanvas.Children.Add(text);
+
+                var trail = new Polyline
+                {
+                    Stroke = drawnTramColors[idx],
+                    StrokeThickness = 2,
+                    IsHitTestVisible = false
+                };
+                var playedFrames = tram.MovementFrames.Where(f => f.Timestamp <= time).ToList();
+                foreach (var frame in playedFrames)
+                    trail.Points.Add(frame.Position);
+                TileCanvas.Children.Add(trail);
+
+                for (int i = 0; i < playedFrames.Count - 1; i++)
+                {
+                    var dotPos = playedFrames[i].Position;
+                    var dot = new Ellipse { Width = 5, Height = 5, Fill = Brushes.Black, IsHitTestVisible = false };
+                    Canvas.SetLeft(dot, dotPos.X - 2.5);
+                    Canvas.SetTop(dot, dotPos.Y - 2.5);
+                    TileCanvas.Children.Add(dot);
+                    tram.TrailDots.Add(dot);
+                    Panel.SetZIndex(dot, 1001);
+                }
+
+                tram.Ellipse = ellipse;
+                tram.Text = text;
+                drawnTramTrails[idx] = trail;
+
+                CheckActivationZones(pos, tram.Label);
+
+                // keep it alive during scrubbing
+                tram.LastUpdate = DateTime.Now;
+            }
+
+            bool allPointsDone = points.All(p => time > p.MovementFrames.LastOrDefault()?.Timestamp);
+            bool allTramsDone = drawnTrams.All(tram => tram == null || time > tram.MovementFrames.LastOrDefault()?.Timestamp);
+
+            if (allPointsDone && allTramsDone)
+            {
+                playbackTimer?.Stop();
+                isPlaying = false;
+            }
+
+            if (!isSliderDragging)
+            {
+                PlaybackSlider.Value = Math.Min(time.TotalSeconds, playbackMaxTime.TotalSeconds);
+            }
+        }
+
+        private TimeSpan GetPlaybackMaxTime()
+        {
+            var max = TimeSpan.Zero;
+            foreach (var pt in points)
+                if (pt.MovementFrames.Count > 0)
+                    max = TimeSpan.FromTicks(Math.Max(max.Ticks, pt.MovementFrames.Last().Timestamp.Ticks));
+            foreach (var tram in drawnTrams)
+                if (tram != null && tram.MovementFrames != null && tram.MovementFrames.Count > 0)
+                    max = TimeSpan.FromTicks(Math.Max(max.Ticks, tram.MovementFrames.Last().Timestamp.Ticks));
+            return max;
+        }
+
+        private void RefreshMap_Click(object sender, RoutedEventArgs e)
+        {
+            RefreshMap();
+        }
+
+        private void ExportMap_Click(object sender, RoutedEventArgs e)
+        {
+            ExportCanvasToPng(TileCanvas, "map_export.png");
+            Console.WriteLine("Map exported into: map_export.png");
+        }
+
+        private async void Connect_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                string portName = ComPortsComboBox.SelectedItem as string;
+                if (string.IsNullOrWhiteSpace(portName))
+                {
+                    MessageBox.Show("Select a COM port from the list.");
+                    return;
+                }
+
+                if (!int.TryParse(BaudrateTB.Text.Trim(), out int baudRate))
+                {
+                    MessageBox.Show("Enter valid numeric baudrate");
+                    return;
+                }
+
+                if (serialPort == null || !serialPort.IsOpen)
+                {
+                    await StartV2XListenerAsync(portName, baudRate);
+                    MessageBox.Show($"Connected on {portName} at {baudRate} bps.");
+                }
+                else
+                {
+                    MessageBox.Show("Port already open.");
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Error connecting: " + ex.Message);
+            }
+        }
+
+        private void SaveToXML_Click(object sender, RoutedEventArgs e)
+        {
+            // check if there is anything to save
+            bool hasRailway = railwayLines.Count > 0;
+            bool isDrawingEmpty = (points.Count == 0) && (mapRectangles.Count == 0) && (connectionLine.Points.Count == 0) && !hasRailway;
+
+            if (isDrawingEmpty)
+            {
+                var confirm = MessageBox.Show(
+                    "Drawing is empty. Do you still want to save?",
+                    "Warning",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Warning);
+
+                if (confirm != MessageBoxResult.Yes)
+                {
+                    return;
+                }
+            }
+
+            // Vždy zobraz dialog pro výběr souboru
+            var dlg = new Microsoft.Win32.SaveFileDialog
+            {
+                FileName = "map_rectangles",
+                DefaultExt = ".xml",
+                Filter = "XML files (*.xml)|*.xml|All files (*.*)|*.*",
+                Title = "Save map into XML"
+            };
+
+            bool? result = dlg.ShowDialog();
+
+            if (result != true)
+                return;
+
+            string fileNameToSave = dlg.FileName;
+            loadedFileName = fileNameToSave;
+
+            SaveXML(fileNameToSave);
+            MessageBox.Show("Data saved into file:\n" + fileNameToSave, "Data saved.", MessageBoxButton.OK, MessageBoxImage.Information);
+
+            isDirty = false;
+        }
+
+
+
+
+        private void LoadFromXML_Click(object sender, RoutedEventArgs e)
+        {
+            var dlg = new Microsoft.Win32.OpenFileDialog
+            {
+                DefaultExt = ".xml",
+                Filter = "XML files (*.xml)|*.xml|All files (*.*)|*.*",
+                Title = "Select an XML file to load onto the map"
+            };
+
+            bool? result = dlg.ShowDialog();
+
+            if (result == true)
+            {
+                LoadXML(dlg.FileName);
+                MessageBox.Show("Data loaded from file:\n" + dlg.FileName, "Data loaded", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+        }
+
+        private void PlayMovement_Click(object sender, RoutedEventArgs e)
+        {
+            if (isPlaying) return;
+
+            playbackMaxTime = GetPlaybackMaxTime();
+            PlaybackSlider.Minimum = 0;
+            PlaybackSlider.Maximum = playbackMaxTime.TotalSeconds;
+            PlaybackSlider.Value = 0;
+
+            isPlaying = true;
+            playbackStartTime = DateTime.Now;
+            playbackElapsedTime = TimeSpan.Zero;
+
+            playbackTimer = new DispatcherTimer
+            {
+                Interval = TimeSpan.FromMilliseconds(30)
+            };
+
+            playbackTimer.Tick += PlaybackTimer_Tick;
+            playbackTimer.Start();
+        }
+
+        private void btnRecordMovement_Click(object sender, RoutedEventArgs e)
+        {
+            // removing all active vehicles
+            foreach (var vehicleId in activeVehicles.Keys.ToList())
+            {
+                if (activeVehicles.TryGetValue(vehicleId, out var vehicle))
+                    RemoveVehicleCompletely(vehicleId, vehicle);
+            }
+            activeVehicles.Clear();
+
+            // removing of all drawn trams
+            for (int i = 0; i < drawnTrams.Length; i++)
+            {
+                if (drawnTrams[i] != null)
+                    RemoveDrawnTramCompletely(i, drawnTrams[i]);
+                drawnTrams[i] = null;
+                drawnTramTrailPoints[i].Clear();
+                if (drawnTramTrails[i] != null)
+                {
+                    TileCanvas.Children.Remove(drawnTramTrails[i]);
+                    drawnTramTrails[i] = null;
+                }
+            }
+
+            // Vymazání tabulky tramvají
+            TramTable.Clear();
+
+            StartRecording();
+        }
+
+
+        private void btnStopRecording_Click(object sender, RoutedEventArgs e)
+        {
+            StopRecording();
+        }
+
+        private void MapControls_Click(object sender, RoutedEventArgs e)
+        {
+
+            MessageBox.Show(ControlsMessage, "Controls");
+
+        }
+
+        private void Disconnect_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                if (serialPort.IsOpen)
+                {
+                    serialPort.DataReceived -= SerialPort_DataReceived;
+                    serialPort.Close();
+                    MessageBox.Show("Disconnected from serial port.");
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Error disconnecting: " + ex.Message);
+            }
+        }
+
+        
+
+        private void BaudrateTB_TextChanged(object sender, TextChangedEventArgs e)
+        {
+
+        }
+
+        private void RedrawVehicleTrails()
+        {
+            var tramPolylines = TileCanvas.Children
+                .OfType<Polyline>()
+                .Where(l => l.Tag is string && (string)l.Tag == "tram_trail")
+                .ToList();
+
+            foreach (var l in tramPolylines)
+                TileCanvas.Children.Remove(l);
+
+            foreach (var vehicle in activeVehicles.Values)
+            {
+                if (!TileCanvas.Children.Contains(vehicle.Ellipse))
+                    TileCanvas.Children.Add(vehicle.Ellipse);
+                if (!TileCanvas.Children.Contains(vehicle.Text))
+                    TileCanvas.Children.Add(vehicle.Text);
+
+                Panel.SetZIndex(vehicle.Ellipse, 1000);
+                Panel.SetZIndex(vehicle.Text, 1000);
+
+                if (vehicle.MovementFrames != null && vehicle.MovementFrames.Count > 1)
+                {
+                    var polyline = new Polyline
+                    {
+                        Stroke = vehicle.Ellipse.Fill, //same color as the vehicle point
+                        StrokeThickness = 2,
+                        Tag = $"tram_trail{vehicle.VehicleID}"
+                    };
+
+                    foreach (var mf in vehicle.MovementFrames)
+                        polyline.Points.Add(mf.Position);
+
+                    TileCanvas.Children.Add(polyline);
+                    Panel.SetZIndex(polyline, 999);
+                }
+            }
+        }
+
+
+        private void BringAllOverlaysToFront()
+        {
+            // Ensure rectangles are above map tiles
+            foreach (var rect in mapRectangles)
+            {
+                if (TileCanvas.Children.Contains(rect.Shape))
+                    Panel.SetZIndex(rect.Shape, 100);
+            }
+            // Ensure points are above rectangles
+            foreach (var pt in points)
+            {
+                if (TileCanvas.Children.Contains(pt.Ellipse))
+                    Panel.SetZIndex(pt.Ellipse, 200);
+                if (TileCanvas.Children.Contains(pt.Text))
+                    Panel.SetZIndex(pt.Text, 201);
+            }
+            // Connection line above rectangles, below points
+            if (TileCanvas.Children.Contains(connectionLine))
+                Panel.SetZIndex(connectionLine, 150);
+
+            // Vehicle overlays (tram trails, etc.)
+            foreach (var vehicle in activeVehicles.Values)
+            {
+                if (TileCanvas.Children.Contains(vehicle.Ellipse))
+                    Panel.SetZIndex(vehicle.Ellipse, 1000);
+                if (TileCanvas.Children.Contains(vehicle.Text))
+                    Panel.SetZIndex(vehicle.Text, 1000);
+            }
+            // Tram trails
+            foreach (var poly in TileCanvas.Children.OfType<Polyline>().Where(l => l.Tag as string == "tram_trail"))
+                Panel.SetZIndex(poly, 999);
+
+            // Dimension textblock always on top
+            if (TileCanvas.Children.Contains(dimensionTextBlock))
+                Panel.SetZIndex(dimensionTextBlock, int.MaxValue);
+        }
+
+        private void CheckBox_Checked(object sender, RoutedEventArgs e)
+        {
+            RadiusComboBox.IsEnabled = true;
+            DrawRadiusCircle();
+        }
+
+        private void CheckBox_Unchecked(object sender, RoutedEventArgs e)
+        {
+            RadiusComboBox.IsEnabled = false;
+
+            if (radiusEllipse != null)
+            {
+                TileCanvas.Children.Remove(radiusEllipse);
+            }
+        }
+
+        private void RadiusComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (CircleCheckBox.IsChecked == true)
+                DrawRadiusCircle();
+        
+        }
+
+        private void ClearButton_Click(object sender, RoutedEventArgs e)
+        {
+            var result = MessageBox.Show("Are you sure you want to delete everything?",
+                                         "Confirmation",
+                                         MessageBoxButton.YesNo,
+                                         MessageBoxImage.Warning);
+
+            if (result != MessageBoxResult.Yes)
+            {
+                return;
+            }
+
+            var elementsToRemove = new List<UIElement>();
+
+            foreach (UIElement child in TileCanvas.Children)
+            {
+                if (child is Rectangle || child is Polyline || child is Line)
+                {
+                    elementsToRemove.Add(child);
+                }
+                else if (child is Ellipse ellipse)
+                {
+                    if (ellipse.Tag == null || (ellipse.Tag.ToString() != "Tram" && ellipse.Tag.ToString() != "Srv"))
+                    {
+                        elementsToRemove.Add(child);
+                    }
+                }
+                else if (child is TextBlock textBlock)
+                {
+                    if (textBlock.Tag == null || (textBlock.Tag.ToString() != "Tram" && textBlock.Tag.ToString() != "Srv"))
+                    {
+                        elementsToRemove.Add(child);
+                    }
+                }
+            }
+
+            foreach (var el in elementsToRemove)
+            {
+                TileCanvas.Children.Remove(el);
+            }
+
+            points.RemoveAll(p => p.Ellipse.Tag == null || (p.Ellipse.Tag.ToString() != "Tram" && p.Ellipse.Tag.ToString() != "Srv"));
+
+            mapRectangles.Clear();
+            activationZones.Clear();
+            ActivationZonesCollection.Clear();
+            connectionLine.Points.Clear();
+            TramTable.Clear();
+
+            for (int i = 0; i < drawnTrams.Length; i++)
+            {
+                drawnTrams[i] = null;
+                drawnTramTrailPoints[i].Clear();
+                if (drawnTramTrails[i] != null)
+                {
+                    TileCanvas.Children.Remove(drawnTramTrails[i]);
+                    drawnTramTrails[i] = null;
+                }
+            }
+
+            bool isEmpty = points.Count == 0 && mapRectangles.Count == 0 && connectionLine.Points.Count == 0;
+
+            if (isEmpty)
+            {
+                if (!string.IsNullOrEmpty(loadedFileName))
+                {
+                    var folder = System.IO.Path.GetDirectoryName(loadedFileName);
+                    loadedFileName = System.IO.Path.Combine(folder, "default_empty_save.xml");
+                }
+                else
+                {
+                    loadedFileName = "default_empty_save.xml";
+                }
+            }
+
+            isDirty = true;
+
+            // Reset drawing state so user can draw points again
+            rectPhase = RectangleDrawPhase.None;
+            isDrawing = false;
+            isSelectionMode = true;
+            currentDrawingMode = DrawingMode.Point;
+            UpdateHitTestForSelectableElements();
+        }
+
+        private void Tram1TB_TextChanged(object sender, TextChangedEventArgs e)
+        {
+            if (_suppressTramTextChanged) return;
+
+            var tb = sender as TextBox;
+            if (tb == null) return;
+
+            // only for 4 characters
+            if (tb.Text?.Length > 4)
+            {
+                _suppressTramTextChanged = true;
+                int caret = Math.Min(4, tb.SelectionStart);
+                tb.Text = tb.Text.Substring(0, 4);
+                tb.SelectionStart = caret;
+                _suppressTramTextChanged = false;
+            }
+
+            if (isPlaying) return; 
+
+            if (!string.IsNullOrWhiteSpace(tb.Text))
+                drawnTramIds[0] = "000000" + tb.Text.PadLeft(4, '0');
+            else
+                drawnTramIds[0] = "0000009999";
+        }
+
+        private void Tram2TB_TextChanged(object sender, TextChangedEventArgs e)
+        {
+            if (_suppressTramTextChanged) return;
+
+            var tb = sender as TextBox;
+            if (tb == null) return;
+
+            // 4 chars
+            if (tb.Text?.Length > 4)
+            {
+                _suppressTramTextChanged = true;
+                int caret = Math.Min(4, tb.SelectionStart);
+                tb.Text = tb.Text.Substring(0, 4);
+                tb.SelectionStart = caret;
+                _suppressTramTextChanged = false;
+            }
+
+            if (isPlaying) return; 
+
+            if (!string.IsNullOrWhiteSpace(tb.Text))
+                drawnTramIds[1] = "000000" + tb.Text.PadLeft(4, '0');
+            else
+                drawnTramIds[1] = "0000001111";
+        }
+
+        private void btnPlaybackFile_Click(object sender, RoutedEventArgs e)
+        {
+            var dlg = new Microsoft.Win32.OpenFileDialog
+            {
+                DefaultExt = ".xml",
+                Filter = "XML files (*.xml)|*.xml|All files (*.*)|*.*",
+                Title = "Select CAM recording for playback"
+            };
+
+            bool? result = dlg.ShowDialog();
+
+            if (result == true)
+            {
+                LoadPlaybackFile(dlg.FileName);
+            }
+        }
+
+        private void btnPause_Click(object sender, RoutedEventArgs e)
+        {
+            if (isPlaying && playbackTimer != null && playbackTimer.IsEnabled)
+            {
+                playbackTimer.Stop();
+            }
+        }
+
+        private void btnPlay_Click(object sender, RoutedEventArgs e)
+        {
+            if (isPlaying && playbackTimer != null && !playbackTimer.IsEnabled)
+            {
+                playbackStartTime = DateTime.Now - TimeSpan.FromTicks((long)(playbackElapsedTime.Ticks / playbackSpeedFactor));
+                playbackTimer.Start();
+            }
+        }
+
+        private void ComPortsComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+
+        }
+
+        private void RefreshComPorts_Click(object sender, RoutedEventArgs e)
+        {
+            LoadAvailableComPorts();
+        }
+
+        private void PlaybackSlider_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            isSliderDragging = true;
+            if (playbackTimer != null)
+                playbackTimer.Stop();
+        }
+
+        private void PlaybackSlider_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+        {
+            isSliderDragging = false;
+            playbackElapsedTime = TimeSpan.FromSeconds(PlaybackSlider.Value);
+            playbackStartTime = DateTime.Now - TimeSpan.FromTicks((long)(playbackElapsedTime.Ticks / playbackSpeedFactor));
+            RedrawPlaybackToTime(playbackElapsedTime);
+            if (isPlaying && playbackTimer != null)
+                playbackTimer.Start();
+        }
+
+        // Add this helper anywhere in the class (e.g., near other small helpers)
+        private void UpdateTimerLabel()
+        {
+            try
+            {
+                TimerLabel.Content = $"{playbackElapsedTime:hh\\:mm\\:ss} / {playbackMaxTime:hh\\:mm\\:ss}";
+            }
+            catch
+            {
+                // TimerLabel might not exist in XAML; ignore to avoid breaking playback
+            }
+        }
+
+        private void LoopCheckbox_Checked(object sender, RoutedEventArgs e)
+        {
+            // when the loop is active restart on the end
+            if (LoopCheckbox?.IsChecked == true && playbackMaxTime > TimeSpan.Zero &&
+                (!isPlaying || playbackElapsedTime >= playbackMaxTime))
+            {
+                playbackElapsedTime = TimeSpan.Zero;
+                playbackStartTime = DateTime.Now;
+
+                //redraw onto the beginning
+                RedrawPlaybackToTime(playbackElapsedTime);
+
+                // start timer
+                if (playbackTimer == null)
+                {
+                    playbackTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(30) };
+                    playbackTimer.Tick += PlaybackTimer_Tick;
+                }
+                if (!playbackTimer.IsEnabled)
+                    playbackTimer.Start();
+
+                isPlaying = true;
+
+                // Sync UI
+                if (!isSliderDragging)
+                    PlaybackSlider.Value = 0;
+                UpdateTimerLabel();
+            }
+        }
+    }
+}

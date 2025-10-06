@@ -1,0 +1,16 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using System.Windows;
+
+namespace V2XController
+{
+    internal class MovementFrame
+    {
+        public TimeSpan Timestamp {  get; set; }
+        public Point Position { get; set; }
+
+    }
+}

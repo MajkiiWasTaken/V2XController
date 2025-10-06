@@ -1,0 +1,3964 @@
+﻿using ComCommon;
+using Logger;
+using Microsoft.VisualBasic; // Interaction.InputBox
+using ModbusNewLib;
+using System.IO.Ports;
+using System.Text;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
+using System.Windows.Threading;
+using System.Windows.Input;
+using System.CodeDom;
+
+namespace V2XController
+{
+
+
+    public partial class ExportWindow : Window
+    {
+
+        // Header:
+        //   [0]: zone count
+        // Each zone record (in order: MainZone, SubZone, Lat(32b), Lon(32b), WidthCm, HeightCm, Azimuth):
+        //   1 + 1 + 2 + 2 + 1 + 1 + 1 = 9 registers per zone
+        private const ushort MPC_BASE_ADDR = 0x0300; // starting holding register address to write into
+
+        private const int MAX_REGS_PER_REQUEST = 50;
+
+        // Writable V2X map starts at 0x0300 + 44 (0x032C)
+        private const ushort MPC_WRITE_OFFSET = 44;  // decimal offset into 0x0300 block
+        private const int MPC_ZONE_STRIDE = 10;      // registers per zone "slot" (X/Y=2+2, len=1, width=1, az=1 with gaps)
+
+
+
+        private readonly List<ExportProfile> _profiles = new();
+
+        private bool _isDirty;
+        private bool _suppressFormEvents;
+        private bool _suppressProfileChange;
+        private string? _loadedProfileName;
+        private ExportSettings? _loadedSettings;
+
+        public ExportSettings? Settings { get; private set; }
+
+        //public Button Start { get; private set; }  // Reference to the export button
+        //public Button ReadButton { get; private set; }  // Reference to the read button
+
+        // Add near other helpers inside ExportWindow
+        private static ushort Off1(ushort zeroBased) => (ushort)(zeroBased + 1);
+
+        private static bool ApproximatelyZero(double v, double eps = 1e-8) => Math.Abs(v) <= eps;
+
+
+        public ExportWindow()
+        {
+            InitializeComponent();
+            DataContext = this;
+            Loaded += ExportWindow_Loaded;
+        }
+
+        public void SetReadMode(bool isReadMode)
+        {
+            if (Start != null)
+                Start.IsEnabled = !isReadMode;
+
+            if (ReadButton != null)
+                ReadButton.IsEnabled = isReadMode;
+
+            // Update the title to match the mode
+            Title = isReadMode ? "Read Activation Zones" : "Export Activation Zones";
+        }
+
+        private void ShowBusy(string message)
+        {
+            try
+            {
+                BusyText.Text = string.IsNullOrWhiteSpace(message) ? "Working..." : message;
+                BusyOverlay.Visibility = Visibility.Visible;
+
+                // Optional: disable common buttons while busy
+                foreach (var b in new[] { Start, ReadButton, SaveButton, NewButton, RenameButton, DeleteButton, Exit, ReinitMPC })
+                    if (b != null) b.IsEnabled = false;
+
+                Mouse.OverrideCursor = Cursors.Wait;
+            }
+            catch { /* ignore */ }
+        }
+
+        private void HideBusy()
+        {
+            try
+            {
+                BusyOverlay.Visibility = Visibility.Collapsed;
+
+                foreach (var b in new[] { Start, ReadButton, SaveButton, NewButton, RenameButton, DeleteButton, Exit, ReinitMPC })
+                    if (b != null) b.IsEnabled = true;
+
+                Mouse.OverrideCursor = null;
+            }
+            catch { /* ignore */ }
+        }
+
+        private async Task<MessageBoxResult> ShowMessageAfterBusyAsync(string text, string caption, MessageBoxButton buttons, MessageBoxImage icon)
+        {
+            // Hide overlay first, then show the dialog on the UI thread
+            await Dispatcher.InvokeAsync(HideBusy, DispatcherPriority.Send);
+            return await Dispatcher.InvokeAsync(() => MessageBox.Show(this, text, caption, buttons, icon), DispatcherPriority.Background);
+        }
+
+        private void ExportWindow_Loaded(object sender, RoutedEventArgs e)
+        {
+            if (ConnectionComboBox.SelectedIndex < 0)
+                ConnectionComboBox.SelectedIndex = 0;
+            ApplyConnectionLayout();
+
+            _profiles.Clear();
+            _profiles.AddRange(ExportSettingsStorage.Load());
+
+            RefreshProfilesList();
+
+            if (_profiles.Count > 0)
+            {
+                _suppressProfileChange = true;
+                SelectComboBox.SelectedIndex = 0;
+                _suppressProfileChange = false;
+
+                PopulateForm(_profiles[0].Settings);
+                CaptureLoadedSnapshot(_profiles[0].Settings, _profiles[0].Name);
+            }
+            else
+            {
+                _isDirty = false;
+                _loadedProfileName = null;
+                _loadedSettings = null;
+            }
+
+            AttachChangeTracking();
+
+            // Set the appropriate mode based on the title
+            if (Title == "Read Activation Zones") SetReadMode(true);
+            else SetReadMode(false);  // Default to export mode
+        }
+
+
+        // Replace the whole Start_Click with this version
+        private async void Start_Click(object sender, RoutedEventArgs e)
+        {
+            Settings = ExportSettings.FromWindow(this);
+            if (Settings == null)
+            {
+                MessageBox.Show("Missing export settings.", "Export", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+            if (!TryValidateSettings(Settings, out var validationError))
+            {
+                MessageBox.Show(validationError, "Export - validation", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            if (Owner is not MainWindow mw)
+            {
+                MessageBox.Show("Cannot access activation zones.", "Export", MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
+
+            var all = mw.ActivationZonesCollection?.ToList() ?? new List<ActivationZone>();
+            var zonesAct = all.Where(z => !IsSwitchRow(z)).Where(HasValidGeoAndSize).OrderBy(z => z.MainZone).ThenBy(z => z.SubZone).ToList();
+            var zonesSwitch = all.Where(IsSwitchRow).Where(HasValidGeoAndSize).OrderBy(z => z.MainZone).ThenBy(z => z.SubZone).ToList();
+
+            bool exportSwitchesOnly = mw.IsSwitchModeSelected;
+            bool doAct = !exportSwitchesOnly;
+            bool doSw = exportSwitchesOnly;
+
+            if ((doAct && zonesAct.Count == 0) && (doSw && zonesSwitch.Count == 0))
+            {
+                MessageBox.Show(exportSwitchesOnly ? "No switch zones to export." : "No activation zones to export.", "Export", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            // Preflight stays on UI thread (fast)
+            if (doAct && zonesAct.Count > 0)
+            {
+                var report = BuildZonesDebugReport(zonesAct, 8, "Activation zones (preview)");
+                System.Diagnostics.Debug.WriteLine(report);
+                bool allLatZero = zonesAct.All(z => ApproximatelyZero(z.Latitude));
+                bool allLonZero = zonesAct.All(z => ApproximatelyZero(z.Longitude));
+                bool anySize = zonesAct.Any(z => z.Width > 0 && z.Height > 0);
+                if ((allLatZero && allLonZero) || !anySize)
+                {
+                    var shortPreview = string.Join(Environment.NewLine, report.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None).Take(15));
+                    var msg = "Activation zones look empty (all coordinates are zero or sizes are zero).\n\nContinue anyway?\n\n" + shortPreview;
+                    if (MessageBox.Show(msg, "Export preflight", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
+                        return;
+                }
+            }
+            if (doSw && zonesSwitch.Count > 0)
+            {
+                var reportSw = BuildZonesDebugReport(zonesSwitch, 8, "Switch zones (preview)");
+                System.Diagnostics.Debug.WriteLine(reportSw);
+            }
+
+            // From here we show busy and guarantee it is hidden before any dialog
+            ShowBusy(doSw ? "Exporting switch zones..." : "Exporting activation zones...");
+            await Task.Delay(50); // let overlay render
+
+            try
+            {
+                byte unitId = (byte)Math.Clamp(Settings.ModemDec ?? 1, 1, 247);
+
+                if (Settings.IsTcpSelected)
+                {
+                    var host = Settings.TcpHost?.Trim();
+                    var port = Settings.TcpPort ?? 502;
+                    if (string.IsNullOrWhiteSpace(host))
+                    {
+                        await ShowMessageAfterBusyAsync("TCP/IP host is required.", "Export", MessageBoxButton.OK, MessageBoxImage.Warning);
+                        return;
+                    }
+
+                    string hostOnly = host.Split(new[] { ':', ';', ',' }, 2, StringSplitOptions.RemoveEmptyEntries)[0].Trim();
+                    string displayEndpoint = $"{hostOnly}:{port}";
+                    var cfg = ResolveProtocolCfg();
+
+                    // Quick probes (UI thread, but short)
+                    if (!TryModbusTcpPing(hostOnly, port, unitId, cfg.ConnectionTimeout, Math.Max(cfg.ReceiveTimeout, 3000), out var pingDiag))
+                    {
+                        await ShowMessageAfterBusyAsync($"No Modbus reply from {displayEndpoint} (UnitId {unitId}).\nDiag: {pingDiag}", "Export", MessageBoxButton.OK, MessageBoxImage.Warning);
+                        return;
+                    }
+                    if (!TryProbeBaseTcp(hostOnly, port, unitId, (ushort)(MPC_BASE_ADDR + MPC_WRITE_OFFSET), cfg.ConnectionTimeout, Math.Max(cfg.ReceiveTimeout, 3000), out _, out var baseProbeDiag))
+                    {
+                        if (!doSw) // allow switches-only to continue even if MPC map probe fails
+                        {
+                            await ShowMessageAfterBusyAsync($"No Modbus reply from {displayEndpoint} (UnitId {unitId}).\nDiag: {baseProbeDiag}", "Export", MessageBoxButton.OK, MessageBoxImage.Warning);
+                            return;
+                        }
+                    }
+                    if (!TryFindResponsiveUnitId(hostOnly, port, unitId, cfg.ConnectionTimeout, Math.Max(cfg.ReceiveTimeout, 3000), out var unitForWrite, out var uidProbeDiag))
+                    {
+                        await ShowMessageAfterBusyAsync($"No Modbus reply from {displayEndpoint}.\nTried UnitIds: {unitId}, 1, 255, 0\nDiag: {uidProbeDiag}", "Export", MessageBoxButton.OK, MessageBoxImage.Warning);
+                        return;
+                    }
+
+                    bool isRtv = false;
+                    if (TryReadFirmwareTcp(hostOnly, port, unitForWrite, out var fw, out _, out _))
+                        isRtv = IsRtvFirmware(fw);
+
+                    if (doSw && !isRtv && zonesSwitch.Count > 0)
+                    {
+                        // Hide busy before asking
+                        await Dispatcher.InvokeAsync(HideBusy);
+                        var force = MessageBox.Show(
+                            "Switch zones selected, but the device does not report RTV firmware.\n\nAttempt writing RTV switches to RTV offsets anyway?",
+                            "Export switches", MessageBoxButton.YesNo, MessageBoxImage.Question);
+                        if (force != MessageBoxResult.Yes)
+                        {
+                            // No re-show of busy; we're exiting
+                            return;
+                        }
+                        ShowBusy("Exporting switch zones...");
+                        await Task.Delay(50);
+                        isRtv = true;
+                    }
+
+                    // Heavy writes moved to background to avoid UI freeze
+                    if (doAct && zonesAct.Count > 0)
+                    {
+                        var actRes = await Task.Run(() =>
+                        {
+                            var ok = WriteMpcByExactRegistersOnly(
+                                hostOnly, port, unitForWrite, zonesAct,
+                                connectTimeoutMs: Math.Max(cfg.ConnectionTimeout, 3000),
+                                sendTimeoutMs: Math.Max(cfg.SendTimeout, 2000),
+                                receiveTimeoutMs: Math.Max(cfg.ReceiveTimeout, 6000),
+                                out ModbusStateCode st, out string? err);
+                            return (ok, st, err);
+                        });
+
+                        if (!actRes.ok)
+                        {
+                            var extra = string.IsNullOrWhiteSpace(actRes.err) ? "" : $" - {actRes.err}";
+                            await ShowMessageAfterBusyAsync($"Export (activation zones) failed (state={actRes.st}){extra}.\nTarget={displayEndpoint}, UnitId={unitForWrite}",
+                                "Export", MessageBoxButton.OK, MessageBoxImage.Error);
+                            return;
+                        }
+
+                        // Header write kept as-is (no-op safe)
+                        WriteActivationZoneCountTcp(
+                            hostOnly, port, unitForWrite, zonesAct.Count,
+                            connectTimeoutMs: Math.Max(cfg.ConnectionTimeout, 3000),
+                            sendTimeoutMs: Math.Max(cfg.SendTimeout, 2000),
+                            receiveTimeoutMs: Math.Max(cfg.ReceiveTimeout, 6000),
+                            out _, out _);
+                    }
+
+                    int switchesWritten = 0;
+                    if (doSw && isRtv && zonesSwitch.Count > 0)
+                    {
+                        var swRes = await Task.Run(() =>
+                        {
+                            var ok = WriteRtvSwitchesByExactRegistersOnly(
+                                hostOnly, port, unitForWrite, zonesSwitch,
+                                connectTimeoutMs: Math.Max(cfg.ConnectionTimeout, 3000),
+                                sendTimeoutMs: Math.Max(cfg.SendTimeout, 2000),
+                                receiveTimeoutMs: Math.Max(cfg.ReceiveTimeout, 6000),
+                                out ModbusStateCode st, out string? err);
+                            return (ok, st, err);
+                        });
+
+                        if (!swRes.ok)
+                        {
+                            var extra = string.IsNullOrWhiteSpace(swRes.err) ? "" : $" - {swRes.err}";
+                            await ShowMessageAfterBusyAsync($"Export (RTV switches) failed (state={swRes.st}){extra}.\nTarget={displayEndpoint}, UnitId={unitForWrite}",
+                                "Export", MessageBoxButton.OK, MessageBoxImage.Error);
+                            return;
+                        }
+                        switchesWritten = zonesSwitch.Count;
+                    }
+
+                    // Success message after Busy hides
+                    await ShowMessageAfterBusyAsync(
+                        doSw
+                            ? $"Exported {switchesWritten} switch zone(s) to {displayEndpoint} (UnitId {unitForWrite})."
+                            : $"Exported {zonesAct.Count} activation zone(s) to {displayEndpoint} (UnitId {unitForWrite}).",
+                        "Export", MessageBoxButton.OK, MessageBoxImage.Information);
+                }
+                else
+                {
+                    // RS485 (RTU) — these methods are already async and non-blocking on UI
+                    byte slave = (byte)Math.Clamp(Settings.ModemDec ?? 1, 1, 247);
+
+                    bool isRtv = false;
+                    {
+                        var (okFw, stFw, dataFw, _) = await ReadHoldingRegistersRtuAsync(Settings, slave, 0x0000, 0x0020, timeoutMs: 2000);
+                        if (okFw && stFw == ModbusStateCode.Success && dataFw != null)
+                            isRtv = IsRtvFirmware(DecodeAsciiFromRegs(dataFw));
+                    }
+
+                    if (doSw && !isRtv && zonesSwitch.Count > 0)
+                    {
+                        await Dispatcher.InvokeAsync(HideBusy);
+                        var force = MessageBox.Show(
+                            "Switch zones selected, but the device does not report RTV firmware.\n\nAttempt writing RTV switches to RTV offsets anyway?",
+                            "Export switches", MessageBoxButton.YesNo, MessageBoxImage.Question);
+                        if (force != MessageBoxResult.Yes) return;
+
+                        ShowBusy("Exporting switch zones...");
+                        await Task.Delay(50);
+                        isRtv = true;
+                    }
+
+                    if (doAct && zonesAct.Count > 0)
+                    {
+                        var (ok, st, err) = await WriteMpcZonesByExactRegistersRtuAsync(Settings, slave, zonesAct, timeoutMs: 3000);
+                        if (!ok || st != ModbusStateCode.Success)
+                        {
+                            var extra = string.IsNullOrWhiteSpace(err) ? "" : $" ({err})";
+                            await ShowMessageAfterBusyAsync($"Export activation zones over RS485 failed (state={st}){extra}.", "Export", MessageBoxButton.OK, MessageBoxImage.Error);
+                            return;
+                        }
+
+                        // Header is intentionally disabled; keep behavior consistent.
+                        await WriteActivationZoneCountRtuAsync(Settings, slave, zonesAct.Count, timeoutMs: 2000);
+                    }
+
+                    int switchesWritten = 0;
+                    if (doSw && isRtv && zonesSwitch.Count > 0)
+                    {
+                        var (okSw, stSw, errSw) = await WriteRtvSwitchesRtuAsync(Settings, slave, zonesSwitch, timeoutMs: 3000);
+                        if (!okSw || stSw != ModbusStateCode.Success)
+                        {
+                            var extra = string.IsNullOrWhiteSpace(errSw) ? "" : $" ({errSw})";
+                            await ShowMessageAfterBusyAsync($"Export RTV switches over RS485 failed (state={stSw}){extra}.", "Export", MessageBoxButton.OK, MessageBoxImage.Error);
+                            return;
+                        }
+                        switchesWritten = zonesSwitch.Count;
+                    }
+
+                    await ShowMessageAfterBusyAsync(
+                        doSw
+                            ? $"Exported {switchesWritten} switch zone(s) over RS485 on {Settings.SerialPortName} (slave {slave})."
+                            : $"Exported {zonesAct.Count} activation zone(s) over RS485 on {Settings.SerialPortName} (slave {slave}).",
+                        "Export", MessageBoxButton.OK, MessageBoxImage.Information);
+                }
+            }
+            catch (ArgumentOutOfRangeException aoorex) when (aoorex.StackTrace?.Contains("ModbusNewLib.Modbus.GetEndPointIp") == true)
+            {
+                // Keep fallback simple: activation only; switches skipped in this rare path
+                await ShowMessageAfterBusyAsync("TCP fallback path doesn’t support switches. Please retry.", "Export", MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
+            catch (Exception ex)
+            {
+                var target = Settings!.IsTcpSelected ? $"{Settings.TcpHost}:{Settings.TcpPort ?? 502}" : (Settings.SerialPortName ?? "-");
+                byte uid = (byte)Math.Clamp(Settings.ModemDec ?? 1, 1, 247);
+                var path = SaveExportError(ex, Settings.IsTcpSelected ? "TCP" : "RTU", target, uid, MPC_BASE_ADDR, 0, null);
+                await ShowMessageAfterBusyAsync($"Export error. Details were copied to clipboard and saved:\n{path}", "Export", MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
+            finally
+            {
+                // Ensure overlay is not left visible in any path
+                HideBusy();
+            }
+        }
+
+
+        private static async Task<(bool ok, ModbusStateCode state, string? error)> WriteHoldingRegistersRtuAsync(
+            ExportSettings s,
+            byte slave,
+            ushort regAddr,
+            ushort[] data,
+            int timeoutMs)
+        {
+            try
+            {
+                using var sp = new SerialPort(
+                s.SerialPortName!,
+                s.SerialBaudrate ?? 19200, // default 19200
+                ParseParity(s.SerialParity),
+                s.SerialDataBits ?? 8,
+                ParseStopBits(s.SerialStopBits));
+
+                sp.Handshake = Handshake.None;
+                sp.ReadTimeout = timeoutMs;
+                sp.WriteTimeout = timeoutMs;
+                sp.Open();
+
+                var req = BuildRtuWriteMultipleRegistersRequest(slave, regAddr, data);
+
+                await sp.BaseStream.WriteAsync(req, 0, req.Length, CancellationToken.None).ConfigureAwait(false);
+
+                // Response is 8 bytes: [slave][0x10][addr hi][addr lo][qty hi][qty lo][crc lo][crc hi]
+                var resp = new byte[8];
+                int read = 0;
+                using var cts = new CancellationTokenSource(timeoutMs);
+                while (read < resp.Length)
+                {
+                    int n = await sp.BaseStream.ReadAsync(resp, read, resp.Length - read, cts.Token).ConfigureAwait(false);
+                    if (n <= 0) break;
+                    read += n;
+                }
+
+                if (read < resp.Length)
+                    return (false, ModbusStateCode.Timeout, "Response timeout or truncated.");
+
+                // CRC check
+                ushort crc = Crc16Modbus(resp, 0, 6);
+                if (resp[6] != (byte)(crc & 0xFF) || resp[7] != (byte)(crc >> 8))
+                    return (false, ModbusStateCode.CRC, "CRC check failed.");
+
+                // Basic field checks
+                if (resp[0] != slave || resp[1] != 0x10)
+                    return (false, ModbusStateCode.WrongResponse, "Unexpected slave or function.");
+
+                ushort echoAddr = (ushort)((resp[2] << 8) | resp[3]);
+                ushort echoQty = (ushort)((resp[4] << 8) | resp[5]);
+                if (echoAddr != regAddr || echoQty != (ushort)data.Length)
+                    return (false, ModbusStateCode.IllegalResponseLength, "Address/quantity mismatch.");
+
+                return (true, ModbusStateCode.Success, null);
+            }
+            catch (OperationCanceledException)
+            {
+                return (false, ModbusStateCode.Timeout, "Operation timed out.");
+            }
+            catch (TimeoutException)
+            {
+                return (false, ModbusStateCode.Timeout, "Serial timeout.");
+            }
+            catch (Exception ex)
+            {
+                return (false, ModbusStateCode.UndefinedError, ex.Message);
+            }
+        }
+
+        private static byte[] BuildRtuWriteMultipleRegistersRequest(byte slave, ushort startAddr, ushort[] regs)
+        {
+            int byteCount = regs.Length * 2;
+            var payloadLen = 1 + 1 + 2 + 2 + 1 + byteCount; // slave + fn + addr + qty + cnt + data
+            var buf = new byte[payloadLen + 2];             // + CRC
+            int i = 0;
+
+            buf[i++] = slave;
+            buf[i++] = 0x10; // function 16
+            buf[i++] = (byte)(startAddr >> 8);
+            buf[i++] = (byte)(startAddr & 0xFF);
+            buf[i++] = (byte)(regs.Length >> 8);
+            buf[i++] = (byte)(regs.Length & 0xFF);
+            buf[i++] = (byte)byteCount;
+
+            foreach (var r in regs)
+            {
+                buf[i++] = (byte)(r >> 8);   // high byte first
+                buf[i++] = (byte)(r & 0xFF); // low byte
+            }
+
+            ushort crc = Crc16Modbus(buf, 0, payloadLen);
+            buf[i++] = (byte)(crc & 0xFF);  // CRC lo
+            buf[i++] = (byte)(crc >> 8);    // CRC hi
+
+            return buf;
+        }
+
+        private static ushort Crc16Modbus(ReadOnlySpan<byte> data, int offset, int count)
+        {
+            ushort crc = 0xFFFF;
+            for (int i = 0; i < count; i++)
+            {
+                crc ^= data[offset + i];
+                for (int b = 0; b < 8; b++)
+                {
+                    bool lsb = (crc & 0x0001) != 0;
+                    crc >>= 1;
+                    if (lsb) crc ^= 0xA001;
+                }
+            }
+            return crc;
+        }
+
+        private static Parity ParseParity(string? s) =>
+            string.Equals(s, "Even", StringComparison.OrdinalIgnoreCase) ? Parity.Even :
+            string.Equals(s, "Odd", StringComparison.OrdinalIgnoreCase) ? Parity.Odd :
+            string.Equals(s, "Mark", StringComparison.OrdinalIgnoreCase) ? Parity.Mark :
+            string.Equals(s, "Space", StringComparison.OrdinalIgnoreCase) ? Parity.Space :
+            Parity.None;
+
+        private static StopBits ParseStopBits(string? s) =>
+            string.Equals(s, "1.5", StringComparison.OrdinalIgnoreCase) ? StopBits.OnePointFive :
+            string.Equals(s, "2", StringComparison.OrdinalIgnoreCase) ? StopBits.Two :
+            StopBits.One;
+
+        private static ushort[] BuildMpcRegisterBlock(IReadOnlyList<ActivationZone> zones)
+        {
+            var list = new List<ushort>(zones.Count * 9);
+
+            foreach (var z in zones)
+            {
+                int main = Math.Clamp(z.MainZone, 0, 3);
+                int sub = Math.Clamp(z.SubZone, 0, 4);
+
+                // Float32 WS (LO first, then HI)
+                var (latLo, latHi) = FloatToWordsWS((float)z.Latitude);
+                var (lonLo, lonHi) = FloatToWordsWS((float)z.Longitude);
+
+                ushort widthCm = ToUInt16(z.Width * 100.0);
+                ushort heightCm = ToUInt16(z.Height * 100.0);
+                ushort az = (ushort)Math.Clamp(z.Azimuth, 0, 359);
+
+                list.Add((ushort)main);   // 1
+                list.Add((ushort)sub);    // 2
+                list.Add(latLo);          // 3 (WS)
+                list.Add(latHi);          // 4
+                list.Add(lonLo);          // 5
+                list.Add(lonHi);          // 6
+                list.Add(widthCm);        // 7
+                list.Add(heightCm);       // 8
+                list.Add(az);             // 9
+            }
+
+            return list.ToArray();
+        }
+
+        // Helpers for packing values into registers
+
+        // Big-endian word order: HI word first, then LO word (adjust if your gateway expects swapped order)
+        private static void PutInt32(List<ushort> regs, int value)
+        {
+            unchecked
+            {
+                ushort hi = (ushort)((value >> 16) & 0xFFFF);
+                ushort lo = (ushort)(value & 0xFFFF);
+                regs.Add(hi);
+                regs.Add(lo);
+            }
+        }
+
+        private static ushort ToUInt16(double value)
+        {
+            if (value <= 0) return 0;
+            if (value >= 65535) return 65535;
+            return (ushort)Math.Round(value, MidpointRounding.AwayFromZero);
+        }
+
+
+        private void Exit_Click(object sender, RoutedEventArgs e)
+        {
+            if (!TryOfferSaveChangesIfDirty())
+                return;
+            Close();
+        }
+
+        private void SelectComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (_suppressProfileChange) return;
+
+            var name = SelectComboBox.SelectedItem as string;
+            if (string.IsNullOrWhiteSpace(name)) return;
+            var prof = _profiles.FirstOrDefault(p => p.Name == name);
+            if (prof == null) return;
+
+            if (!TryOfferSaveChangesIfDirty())
+            {
+                // Revert selection
+                _suppressProfileChange = true;
+                if (!string.IsNullOrWhiteSpace(_loadedProfileName) && _profiles.Any(p => p.Name == _loadedProfileName))
+                    SelectComboBox.SelectedItem = _loadedProfileName;
+                else if (_profiles.Count > 0)
+                    SelectComboBox.SelectedIndex = 0;
+                else
+                    SelectComboBox.SelectedItem = null;
+                _suppressProfileChange = false;
+                return;
+            }
+
+            PopulateForm(prof.Settings);
+            CaptureLoadedSnapshot(prof.Settings, prof.Name);
+        }
+
+        private void SaveButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (!SaveChangesToCurrentProfile())
+                return;
+
+            MessageBox.Show("Profile updated.", "Save", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+
+        private void NewButton_Click(object sender, RoutedEventArgs e)
+        {
+            // Ask for new unique profile name
+            string proposed = string.IsNullOrWhiteSpace(_loadedProfileName) ? "New Profile" : $"{_loadedProfileName} (copy)";
+            string name;
+            while (true)
+            {
+                name = Interaction.InputBox("Enter new profile name:", "New profile", proposed).Trim();
+                if (string.IsNullOrWhiteSpace(name))
+                    return; // cancelled
+                if (_profiles.Any(p => string.Equals(p.Name, name)))
+                {
+                    MessageBox.Show("Profile with this name already exists.", "New profile", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    proposed = name;
+                    continue;
+                }
+                break;
+            }
+
+            // Clear UI fields (sets TCP by default and empties all textboxes)
+            ClearForm();
+
+            // Capture cleared/default settings from the UI
+            var emptySettings = ExportSettings.FromWindow(this);
+            // Ensure sane defaults for things not in UI
+            emptySettings.SerialHandshake ??= "None";
+
+            // Add new profile with cleared settings and persist
+            var profile = new ExportProfile { Name = name, Settings = emptySettings };
+            _profiles.Add(profile);
+            ExportSettingsStorage.Save(_profiles);
+
+            // Select the new profile and set snapshot to the cleared state
+            RefreshProfilesList(selectName: name);
+            // UI is already cleared; just capture the snapshot for dirty tracking
+            CaptureLoadedSnapshot(emptySettings, name);
+
+            MessageBox.Show("New profile created.", "New", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+
+        private void RenameButton_Click(object sender, RoutedEventArgs e)
+        {
+            var oldName = SelectComboBox.SelectedItem as string;
+            if (string.IsNullOrWhiteSpace(oldName))
+            {
+                MessageBox.Show("Select a profile to rename.", "Rename", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            var prof = _profiles.FirstOrDefault(p => p.Name == oldName);
+            if (prof == null) return;
+
+            var newName = Interaction.InputBox("New profile name:", "Rename profile", oldName).Trim();
+            if (string.IsNullOrWhiteSpace(newName) || string.Equals(newName, oldName)) return;
+
+            if (_profiles.Any(p => string.Equals(p.Name, newName)))
+            {
+                MessageBox.Show("Profile already exists.", "Rename", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            prof.Name = newName;
+            ExportSettingsStorage.Save(_profiles);
+            RefreshProfilesList(selectName: newName);
+
+            _loadedProfileName = newName;
+        }
+
+        private void DeleteButton_Click(object sender, RoutedEventArgs e)
+        {
+            var name = SelectComboBox.SelectedItem as string;
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                MessageBox.Show("Select a profile for deletion.", "Delete", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            var prof = _profiles.FirstOrDefault(p => p.Name == name);
+            if (prof == null) return;
+
+            if (MessageBox.Show($"Remove profile '{name}'?", "Delete profile", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
+                return;
+
+            _profiles.Remove(prof);
+            ExportSettingsStorage.Save(_profiles);
+
+            if (_profiles.Count > 0)
+            {
+                var next = _profiles[0].Name;
+                RefreshProfilesList(selectName: next);
+                PopulateForm(_profiles[0].Settings);
+                CaptureLoadedSnapshot(_profiles[0].Settings, _profiles[0].Name);
+            }
+            else
+            {
+                RefreshProfilesList(selectName: null);
+                ClearForm();
+                _isDirty = false;
+                _loadedProfileName = null;
+                _loadedSettings = null;
+            }
+        }
+
+        private void ConnectionComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e) => ApplyConnectionLayout();
+
+        private void ApplyConnectionLayout()
+        {
+            var selected = (ConnectionComboBox.SelectedItem as ComboBoxItem)?.Content?.ToString();
+            bool isTcp = string.Equals(selected, "TCP/IP", System.StringComparison.OrdinalIgnoreCase);
+
+            TcpFields.Visibility = isTcp ? Visibility.Visible : Visibility.Collapsed;
+            SerialFields.Visibility = isTcp ? Visibility.Collapsed : Visibility.Visible;
+
+            MarkDirtyIfActive();
+        }
+
+        private void PopulateForm(ExportSettings s)
+        {
+            _suppressFormEvents = true;
+
+            ConnectionComboBox.SelectedIndex = s.IsTcpSelected ? 0 : 1;
+            ApplyConnectionLayout();
+
+            TcpHostTextBox.Text = s.TcpHost ?? "";
+            TcpPortTextBox.Text = s.TcpPort?.ToString() ?? "";
+
+            SerialPortTextBox.Text = s.SerialPortName ?? "";
+            SerialBaudTextBox.Text = s.SerialBaudrate?.ToString() ?? "";
+            SerialDataBitsTextBox.Text = s.SerialDataBits?.ToString() ?? "";
+            SerialParityTextBox.Text = s.SerialParity ?? "";
+            SerialStopBitsTextBox.Text = s.SerialStopBits ?? "";
+
+            ModemTextBox.Text = s.ModemRaw ?? (s.ModemDec?.ToString() ?? "");
+
+            _suppressFormEvents = false;
+            _isDirty = false;
+        }
+
+        private void ClearForm()
+        {
+            _suppressFormEvents = true;
+
+            ConnectionComboBox.SelectedIndex = 0;
+            ApplyConnectionLayout();
+
+            TcpHostTextBox.Text = "";
+            TcpPortTextBox.Text = "";
+
+            SerialPortTextBox.Text = "";
+            SerialBaudTextBox.Text = "";
+            SerialDataBitsTextBox.Text = "";
+            SerialParityTextBox.Text = "";
+            SerialStopBitsTextBox.Text = "";
+
+            ModemTextBox.Text = "";
+
+            _suppressFormEvents = false;
+            _isDirty = false;
+        }
+
+        private void RefreshProfilesList(string? selectName = null)
+        {
+            var names = _profiles.Select(p => p.Name).ToList();
+            _suppressProfileChange = true;
+            SelectComboBox.ItemsSource = names;
+
+            if (!string.IsNullOrWhiteSpace(selectName) && names.Contains(selectName))
+            {
+                SelectComboBox.SelectedItem = selectName;
+            }
+            else if (names.Count > 0)
+            {
+                SelectComboBox.SelectedIndex = 0;
+            }
+            else
+            {
+                SelectComboBox.SelectedItem = null;
+            }
+            _suppressProfileChange = false;
+        }
+
+        // ===== Change tracking =====
+
+        private void AttachChangeTracking()
+        {
+            AddHandler(TextBoxBase.TextChangedEvent, new TextChangedEventHandler(OnAnyTextChanged));
+        }
+
+        private void OnAnyTextChanged(object sender, TextChangedEventArgs e) => MarkDirtyIfActive();
+
+        private void MarkDirtyIfActive()
+        {
+            if (_suppressFormEvents) return;
+            _isDirty = true;
+        }
+
+        private void CaptureLoadedSnapshot(ExportSettings s, string name)
+        {
+            _loadedProfileName = name;
+            _loadedSettings = CloneSettings(s);
+            _isDirty = false;
+        }
+
+        private static ExportSettings CloneSettings(ExportSettings s) => ExportSettings.CloneFrom(s);
+
+        private static bool AreSettingsEqual(ExportSettings a, ExportSettings b)
+        {
+            if (a == null || b == null) return false;
+            return
+                a.IsTcpSelected == b.IsTcpSelected &&
+                (a.TcpHost ?? "") == (b.TcpHost ?? "") &&
+                a.TcpPort == b.TcpPort &&
+                (a.SerialPortName ?? "") == (b.SerialPortName ?? "") &&
+                a.SerialBaudrate == b.SerialBaudrate &&
+                a.SerialDataBits == b.SerialDataBits &&
+                (a.SerialParity ?? "") == (b.SerialParity ?? "") &&
+                (a.SerialStopBits ?? "") == (b.SerialStopBits ?? "") &&
+                (a.SerialHandshake ?? "") == (b.SerialHandshake ?? "") &&
+                (a.ModemRaw ?? "") == (b.ModemRaw ?? "") &&
+                a.ModemDec == b.ModemDec &&
+                (a.ModemHex ?? "") == (b.ModemHex ?? "");
+        }
+
+        // New helper: update current profile
+        private bool SaveChangesToCurrentProfile()
+        {
+            var selectedName = SelectComboBox.SelectedItem as string;
+            if (string.IsNullOrWhiteSpace(selectedName))
+            {
+                MessageBox.Show("Select a profile first (or use New to create one).", "Save", MessageBoxButton.OK, MessageBoxImage.Information);
+                return false;
+            }
+
+            var prof = _profiles.FirstOrDefault(p => p.Name == selectedName);
+            if (prof == null)
+            {
+                MessageBox.Show("Selected profile not found.", "Save", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return false;
+            }
+
+            var current = ExportSettings.FromWindow(this);
+            prof.Settings = current;
+            ExportSettingsStorage.Save(_profiles);
+
+            RefreshProfilesList(selectName: selectedName);
+            CaptureLoadedSnapshot(current, selectedName);
+            return true;
+        }
+
+        // Offer to save changes to current profile (no "save as new" here)
+        private bool TryOfferSaveChangesIfDirty()
+        {
+            if (!_isDirty)
+                return true;
+
+            var current = ExportSettings.FromWindow(this);
+            if (_loadedSettings != null && AreSettingsEqual(current, _loadedSettings))
+            {
+                _isDirty = false;
+                return true;
+            }
+
+            var selectedName = SelectComboBox.SelectedItem as string;
+            if (!string.IsNullOrWhiteSpace(selectedName))
+            {
+                var res = MessageBox.Show(
+                    $"Save changes to profile '{selectedName}'?",
+                    "Unsaved changes",
+                    MessageBoxButton.YesNoCancel,
+                    MessageBoxImage.Question);
+
+                if (res == MessageBoxResult.Cancel)
+                    return false;
+
+                if (res == MessageBoxResult.Yes)
+                    return SaveChangesToCurrentProfile();
+
+                // No = discard
+                _isDirty = false;
+                return true;
+            }
+            else
+            {
+                // No profile selected – cannot save; offer to discard or cancel
+                var res = MessageBox.Show(
+                    "There is no selected profile. Use New to create one.\nDiscard changes?",
+                    "Unsaved changes",
+                    MessageBoxButton.OKCancel,
+                    MessageBoxImage.Question);
+
+                if (res != MessageBoxResult.OK)
+                    return false;
+
+                _isDirty = false;
+                return true;
+            }
+        }
+
+        // Add to the ExportWindow class
+        private static bool TryValidateSettings(ExportSettings s, out string message)
+        {
+            var errors = new List<string>();
+
+            // Modem (slave)
+            if (!s.ModemDec.HasValue)
+                errors.Add("Modem number (slave address) is required.");
+            else if (s.ModemDec < 1 || s.ModemDec > 247)
+                errors.Add("Modem number (slave address) must be in 1..247.");
+
+            if (s.IsTcpSelected)
+            {
+                if (string.IsNullOrWhiteSpace(s.TcpHost))
+                    errors.Add("TCP/IP host is required.");
+                if (!s.TcpPort.HasValue)
+                    errors.Add("TCP/IP port is required.");
+                else if (s.TcpPort < 1 || s.TcpPort > 65535)
+                    errors.Add("TCP/IP port must be in range 1..65535.");
+            }
+            else
+            {
+                if (string.IsNullOrWhiteSpace(s.SerialPortName))
+                    errors.Add("Serial port is required.");
+                if (!s.SerialBaudrate.HasValue || s.SerialBaudrate <= 0)
+                    errors.Add("Baudrate must be a positive number.");
+                if (!s.SerialDataBits.HasValue || s.SerialDataBits < 5 || s.SerialDataBits > 8)
+                    errors.Add("Data bits must be 5..8.");
+                if (string.IsNullOrWhiteSpace(s.SerialParity) || !IsValidParity(s.SerialParity))
+                    errors.Add("Parity must be one of: None, Even, Odd, Mark, Space.");
+                if (string.IsNullOrWhiteSpace(s.SerialStopBits) || !IsValidStopBits(s.SerialStopBits))
+                    errors.Add("Stop bits must be one of: 1, 1.5, 2.");
+            }
+
+            if (errors.Count > 0)
+            {
+                message = string.Join("\n", errors);
+                return false;
+            }
+
+            message = string.Empty;
+            return true;
+        }
+
+        private static bool IsValidParity(string value) =>
+            value.Equals("None", StringComparison.OrdinalIgnoreCase) ||
+            value.Equals("Even", StringComparison.OrdinalIgnoreCase) ||
+            value.Equals("Odd", StringComparison.OrdinalIgnoreCase) ||
+            value.Equals("Mark", StringComparison.OrdinalIgnoreCase) ||
+            value.Equals("Space", StringComparison.OrdinalIgnoreCase);
+
+        private static bool IsValidStopBits(string value) =>
+            value.Equals("1", StringComparison.OrdinalIgnoreCase) ||
+            value.Equals("1.5", StringComparison.OrdinalIgnoreCase) ||
+            value.Equals("2", StringComparison.OrdinalIgnoreCase);
+
+        private static bool WriteHoldingRegistersTcpChunked(
+            ModbusTcpIp modbus,
+            byte slave,
+            ushort startAddr,
+            ushort[] regs,
+            out ModbusStateCode state)
+        {
+            // Backward-compatible wrapper uses default size/delay
+            return WriteHoldingRegistersTcpChunkedSized(modbus, slave, startAddr, regs, MAX_REGS_PER_REQUEST, interChunkDelayMs: 100, out state);
+        }
+
+        private static bool WriteHoldingRegistersTcpChunkedSized(
+        ModbusTcpIp modbus,
+        byte slave,
+        ushort startAddr,
+        ushort[] regs,
+        int maxRegsPerRequest,
+        int interChunkDelayMs,
+        out ModbusStateCode state)
+        {
+            state = ModbusStateCode.Success;
+            int offset = 0;
+            while (offset < regs.Length)
+            {
+                int count = Math.Min(maxRegsPerRequest, regs.Length - offset);
+                var slice = new ushort[count];
+                Array.Copy(regs, offset, slice, 0, count);
+
+                ushort addr = (ushort)(startAddr + offset);
+                bool ok = modbus.WriteDataToHoldingRegisters(
+                    slaveAddr: slave,
+                    regAddr: addr,
+                    regCount: (ushort)count,
+                    data: slice,
+                    state: out state,
+                    moduleRefName: null); 
+
+                if (!ok || state != ModbusStateCode.Success)
+                    return false;
+
+                if (interChunkDelayMs > 0)
+                    System.Threading.Thread.Sleep(interChunkDelayMs);
+
+                offset += count;
+            }
+            return true;
+        }
+
+        private static async Task<(bool ok, ModbusStateCode state, string? error)> WriteHoldingRegistersRtuChunkedAsync(
+            ExportSettings s,
+            byte slave,
+            ushort startAddr,
+            ushort[] regs,
+            int timeoutMs)
+        {
+            try
+            {
+                using var sp = new SerialPort(
+                s.SerialPortName!,
+                s.SerialBaudrate ?? 19200, // default 19200
+                ParseParity(s.SerialParity),
+                s.SerialDataBits ?? 8,
+                ParseStopBits(s.SerialStopBits))
+                {
+                    Handshake = Handshake.None,
+                    ReadTimeout = timeoutMs,
+                    WriteTimeout = timeoutMs
+                };
+                sp.Open();
+
+                int offset = 0;
+                while (offset < regs.Length)
+                {
+                    int count = Math.Min(MAX_REGS_PER_REQUEST, regs.Length - offset);
+                    var slice = new ushort[count];
+                    Array.Copy(regs, offset, slice, 0, count);
+
+                    ushort addr = (ushort)(startAddr + offset);
+                    var req = BuildRtuWriteMultipleRegistersRequest(slave, addr, slice);
+
+                    await sp.BaseStream.WriteAsync(req, 0, req.Length, CancellationToken.None).ConfigureAwait(false);
+
+                    // Expect 8-byte response for function 16
+                    var resp = new byte[8];
+                    int read = 0;
+                    using var cts = new CancellationTokenSource(timeoutMs);
+                    while (read < resp.Length)
+                    {
+                        int n = await sp.BaseStream.ReadAsync(resp, read, resp.Length - read, cts.Token).ConfigureAwait(false);
+                        if (n <= 0) break;
+                        read += n;
+                    }
+                    if (read < resp.Length)
+                        return (false, ModbusStateCode.Timeout, "Response timeout or truncated.");
+
+                    ushort crc = Crc16Modbus(resp, 0, 6);
+                    if (resp[6] != (byte)(crc & 0xFF) || resp[7] != (byte)(crc >> 8))
+                        return (false, ModbusStateCode.CRC, "CRC check failed.");
+
+                    if (resp[0] != slave || resp[1] != 0x10)
+                        return (false, ModbusStateCode.WrongResponse, "Unexpected slave or function.");
+
+                    ushort echoAddr = (ushort)((resp[2] << 8) | resp[3]);
+                    ushort echoQty = (ushort)((resp[4] << 8) | resp[5]);
+                    if (echoAddr != addr || echoQty != (ushort)count)
+                        return (false, ModbusStateCode.IllegalResponseLength, "Address/quantity mismatch.");
+
+                    offset += count;
+                }
+
+                return (true, ModbusStateCode.Success, null);
+            }
+            catch (OperationCanceledException)
+            {
+                return (false, ModbusStateCode.Timeout, "Operation timed out.");
+            }
+            catch (TimeoutException)
+            {
+                return (false, ModbusStateCode.Timeout, "Serial timeout.");
+            }
+            catch (Exception ex)
+            {
+                return (false, ModbusStateCode.UndefinedError, ex.Message);
+            }
+        }
+
+        private static string SaveExportError(Exception ex, string transport, string target, byte unitId, ushort baseAddr, int regsLen, ModbusStateCode? state = null)
+        {
+            var ts = DateTime.Now;
+            var logPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"V2X_Export_{ts:yyyyMMdd_HHmmss}.log");
+            var details =
+                    $@"[{ts:O}] Export error
+                    Transport   : {transport}
+                    Target      : {target}
+                    UnitId      : {unitId}
+                    BaseAddr    : 0x{baseAddr:X4}
+                    RegsLength  : {regsLen}
+                    State       : {(state?.ToString() ?? "-")}
+                    Exception   :
+                    {ex}";
+
+            try { System.IO.File.WriteAllText(logPath, details); } catch { /* ignore */ }
+            try { System.Windows.Clipboard.SetText(details); } catch { /* ignore non-STA/permissions */ }
+            return logPath;
+        }
+
+        
+        // TCP retry wrapper (base, base-1, base+1)
+        private static bool TryWriteTcpWithFallback(ModbusTcpIp modbus, byte unitId, ushort baseAddr, ushort[] regs, out ModbusStateCode state, out ushort usedBase)
+        {
+            usedBase = baseAddr;
+            if (WriteHoldingRegistersTcpChunked(modbus, unitId, baseAddr, regs, out state))
+                return state == ModbusStateCode.Success;
+
+            if (baseAddr > 0)
+            {
+                ushort altMinus = (ushort)(baseAddr - 1);
+                if (WriteHoldingRegistersTcpChunked(modbus, unitId, altMinus, regs, out state) && state == ModbusStateCode.Success)
+                {
+                    usedBase = altMinus;
+                    return true;
+                }
+            }
+
+            if (baseAddr < ushort.MaxValue)
+            {
+                ushort altPlus = (ushort)(baseAddr + 1);
+                if (WriteHoldingRegistersTcpChunked(modbus, unitId, altPlus, regs, out state) && state == ModbusStateCode.Success)
+                {
+                    usedBase = altPlus;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool TryWriteTcpWithFallback(
+            ModbusTcpIp modbus, byte unitId, ushort baseAddr, ushort[] regs,
+            int maxRegsPerRequest, int interChunkDelayMs,
+            out ModbusStateCode state, out ushort usedBase)
+        {
+            usedBase = baseAddr;
+            if (WriteHoldingRegistersTcpChunkedSized(modbus, unitId, baseAddr, regs, maxRegsPerRequest, interChunkDelayMs, out state))
+                return state == ModbusStateCode.Success;
+
+            if (baseAddr > 0)
+            {
+                ushort altMinus = (ushort)(baseAddr - 1);
+                if (WriteHoldingRegistersTcpChunkedSized(modbus, unitId, altMinus, regs, maxRegsPerRequest, interChunkDelayMs, out state) && state == ModbusStateCode.Success)
+                {
+                    usedBase = altMinus;
+                    return true;
+                }
+            }
+
+            if (baseAddr < ushort.MaxValue)
+            {
+                ushort altPlus = (ushort)(baseAddr + 1);
+                if (WriteHoldingRegistersTcpChunkedSized(modbus, unitId, altPlus, regs, maxRegsPerRequest, interChunkDelayMs, out state) && state == ModbusStateCode.Success)
+                {
+                    usedBase = altPlus;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static async Task<(bool ok, ModbusStateCode state, ushort usedBase, string? error)> TryWriteRtuWithFallbackAsync(
+            ExportSettings s, byte unitId, ushort baseAddr, ushort[] regs, int timeoutMs)
+        {
+            var first = await WriteHoldingRegistersRtuChunkedAsync(s, unitId, baseAddr, regs, timeoutMs);
+            if (first.ok && first.state == ModbusStateCode.Success)
+                return (true, first.state, baseAddr, null);
+
+            if (baseAddr > 0)
+            {
+                ushort altMinus = (ushort)(baseAddr - 1);
+                var second = await WriteHoldingRegistersRtuChunkedAsync(s, unitId, altMinus, regs, timeoutMs);
+                if (second.ok && second.state == ModbusStateCode.Success)
+                    return (true, second.state, altMinus, null);
+            }
+
+            if (baseAddr < ushort.MaxValue)
+            {
+                ushort altPlus = (ushort)(baseAddr + 1);
+                var third = await WriteHoldingRegistersRtuChunkedAsync(s, unitId, altPlus, regs, timeoutMs);
+                if (third.ok && third.state == ModbusStateCode.Success)
+                    return (true, third.state, altPlus, null);
+                return (false, third.state, altPlus, third.error);
+            }
+
+            return (false, first.state, baseAddr, first.error);
+        }
+
+        private static void TrySetProtocolTimeouts(object protocolParams, int connectMs = 3000, int sendMs = 3000, int receiveMs = 3000)
+        {
+            var t = protocolParams.GetType();
+            void Set(string name, int val)
+            {
+                var p = t.GetProperty(name, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                if (p != null && p.CanWrite && p.PropertyType == typeof(int))
+                    p.SetValue(protocolParams, val);
+            }
+
+
+            Set("ConnectTimeoutMs", connectMs);
+            Set("ConnectTimeout", connectMs);
+            Set("TcpConnectTimeoutMs", connectMs);
+            Set("TcpConnectTimeout", connectMs);
+
+            Set("SendTimeoutMs", sendMs);
+            Set("SendTimeout", sendMs);
+            Set("TcpSendTimeoutMs", sendMs);
+            Set("TcpSendTimeout", sendMs);
+
+            Set("ReceiveTimeoutMs", receiveMs);
+            Set("ReceiveTimeout", receiveMs);
+            Set("TcpReceiveTimeoutMs", receiveMs);
+            Set("TcpReceiveTimeout", receiveMs);
+        }
+
+        // Also set timeouts on instance objects where available
+        private static void TrySetInstanceTimeouts(object modbus, int connectMs, int sendMs, int receiveMs)
+        {
+            const System.Reflection.BindingFlags BF =
+                System.Reflection.BindingFlags.Public |
+                System.Reflection.BindingFlags.NonPublic |
+                System.Reflection.BindingFlags.Instance;
+
+            void SetInt(string name, int val)
+            {
+                var p = modbus.GetType().GetProperty(name, BF);
+                if (p != null && p.CanWrite && p.PropertyType == typeof(int))
+                {
+                    p.SetValue(modbus, val);
+                    return;
+                }
+                var f = modbus.GetType().GetField(name, BF);
+                if (f != null && f.FieldType == typeof(int))
+                    f.SetValue(modbus, val);
+            }
+
+            SetInt("ConnectTimeoutMs", connectMs);
+            SetInt("ConnectTimeout", connectMs);
+            SetInt("TcpConnectTimeoutMs", connectMs);
+            SetInt("TcpConnectTimeout", connectMs);
+
+            SetInt("SendTimeoutMs", sendMs);
+            SetInt("SendTimeout", sendMs);
+            SetInt("TcpSendTimeoutMs", sendMs);
+            SetInt("TcpSendTimeout", sendMs);
+
+            SetInt("ReceiveTimeoutMs", receiveMs);
+            SetInt("ReceiveTimeout", receiveMs);
+            SetInt("TcpReceiveTimeoutMs", receiveMs);
+            SetInt("TcpReceiveTimeout", receiveMs);
+        }
+
+        private static void TryCallConnect(object modbus)
+        {
+            const System.Reflection.BindingFlags BF =
+                System.Reflection.BindingFlags.Public |
+                System.Reflection.BindingFlags.NonPublic |
+                System.Reflection.BindingFlags.Instance;
+
+            var names = new[] { "Connect", "Open", "Initialize", "Init" };
+            foreach (var n in names)
+            {
+                var m = modbus.GetType().GetMethod(n, BF, new Type[0]);
+                if (m != null)
+                {
+                    try { m.Invoke(modbus, null); } catch { }
+                    break;
+                }
+            }
+        }
+
+        // Update helper to optionally carry a full semicolon endpoint too
+        private static void TrySetProtocolEndpoint(object protocolParams, string host, int port, string? fullEndpoint = null)
+        {
+            var t = protocolParams.GetType();
+            void SetStr(string name, string val)
+            {
+                var p = t.GetProperty(name, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                if (p != null && p.CanWrite && p.PropertyType == typeof(string))
+                    p.SetValue(protocolParams, val);
+            }
+            void SetInt(string name, int val)
+            {
+                var p = t.GetProperty(name, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                if (p != null && p.CanWrite && p.PropertyType == typeof(int))
+                    p.SetValue(protocolParams, val);
+            }
+
+            var hostOnly = host.Split(new[] { ':', ';', ',' }, 2, StringSplitOptions.RemoveEmptyEntries)[0].Trim();
+            var ep = fullEndpoint ?? $"{hostOnly};{port};0";
+
+            // Host/Port hints
+            SetStr("TcpServerIp", hostOnly);
+            SetStr("ServerIp", hostOnly);
+            SetStr("IpAddress", hostOnly);
+            SetStr("Host", hostOnly);
+            SetStr("HostName", hostOnly);
+            SetInt("TcpServerPort", port);
+            SetInt("ServerPort", port);
+            SetInt("Port", port);
+            SetInt("TcpPort", port);
+
+            // Full endpoint (semicolon-based) for builds that parse GetEndPointIp
+            SetStr("EndPointIp", ep);
+            SetStr("EndPoint", ep);
+            SetStr("TcpEndPoint", ep);
+            SetStr("ModbusTcpEndPoint", ep);
+        }
+
+        private static (int SuccessiveRequestDelay, int ConnectionTimeout, int SendTimeout, int ReceiveTimeout, int ReceiveAgainTimeout)
+        ResolveProtocolCfg()
+        {
+            // Defaults if Config.CfgData is not available
+            var defaults = (SuccessiveRequestDelay: 100, ConnectionTimeout: 2000, SendTimeout: 1500, ReceiveTimeout: 1500, ReceiveAgainTimeout: 1500);
+
+            try
+            {
+                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    Type? cfgType = null;
+                    try { cfgType = asm.GetTypes().FirstOrDefault(t => t.Name == "Config"); } catch { /* reflection-only or dynamic asm */ }
+                    if (cfgType == null) continue;
+
+                    var cfgDataProp = cfgType.GetProperty("CfgData", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+                    if (cfgDataProp == null) continue;
+
+                    var cfgData = cfgDataProp.GetValue(null);
+                    if (cfgData == null) continue;
+
+                    int GetInt(string name, int def)
+                    {
+                        var p = cfgData.GetType().GetProperty(name, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                        if (p != null && p.PropertyType == typeof(int))
+                        {
+                            var val = (int?)p.GetValue(cfgData);
+                            if (val.HasValue) return val.Value;
+                        }
+                        return def;
+                    }
+
+                    var srd = GetInt("SuccessiveRequestDelay", defaults.SuccessiveRequestDelay);
+                    var ct = GetInt("ConnectionTimeout", defaults.ConnectionTimeout);
+                    var st = GetInt("SendTimeout", defaults.SendTimeout);
+                    var rt = GetInt("ReceiveTimeout", defaults.ReceiveTimeout);
+                    var rat = GetInt("ReceiveAgainTimeout", defaults.ReceiveAgainTimeout);
+
+                    return (srd, ct, st, rt, rat);
+                }
+            }
+            catch
+            {
+                // ignore and use defaults
+            }
+
+            return defaults;
+        }
+
+        // Add inside ExportWindow (near other helpers)
+        private static void TrySetModbusEndpoint(object modbus, string fullEndpoint)
+        {
+            // Try common property/field names on the object and its base types
+            var names = new[] { "EndPointIp", "EndPoint", "TcpEndPoint", "ModbusTcpEndPoint", "_endPointIp", "_endPoint" };
+
+            static void SetStrMember(Type t, object target, string name, string val)
+            {
+                const System.Reflection.BindingFlags BF =
+                    System.Reflection.BindingFlags.Public |
+                    System.Reflection.BindingFlags.NonPublic |
+                    System.Reflection.BindingFlags.Instance;
+
+                var p = t.GetProperty(name, BF);
+                if (p != null && p.CanWrite && p.PropertyType == typeof(string))
+                {
+                    p.SetValue(target, val);
+                    return;
+                }
+                var f = t.GetField(name, BF);
+                if (f != null && f.FieldType == typeof(string))
+                {
+                    f.SetValue(target, val);
+                }
+            }
+
+            for (var t = modbus.GetType(); t != null; t = t.BaseType!)
+            {
+                foreach (var n in names)
+                    SetStrMember(t, modbus, n, fullEndpoint);
+            }
+        }
+
+        // Add this helper inside ExportWindow (near other helpers)
+        private static void TrySetGlobalModbusEndpoint(string fullEndpoint)
+        {
+            // Set likely static properties/fields on Modbus types (and base types) to a semicolon endpoint.
+            var names = new[] { "EndPointIp", "EndPoint", "TcpEndPoint", "ModbusTcpEndPoint", "_endPointIp", "_endPoint" };
+
+            static void SetStaticStrMember(Type t, string name, string val)
+            {
+                const System.Reflection.BindingFlags BF =
+                    System.Reflection.BindingFlags.Public |
+                    System.Reflection.BindingFlags.NonPublic |
+                    System.Reflection.BindingFlags.Static;
+
+                var p = t.GetProperty(name, BF);
+                if (p != null && p.CanWrite && p.PropertyType == typeof(string))
+                {
+                    p.SetValue(null, val);
+                    return;
+                }
+                var f = t.GetField(name, BF);
+                if (f != null && f.FieldType == typeof(string))
+                {
+                    f.SetValue(null, val);
+                }
+            }
+
+            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                Type[] types;
+                try { types = asm.GetTypes(); } catch { continue; }
+
+                foreach (var t in types)
+                {
+                    // Focus on Modbus* types in ModbusNewLib
+                    if (t.Namespace?.Contains("ModbusNewLib", StringComparison.OrdinalIgnoreCase) != true)
+                        continue;
+                    if (!t.Name.StartsWith("Modbus", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    for (var cur = t; cur != null; cur = cur.BaseType)
+                    {
+                        foreach (var n in names)
+                            SetStaticStrMember(cur, n, fullEndpoint);
+                    }
+                }
+            }
+        }
+
+        // Add inside ExportWindow (near other helpers)
+        private static ModbusTcpIp CreateModbusTcpIp(string hostOnly, int port, object protocolParams, out string endpointUsed)
+        {
+            var t = typeof(ModbusTcpIp);
+            // Prefer ctor(string host, int port, ProtocolParams)
+            var ctors = t.GetConstructors();
+            foreach (var c in ctors)
+            {
+                var p = c.GetParameters();
+                if (p.Length == 3 &&
+                    p[0].ParameterType == typeof(string) &&
+                    p[1].ParameterType == typeof(int) &&
+                    p[2].ParameterType.IsAssignableFrom(protocolParams.GetType()))
+                {
+                    endpointUsed = $"{hostOnly}:{port}";
+                    return (ModbusTcpIp)c.Invoke(new object[] { hostOnly, port, protocolParams });
+                }
+            }
+            // Next: ctor(string host, int port)
+            foreach (var c in ctors)
+            {
+                var p = c.GetParameters();
+                if (p.Length == 2 &&
+                    p[0].ParameterType == typeof(string) &&
+                    p[1].ParameterType == typeof(int))
+                {
+                    endpointUsed = $"{hostOnly}:{port}";
+                    var mod = (ModbusTcpIp)c.Invoke(new object[] { hostOnly, port });
+                    // Try to apply protocol params, host/port directly on the instance as a best-effort
+                    TrySetProtocolEndpoint(protocolParams, hostOnly, port);
+                    TrySetProtocolTimeouts(protocolParams);
+                    TrySetHostPortOnModbus(mod, hostOnly, port);
+                    return mod;
+                }
+            }
+            // Fallback: ctor(string endPoint, ProtocolParams) with a safe semicolon endpoint
+            var safe = $"{hostOnly};{port};0";
+            foreach (var c in ctors)
+            {
+                var p = c.GetParameters();
+                if (p.Length == 2 &&
+                    p[0].ParameterType == typeof(string) &&
+                    p[1].ParameterType.IsAssignableFrom(protocolParams.GetType()))
+                {
+                    endpointUsed = safe;
+                    return (ModbusTcpIp)c.Invoke(new object[] { safe, protocolParams });
+                }
+            }
+            // Last resort: any ctor(string)
+            foreach (var c in ctors)
+            {
+                var p = c.GetParameters();
+                if (p.Length == 1 && p[0].ParameterType == typeof(string))
+                {
+                    endpointUsed = safe;
+                    var mod = (ModbusTcpIp)c.Invoke(new object[] { safe });
+                    TrySetHostPortOnModbus(mod, hostOnly, port);
+                    return mod;
+                }
+            }
+            throw new NotSupportedException("No suitable ModbusTcpIp constructor found.");
+        }
+
+        private static void TrySetHostPortOnModbus(object modbus, string host, int port)
+        {
+            var namesStr = new[] { "TcpServerIp", "ServerIp", "IpAddress", "Host", "HostName" };
+            var namesInt = new[] { "TcpServerPort", "ServerPort", "Port", "TcpPort" };
+            const System.Reflection.BindingFlags BF =
+                System.Reflection.BindingFlags.Public |
+                System.Reflection.BindingFlags.NonPublic |
+                System.Reflection.BindingFlags.Instance;
+
+            void SetStr(string n)
+            {
+                var p = modbus.GetType().GetProperty(n, BF);
+                if (p != null && p.CanWrite && p.PropertyType == typeof(string))
+                    p.SetValue(modbus, host);
+                var f = modbus.GetType().GetField(n, BF);
+                if (f != null && f.FieldType == typeof(string))
+                    f.SetValue(modbus, host);
+            }
+            void SetInt(string n)
+            {
+                var p = modbus.GetType().GetProperty(n, BF);
+                if (p != null && p.CanWrite && p.PropertyType == typeof(int))
+                    p.SetValue(modbus, port);
+                var f = modbus.GetType().GetField(n, BF);
+                if (f != null && f.FieldType == typeof(int))
+                    f.SetValue(modbus, port);
+            }
+
+            foreach (var n in namesStr) SetStr(n);
+            foreach (var n in namesInt) SetInt(n);
+        }
+
+        
+        // Minimal Modbus/TCP writer (function 16) that bypasses ModbusNewLib endpoint parsing
+        private static bool WriteHoldingRegistersTcpDirectChunked(
+            string host, int port,
+            byte unitId,
+            ushort startAddr,
+            ushort[] regs,
+            int maxRegsPerRequest,
+            int connectTimeoutMs,
+            int sendTimeoutMs,
+            int receiveTimeoutMs,
+            out ModbusStateCode state,
+            out ushort usedBase)
+        {
+            usedBase = startAddr;
+            state = ModbusStateCode.Success;
+
+            bool TryOnce(ushort baseAddr, out ModbusStateCode st)
+            {
+                st = ModbusStateCode.Success;
+
+                using var client = new System.Net.Sockets.TcpClient();
+                try
+                {
+                    var connectTask = client.ConnectAsync(host, port);
+                    if (!connectTask.Wait(connectTimeoutMs))
+                    {
+                        st = ModbusStateCode.Timeout;
+                        return false;
+                    }
+                }
+                catch
+                {
+                    st = ModbusStateCode.UndefinedError;
+                    return false;
+                }
+
+                // Tweak socket options and timeouts
+                client.NoDelay = true;
+                client.SendTimeout = Math.Max(sendTimeoutMs, 3000);
+                client.ReceiveTimeout = Math.Max(receiveTimeoutMs, 5000);
+
+                using var stream = client.GetStream();
+
+                ushort txId = 1;
+                int offset = 0;
+                while (offset < regs.Length)
+                {
+                    int count = Math.Min(maxRegsPerRequest, regs.Length - offset);
+                    ushort addr = (ushort)(baseAddr + offset);
+
+                    // Build MBAP + PDU for function 0x10
+                    // MBAP: [tx_hi, tx_lo, 0x00, 0x00, len_hi, len_lo, unit]
+                    // PDU:  [0x10, addr_hi, addr_lo, qty_hi, qty_lo, byteCnt, data...]
+                    int byteCount = count * 2;
+                    int pduLen = 1 + 2 + 2 + 1 + byteCount; // fc + addr + qty + cnt + data
+                    int mbapLen = 7;
+                    var buf = new byte[mbapLen + pduLen];
+
+                    // MBAP
+                    buf[0] = (byte)(txId >> 8);
+                    buf[1] = (byte)(txId & 0xFF);
+                    buf[2] = 0x00;
+                    buf[3] = 0x00;
+                    ushort lenField = (ushort)(pduLen + 1); // UnitId + PDU
+                    buf[4] = (byte)(lenField >> 8);
+                    buf[5] = (byte)(lenField & 0xFF);
+                    buf[6] = unitId;
+
+                    // PDU
+                    int i = mbapLen;
+                    buf[i++] = 0x10; // function 16
+                    buf[i++] = (byte)(addr >> 8);
+                    buf[i++] = (byte)(addr & 0xFF);
+                    buf[i++] = (byte)(count >> 8);
+                    buf[i++] = (byte)(count & 0xFF);
+                    buf[i++] = (byte)byteCount;
+
+                    for (int k = 0; k < count; k++)
+                    {
+                        ushort r = regs[offset + k];
+                        buf[i++] = (byte)(r >> 8);
+                        buf[i++] = (byte)(r & 0xFF);
+                    }
+
+        
+                    // Send
+                    stream.Write(buf, 0, buf.Length);
+
+                    const int successiveDelayMs = 100; // match ProtocolParams.SuccessiveRequestDelay
+                    if (successiveDelayMs > 0)
+                        System.Threading.Thread.Sleep(successiveDelayMs);
+
+                    // Read response MBAP (7 bytes)
+                    if (!ReadExact(stream, 7, client.ReceiveTimeout, out var mbapResp))
+                    {
+                        st = ModbusStateCode.Timeout;
+                        return false;
+                    }
+
+                    // Validate protocol id
+                    if (mbapResp[2] != 0x00 || mbapResp[3] != 0x00)
+                    {
+                        st = ModbusStateCode.WrongResponse;
+                        return false;
+                    }
+
+                    // Length field (unit + PDU)
+                    int respLen = (mbapResp[4] << 8) | mbapResp[5];
+                    if (!ReadExact(stream, respLen, client.ReceiveTimeout, out var rest))
+                    {
+                        st = ModbusStateCode.Timeout;
+                        return false;
+                    }
+
+                    // Exception frame?
+                    if ((rest[1] & 0x80) != 0)
+                    {
+                        st = ModbusStateCode.WrongResponse;
+                        return false;
+                    }
+
+                    if (respLen < 6)
+                    {
+                        st = ModbusStateCode.IllegalResponseLength;
+                        return false;
+                    }
+
+                    if (rest[0] != unitId || rest[1] != 0x10)
+                    {
+                        st = ModbusStateCode.WrongResponse;
+                        return false;
+                    }
+
+                    ushort echoAddr = (ushort)((rest[2] << 8) | rest[3]);
+                    ushort echoQty = (ushort)((rest[4] << 8) | rest[5]);
+                    if (echoAddr != addr || echoQty != (ushort)count)
+                    {
+                        st = ModbusStateCode.WrongResponse;
+                        return false;
+                    }
+
+                    txId++;
+                    offset += count;
+                }
+
+                return true;
+            }
+
+            // First try base
+            if (TryOnce(startAddr, out state))
+                return state == ModbusStateCode.Success;
+
+            // Try base-1 if possible
+            if (startAddr > 0)
+            {
+                ushort alt = (ushort)(startAddr - 1);
+                if (TryOnce(alt, out state))
+                {
+                    if (state == ModbusStateCode.Success)
+                    {
+                        usedBase = alt;
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+
+            static bool ReadExact(System.IO.Stream stream, int needed, int timeoutMs, out byte[] data)
+            {
+                data = new byte[needed];
+                int read = 0;
+                var start = DateTime.UtcNow;
+
+                while (read < needed)
+                {
+                    if ((DateTime.UtcNow - start).TotalMilliseconds > timeoutMs)
+                        return false;
+
+                    try
+                    {
+                        int n = stream.Read(data, read, needed - read);
+                        if (n <= 0)
+                            return false;
+                        read += n;
+                    }
+                    catch (System.IO.IOException)
+                    {
+                        return false;
+                    }
+                    catch (System.Net.Sockets.SocketException)
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            }
+        }
+
+        private static bool TryModbusTcpPing(
+        string host, int port, byte unitId,
+        int connectTimeoutMs, int receiveTimeoutMs,
+        out string? diag)
+        {
+            diag = null;
+            try
+            {
+                // Create protocol parameters with reasonable timeouts
+                var protocolParams = new ProtocolParams
+                {
+                    Flags = ProtocolFlags.OffsetFromOne,  // Standard settings as in TryReadFirmwareTcp
+                    SuccessiveRequestDelay = 100,
+                    ConnectionTimeout = Math.Min(connectTimeoutMs, 3000),
+                    SendTimeout = 2000,
+                    ReceiveTimeout = Math.Min(receiveTimeoutMs, 5000),
+                    ReceiveAgainTimeout = 2000
+                };
+
+                var endpoint = $"{host}:{port}";
+                System.Diagnostics.Debug.WriteLine($"Trying ModbusTcpIp ping to {endpoint} (UnitId {unitId})");
+
+                using var modbus = new ModbusTcpIp(endpoint, protocolParams);
+
+                // Attempt to read a single register from address 0
+                ushort[]? result = modbus.ReadDataFrom16bitRegisters(
+                    unitId,
+                    0x0000,      // Start at address 0
+                    0x0001,      // Read just 1 register
+                    RegType16b.HoldingRegister,
+                    out ModbusStateCode state,
+                    null);  // No module ref name
+
+                if (state == ModbusStateCode.Success)
+                {
+                    return true;
+                }
+                else
+                {
+                    diag = $"Modbus read failed: {state}";
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                diag = ex.Message;
+                return false;
+            }
+        }
+
+        // Helper for reading exact bytes with timeout control
+        static bool ReadExactBytes(System.IO.Stream stream, byte[] buffer, int offset, int count)
+        {
+            int totalRead = 0;
+
+            while (totalRead < count)
+            {
+                int bytesRead = stream.Read(buffer, offset + totalRead, count - totalRead);
+
+                if (bytesRead <= 0)
+                    return false; // Stream closed or no data available
+
+                totalRead += bytesRead;
+            }
+
+            return true;
+        }
+
+
+        // Helper: Read with multiple retries and increasing timeouts
+        static bool ReadWithRetry(System.IO.Stream stream, byte[] buffer, int offset, int count,
+                                     int maxRetries, int baseTimeoutMs)
+        {
+            int totalRead = 0;
+            int retryCount = 0;
+
+            while (totalRead < count && retryCount < maxRetries)
+            {
+                try
+                {
+                    // Progressive timeouts
+                    int timeoutMs = baseTimeoutMs * (retryCount + 1);
+                    var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+
+                    while (totalRead < count && DateTime.UtcNow < deadline)
+                    {
+                        // Check if data is available before attempting read
+                        if (stream.CanRead && stream.CanTimeout)
+                        {
+                            int bytesRead = stream.Read(buffer, offset + totalRead, count - totalRead);
+                            if (bytesRead > 0)
+                            {
+                                totalRead += bytesRead;
+                            }
+                            else
+                            {
+                                // No data available, small delay before retry
+                                System.Threading.Thread.Sleep(50);
+                            }
+                        }
+                        else
+                        {
+                            return false;
+                        }
+                    }
+
+                    if (totalRead == count)
+                        return true;
+
+                    // Didn't get all data, retry with delay
+                    System.Threading.Thread.Sleep(150 * (retryCount + 1));
+                    retryCount++;
+                }
+                catch
+                {
+                    retryCount++;
+                    if (retryCount < maxRetries)
+                    {
+                        System.Threading.Thread.Sleep(200 * retryCount);
+                    }
+                    else
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            return totalRead == count;
+        }
+
+
+        private static bool TryFindResponsiveUnitId(
+        string host, int port, byte preferredUnitId,
+        int connectTimeoutMs, int receiveTimeoutMs,
+        out byte unitIdFound, out string? diag)
+        {
+            unitIdFound = preferredUnitId;
+            diag = null;
+
+            // Try preferred first, then common fallbacks (dedup to avoid repeats)
+            var candidates = new List<byte> { preferredUnitId, 1, 255, 0 }.Distinct().ToArray();
+
+            var protocolParams = new ProtocolParams
+            {
+                Flags = ProtocolFlags.OffsetFromOne,
+                SuccessiveRequestDelay = 100,
+                ConnectionTimeout = Math.Min(connectTimeoutMs, 3000),
+                SendTimeout = 1500,
+                ReceiveTimeout = Math.Min(receiveTimeoutMs, 5000),
+                ReceiveAgainTimeout = 1500
+            };
+
+            var endpoint = $"{host}:{port}";
+            ModbusStateCode lastState = ModbusStateCode.UndefinedError;
+
+            foreach (var uid in candidates)
+            {
+                try
+                {
+                    System.Diagnostics.Debug.WriteLine($"Trying UnitId {uid}...");
+
+                    using var modbus = new ModbusTcpIp(endpoint, protocolParams);
+
+                    // Try to read a single register from address 0
+                    var result = modbus.ReadDataFrom16bitRegisters(
+                        uid,
+                        0x0000,      // Start at address 0
+                        0x0001,      // Read just 1 register
+                        RegType16b.HoldingRegister,
+                        out lastState,
+                        null);
+
+                    if (lastState == ModbusStateCode.Success)
+                    {
+                        unitIdFound = uid;
+                        return true;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"Exception testing UnitId {uid}: {ex.Message}");
+                    diag = ex.Message;
+                    continue;
+                }
+            }
+
+            diag = $"No responsive UnitId found. Last state: {lastState}";
+            return false;
+        }
+
+        // Build protocol params for export: no address offsetting on writes
+        private static ProtocolParams BuildProtocolParams()
+        {
+            const int SRD = 100;
+            const int CT = 2000;
+            const int ST = 1500;
+            const int RT = 1500;
+            const int RAT = 1500;
+
+            var p = new ProtocolParams
+            {
+                // No offsetting: ensure wire address is exactly what we pass (e.g., 0x0300)
+                Flags = ProtocolFlags.OffsetFromOne,
+                SuccessiveRequestDelay = SRD,
+                ConnectionTimeout = CT,
+                SendTimeout = ST,
+                ReceiveTimeout = RT,
+                ReceiveAgainTimeout = RAT
+            };
+
+            TrySetProtocolTimeouts(p, connectMs: CT, sendMs: ST, receiveMs: RT);
+            return p;
+        }
+
+        // FC03 probe for base, base-1, base+1 (1 register)
+        
+        private static bool TryProbeBaseTcp(
+        string host, int port, byte unitId, ushort baseAddr,
+        int connectTimeoutMs, int receiveTimeoutMs,
+        out ushort usedBase, out string? diag)
+        {
+            usedBase = baseAddr;
+            diag = null;
+
+            var protocolParams = new ProtocolParams
+            {
+                Flags = ProtocolFlags.OffsetFromOne,
+                SuccessiveRequestDelay = 100,
+                ConnectionTimeout = Math.Min(connectTimeoutMs, 3000),
+                SendTimeout = 1500,
+                ReceiveTimeout = Math.Min(receiveTimeoutMs, 5000),
+                ReceiveAgainTimeout = 1500
+            };
+
+            var endpoint = $"{host}:{port}";
+
+            // Try the three addresses in order: base, base-1, base+1
+            var addresses = new List<ushort> { baseAddr };
+            if (baseAddr > 0) addresses.Add((ushort)(baseAddr - 1));
+            if (baseAddr < ushort.MaxValue) addresses.Add((ushort)(baseAddr + 1));
+
+            ModbusStateCode lastState = ModbusStateCode.UndefinedError;
+
+            foreach (var addr in addresses)
+            {
+                try
+                {
+                    System.Diagnostics.Debug.WriteLine($"Probing address 0x{addr:X4}...");
+
+                    using var modbus = new ModbusTcpIp(endpoint, protocolParams);
+
+                    // Try to read a single register from this address
+                    var result = modbus.ReadDataFrom16bitRegisters(
+                        unitId,
+                        addr,      // Try this address
+                        0x0001,    // Read just 1 register
+                        RegType16b.HoldingRegister,
+                        out lastState,
+                        null);
+
+                    if (lastState == ModbusStateCode.Success)
+                    {
+                        usedBase = addr;
+                        return true;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"Exception probing address 0x{addr:X4}: {ex.Message}");
+                    diag = ex.Message;
+                    continue;
+                }
+            }
+
+            diag = $"No responsive register address found. Last state: {lastState}";
+            return false;
+        }
+
+        private static string FirmwareDecode(ushort[]? data)
+        {
+            if (data == null || data.Length == 0) return string.Empty;
+
+            var sb = new System.Text.StringBuilder();
+            foreach (ushort reg in data)
+            {
+                byte upper = (byte)(reg >> 8);
+                if (upper == 0x00) break;
+                sb.Append((char)upper);
+
+                byte lower = (byte)(reg & 0xFF);
+                if (lower == 0x00) break;
+                sb.Append((char)lower);
+            }
+            return sb.ToString();
+        }
+
+        // Connect using the same ctor/signature as the sample and read 0x20 holding registers from 0x0000
+        private static bool TryReadFirmwareTcp(
+            string host, int port, byte unitId,
+            out string firmware, out ModbusStateCode state, out string? error)
+        {
+            firmware = string.Empty;
+            error = null;
+            state = ModbusStateCode.Success;
+
+            try
+            {
+                // Use ip:port format exactly like the sample
+                var endpoint = $"{host}:{port}";
+                using var modbus = new ModbusTcpIp(endpoint, new ProtocolParams
+                {
+                    Flags = ProtocolFlags.OffsetFromOne,
+                    SuccessiveRequestDelay = 100,
+                    ConnectionTimeout = 2000,
+                    SendTimeout = 1500,
+                    ReceiveTimeout = 1500,
+                    ReceiveAgainTimeout = 1500
+                });
+
+                // Read first 32 holding registers at 0x0000, pass null for moduleRefName (matches the sample)
+                ushort[]? block = modbus.ReadDataFrom16bitRegisters(
+                    unitId,
+                    0x0000,
+                    0x0020,
+                    RegType16b.HoldingRegister,
+                    out state,
+                    null);
+
+                if (state == ModbusStateCode.Success && block != null)
+                {
+                    firmware = FirmwareDecode(block);
+                    return true;
+                }
+
+                error = $"Read failed: {state}";
+                return false;
+            }
+            catch (Exception ex)
+            {
+                state = ModbusStateCode.UndefinedError;
+                error = ex.Message;
+                return false;
+            }
+        }
+
+        private void TestConnection_Click(object sender, RoutedEventArgs e)
+        {
+            var s = ExportSettings.FromWindow(this);
+            if (!TryValidateSettings(s, out var validationError))
+            {
+                MessageBox.Show(validationError, "MPC connection test", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+            if (!s.IsTcpSelected)
+            {
+                MessageBox.Show("Switch to TCP/IP to test MPC connection.", "MPC connection test", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            var host = s.TcpHost!.Trim();
+            var port = s.TcpPort ?? 502;
+            var unit = (byte)(s.ModemDec ?? 1);
+
+            if (TryReadFirmwareTcp(host, port, unit, out var firmware, out var st, out var err))
+            {
+                MessageBox.Show($"Connected to {host}:{port}, UnitId={unit}\nFirmware: \"{firmware}\"",
+                    "MPC connection test", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+            else
+            {
+                var extra = string.IsNullOrWhiteSpace(err) ? "" : $" ({err})";
+                MessageBox.Show($"Connection/read failed: {st}{extra}", "MPC connection test", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+        // Raw Modbus/TCP write of exactly N holding registers at a given address (no fallback, no chunking).
+        private static bool WriteHoldingRegistersTcpDirectExact(
+            string host, int port,
+            byte unitId,
+            ushort addr,
+            ushort[] regs,
+            int connectTimeoutMs,
+            int sendTimeoutMs,
+            int receiveTimeoutMs,
+            out ModbusStateCode state,
+            out string? error)
+        {
+            state = ModbusStateCode.Success;
+            error = null;
+
+            try
+            {
+                using var client = new System.Net.Sockets.TcpClient();
+                var connectTask = client.ConnectAsync(host, port);
+                if (!connectTask.Wait(connectTimeoutMs))
+                {
+                    state = ModbusStateCode.Timeout;
+                    error = "Connect timeout";
+                    return false;
+                }
+
+                client.NoDelay = true;
+                client.SendTimeout = Math.Max(sendTimeoutMs, 3000);
+                client.ReceiveTimeout = Math.Max(receiveTimeoutMs, 5000);
+
+                using var stream = client.GetStream();
+
+                ushort txId = 1;
+                int count = regs.Length;
+                int byteCount = count * 2;
+
+                // MBAP (7) + PDU (fc16 payload)
+                var buf = new byte[7 + (1 + 2 + 2 + 1 + byteCount)];
+                // MBAP
+                buf[0] = (byte)(txId >> 8);
+                buf[1] = (byte)(txId & 0xFF);
+                buf[2] = 0x00; // protocol id hi
+                buf[3] = 0x00; // protocol id lo
+                ushort lenField = (ushort)(1 + (1 + 2 + 2 + 1 + byteCount)); // UnitId + PDU
+                buf[4] = (byte)(lenField >> 8);
+                buf[5] = (byte)(lenField & 0xFF);
+                buf[6] = unitId;
+
+                // PDU
+                int i = 7;
+                buf[i++] = 0x10; // FC16
+                buf[i++] = (byte)(addr >> 8);
+                buf[i++] = (byte)(addr & 0xFF);
+                buf[i++] = (byte)(count >> 8);
+                buf[i++] = (byte)(count & 0xFF);
+                buf[i++] = (byte)byteCount;
+                for (int k = 0; k < count; k++)
+                {
+                    ushort r = regs[k];
+                    buf[i++] = (byte)(r >> 8);
+                    buf[i++] = (byte)(r & 0xFF);
+                }
+
+                stream.Write(buf, 0, buf.Length);
+
+                // Read MBAP (7)
+                if (!ReadExact(stream, 7, client.ReceiveTimeout, out var mbapResp))
+                {
+                    state = ModbusStateCode.Timeout;
+                    error = "No MBAP response";
+                    return false;
+                }
+                if (mbapResp[2] != 0x00 || mbapResp[3] != 0x00)
+                {
+                    state = ModbusStateCode.WrongResponse;
+                    error = "Bad protocol id";
+                    return false;
+                }
+                int respLen = (mbapResp[4] << 8) | mbapResp[5];
+                if (!ReadExact(stream, respLen, client.ReceiveTimeout, out var rest))
+                {
+                    state = ModbusStateCode.Timeout;
+                    error = "Response timeout";
+                    return false;
+                }
+
+                // Exception?
+                if ((rest[1] & 0x80) != 0)
+                {
+                    state = ModbusStateCode.WrongResponse;
+                    error = $"Exception {rest[2]}";
+                    return false;
+                }
+
+                // Validate echo
+                if (respLen < 6 || rest[0] != unitId || rest[1] != 0x10)
+                {
+                    state = ModbusStateCode.WrongResponse;
+                    error = "Unexpected response";
+                    return false;
+                }
+                ushort echoAddr = (ushort)((rest[2] << 8) | rest[3]);
+                ushort echoQty = (ushort)((rest[4] << 8) | rest[5]);
+                if (echoAddr != addr || echoQty != (ushort)count)
+                {
+                    state = ModbusStateCode.WrongResponse;
+                    error = "Address/qty echo mismatch";
+                    return false;
+                }
+
+                return true;
+            }
+            catch (System.TimeoutException)
+            {
+                state = ModbusStateCode.Timeout;
+                error = "Timeout";
+                return false;
+            }
+            catch (Exception ex)
+            {
+                state = ModbusStateCode.UndefinedError;
+                error = ex.Message;
+                return false;
+            }
+
+            static bool ReadExact(System.IO.Stream s, int needed, int timeoutMs, out byte[] data)
+            {
+                data = new byte[needed];
+                int read = 0;
+                var start = DateTime.UtcNow;
+                while (read < needed)
+                {
+                    if ((DateTime.UtcNow - start).TotalMilliseconds > timeoutMs)
+                        return false;
+                    int n;
+                    try { n = s.Read(data, read, needed - read); }
+                    catch { return false; }
+                    if (n <= 0) return false;
+                    read += n;
+                }
+                return true;
+            }
+        }
+
+        private static bool WriteMpcByExactRegistersOnly(
+        string host, int port, byte unitId,
+        IReadOnlyList<ActivationZone> zones,
+        int connectTimeoutMs, int sendTimeoutMs, int receiveTimeoutMs,
+        out ModbusStateCode state, out string? error)
+        {
+            state = ModbusStateCode.Success;
+            error = null;
+
+            const int interWriteDelayMs = 400;
+            const ushort UNLOCK_REGISTER = 0x103F;
+            const ushort UNLOCK_VALUE = 4562;
+
+            try
+            {
+                if (!TryWriteUnlockTcp(host, port, unitId, UNLOCK_REGISTER, UNLOCK_VALUE,
+                    connectTimeoutMs, sendTimeoutMs, receiveTimeoutMs, out state, out error))
+                {
+                    error = $"Failed to unlock device at 0x{UNLOCK_REGISTER:X4}: {error}";
+                    return false;
+                }
+                System.Threading.Thread.Sleep(800);
+
+                var protocolParams = new ProtocolParams
+                {
+                    Flags = ProtocolFlags.OffsetFromOne,
+                    SuccessiveRequestDelay = 250,
+                    ConnectionTimeout = Math.Min(connectTimeoutMs, 5000),
+                    SendTimeout = Math.Min(sendTimeoutMs, 3000),
+                    ReceiveTimeout = Math.Min(receiveTimeoutMs, 5000),
+                    ReceiveAgainTimeout = 3000
+                };
+
+                using var modbus = new ModbusTcpIp($"{host}:{port}", protocolParams);
+
+                const ushort BASE_ADDR = MPC_BASE_ADDR;       // 0x0300
+                const ushort WRITE_OFFSET = MPC_WRITE_OFFSET; // 44 -> 0x032C
+                const int ZONE_STRIDE = MPC_ZONE_STRIDE;      // 10
+                ushort FIRST_ZONE_BASE = (ushort)(BASE_ADDR + WRITE_OFFSET);
+
+                for (int idx = 0; idx < zones.Count; idx++)
+                {
+                    var z = zones[idx];
+                    int mainZone = z.MainZone + 1;
+                    int subZone = z.SubZone + 1;
+                    int zoneIndex = ((mainZone - 1) * 5) + (subZone - 1);
+                    ushort zoneBase = (ushort)(FIRST_ZONE_BASE + (zoneIndex * ZONE_STRIDE));
+                    string zoneName = $"{mainZone}-{subZone}";
+
+                    // Float32 WS (LO,HI). SWAP: [0..1]=Lat, [2..3]=Lon
+                    float lonF = (float)z.Longitude;
+                    float latF = (float)z.Latitude;
+                    var (yLo, yHi) = FloatToWordsWS(latF); // goes to base+0/+1
+                    var (xLo, xHi) = FloatToWordsWS(lonF); // goes to base+2/+3
+
+                    // Scalars as float32 WS
+                    var (hLo, hHi) = FloatToWordsWS((float)z.Height); // [4..5]
+                    var (wLo, wHi) = FloatToWordsWS((float)z.Width);  // [6..7]
+                    var (azLo, azHi) = FloatToWordsWS((float)Math.Clamp(z.Azimuth, 0, 359)); // [8..9]
+
+                    static bool W(ModbusTcpIp mb, byte uid, int delayMs, ushort addr, ushort val, string label, out ModbusStateCode st)
+                    {
+                        bool ok = mb.WriteToHoldingRegister(uid, addr, val, out st, label);
+                        if (ok && delayMs > 0) System.Threading.Thread.Sleep(delayMs);
+                        return ok;
+                    }
+
+                    // Re-unlock per zone
+                    modbus.WriteToHoldingRegister(unitId, UNLOCK_REGISTER, UNLOCK_VALUE, out _, $"Re-unlock {zoneName}");
+                    System.Threading.Thread.Sleep(250);
+
+                    // Lat [0-1] (WS)
+                    if (!W(modbus, unitId, interWriteDelayMs, zoneBase, yLo, $"V2X {zoneName} Lat-lo", out state)) { error = "Lat-lo"; return false; }
+                    if (!W(modbus, unitId, interWriteDelayMs, (ushort)(zoneBase + 1), yHi, $"V2X {zoneName} Lat-hi", out state)) { error = "Lat-hi"; return false; }
+
+                    // Lon [2-3] (WS)
+                    if (!W(modbus, unitId, interWriteDelayMs, (ushort)(zoneBase + 2), xLo, $"V2X {zoneName} Lon-lo", out state)) { error = "Lon-lo"; return false; }
+                    if (!W(modbus, unitId, interWriteDelayMs, (ushort)(zoneBase + 3), xHi, $"V2X {zoneName} Lon-hi", out state)) { error = "Lon-hi"; return false; }
+
+                    // Height [4-5] (WS)
+                    if (!W(modbus, unitId, interWriteDelayMs, (ushort)(zoneBase + 4), hLo, $"V2X {zoneName} H-lo", out state)) { error = "H-lo"; return false; }
+                    if (!W(modbus, unitId, interWriteDelayMs, (ushort)(zoneBase + 5), hHi, $"V2X {zoneName} H-hi", out state)) { error = "H-hi"; return false; }
+
+                    // Width [6-7] (WS)
+                    if (!W(modbus, unitId, interWriteDelayMs, (ushort)(zoneBase + 6), wLo, $"V2X {zoneName} W-lo", out state)) { error = "W-lo"; return false; }
+                    if (!W(modbus, unitId, interWriteDelayMs, (ushort)(zoneBase + 7), wHi, $"V2X {zoneName} W-hi", out state)) { error = "W-hi"; return false; }
+
+                    // Azimuth [8-9] (WS)
+                    if (!W(modbus, unitId, interWriteDelayMs, (ushort)(zoneBase + 8), azLo, $"V2X {zoneName} Az-lo", out state)) { error = "Az-lo"; return false; }
+                    if (!W(modbus, unitId, interWriteDelayMs, (ushort)(zoneBase + 9), azHi, $"V2X {zoneName} Az-hi", out state)) { error = "Az-hi"; return false; }
+
+                    // Verify: read 10 regs and decode WS
+                    var rd = modbus.ReadDataFrom16bitRegisters(unitId, zoneBase, 10, RegType16b.HoldingRegister, out var stV, $"Verify {zoneName}");
+                    if (stV != ModbusStateCode.Success || rd == null || rd.Length < 10) { state = stV; error = "Verify read failed"; return false; }
+
+                    float rbLat = WordsToFloatWS(rd[0], rd[1]);
+                    float rbLon = WordsToFloatWS(rd[2], rd[3]);
+                    float rbH = WordsToFloatWS(rd[4], rd[5]);
+                    float rbW = WordsToFloatWS(rd[6], rd[7]);
+                    float rbAz = WordsToFloatWS(rd[8], rd[9]);
+
+                    bool coordsOk = Math.Abs(rbLon - lonF) <= 1e-5f && Math.Abs(rbLat - latF) <= 1e-5f;
+                    bool dimsOk = Math.Abs(rbH - (float)z.Height) <= 1e-5f && Math.Abs(rbW - (float)z.Width) <= 1e-5f;
+                    bool azOk = Math.Abs(rbAz - (float)Math.Clamp(z.Azimuth, 0, 359)) <= 1e-5f;
+
+                    if (!coordsOk || !dimsOk || !azOk)
+                    {
+                        error = $"Verify mismatch {zoneName}: lat={rbLat}, lon={rbLon}, h={rbH}, w={rbW}, az={rbAz}";
+                        return false;
+                    }
+                }
+
+                // Lock back
+                TryWriteUnlockTcp(host, port, unitId, UNLOCK_REGISTER, 0,
+                    connectTimeoutMs, sendTimeoutMs, receiveTimeoutMs, out _, out _);
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                state = ModbusStateCode.UndefinedError;
+                error = $"Exception during export: {ex.Message}";
+                return false;
+            }
+        }
+
+        // CHANGE: make handler async and call RTU reader for Serial branch
+        private async void ReadButton_Click(object sender, RoutedEventArgs e)
+        {
+            Settings = ExportSettings.FromWindow(this);
+            if (Settings == null)
+            {
+                MessageBox.Show("Missing export settings.", "Read Registers", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+            if (!TryValidateSettings(Settings, out var validationError))
+            {
+                MessageBox.Show(validationError, "Read Registers - validation", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            ShowBusy("Reading registers...");
+            await Task.Delay(50); // let overlay render
+
+            try
+            {
+                byte unitId = 1;
+                if (Settings.ModemDec.HasValue)
+                {
+                    var v = Settings.ModemDec.Value;
+                    if (v < 1 || v > 247)
+                    {
+                        await ShowMessageAfterBusyAsync($"Modem number (slave address) must be in 1..247. Current: {v}",
+                            "Read Registers", MessageBoxButton.OK, MessageBoxImage.Warning);
+                        return;
+                    }
+                    unitId = (byte)v;
+                }
+
+                if (Settings.IsTcpSelected)
+                {
+                    var host = Settings.TcpHost?.Trim();
+                    var port = Settings.TcpPort ?? 502;
+                    if (string.IsNullOrWhiteSpace(host))
+                    {
+                        await ShowMessageAfterBusyAsync("TCP/IP host is required.", "Read Registers", MessageBoxButton.OK, MessageBoxImage.Warning);
+                        return;
+                    }
+
+                    // run TCP read on a background thread
+                    var res = await Task.Run(() => ReadZonesFromModbusTcpWorker(host!, port, unitId));
+
+                    if (!res.ok)
+                    {
+                        await ShowMessageAfterBusyAsync($"Error reading zones: {res.error ?? "Unknown error"}",
+                            "Read Registers", MessageBoxButton.OK, MessageBoxImage.Error);
+                        return;
+                    }
+
+                    if (res.zones.Count == 0)
+                    {
+                        await ShowMessageAfterBusyAsync("No valid zones found on the device.",
+                            "Read Registers", MessageBoxButton.OK, MessageBoxImage.Warning);
+                        return;
+                    }
+
+                    if (Owner is not MainWindow mw)
+                    {
+                        await ShowMessageAfterBusyAsync("Cannot access main window.", "Read Registers",
+                            MessageBoxButton.OK, MessageBoxImage.Error);
+                        return;
+                    }
+
+                    mw.ActivationZonesCollection.Clear();
+                    foreach (var z in res.zones) mw.ActivationZonesCollection.Add(z);
+
+                    Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        try { mw.ReprojectActivationZonesOnMapChange(); mw.BringAllOverlaysToFront(); } catch { }
+                    }));
+
+                    await ShowMessageAfterBusyAsync($"Successfully read {res.zones.Count} zone(s) from device.",
+                        "Read Registers", MessageBoxButton.OK, MessageBoxImage.Information);
+                }
+                else
+                {
+                    var res = await ReadZonesFromModbusRtuWorkerAsync(unitId);
+
+                    if (!res.ok)
+                    {
+                        await ShowMessageAfterBusyAsync($"Error reading zones over RS485: {res.error ?? "Unknown error"}",
+                            "Read Registers", MessageBoxButton.OK, MessageBoxImage.Error);
+                        return;
+                    }
+
+                    if (res.zones.Count == 0)
+                    {
+                        await ShowMessageAfterBusyAsync("No valid zones found on the device (RS485).",
+                            "Read Registers", MessageBoxButton.OK, MessageBoxImage.Warning);
+                        return;
+                    }
+
+                    if (Owner is not MainWindow mw)
+                    {
+                        await ShowMessageAfterBusyAsync("Cannot access main window.", "Read Registers",
+                            MessageBoxButton.OK, MessageBoxImage.Error);
+                        return;
+                    }
+
+                    mw.ActivationZonesCollection.Clear();
+                    foreach (var z in res.zones) mw.ActivationZonesCollection.Add(z);
+
+                    Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        try { mw.ReprojectActivationZonesOnMapChange(); mw.BringAllOverlaysToFront(); } catch { }
+                    }));
+
+                    await ShowMessageAfterBusyAsync($"Successfully read {res.zones.Count} zone(s) over RS485.",
+                        "Read Registers", MessageBoxButton.OK, MessageBoxImage.Information);
+                }
+            }
+            finally
+            {
+                HideBusy();
+            }
+        }
+
+        private static (bool ok, List<ActivationZone> zones, bool isRtv, string? error) ReadZonesFromModbusTcpWorker(string host, int port, byte unitId)
+        {
+            try
+            {
+                var protocolParams = new ProtocolParams
+                {
+                    Flags = ProtocolFlags.OffsetFromOne,
+                    SuccessiveRequestDelay = 250,
+                    ConnectionTimeout = 5000,
+                    SendTimeout = 3000,
+                    ReceiveTimeout = 5000,
+                    ReceiveAgainTimeout = 3000
+                };
+
+                if (!TryWriteUnlockTcp(host, port, unitId, 0x103F, 4562,
+                    connectTimeoutMs: 3000, sendTimeoutMs: 2000, receiveTimeoutMs: 5000,
+                    out var unlockState, out var unlockErr))
+                {
+                    return (false, new List<ActivationZone>(), false, $"Failed to unlock device: {unlockState}{(string.IsNullOrWhiteSpace(unlockErr) ? "" : $" ({unlockErr})")}");
+                }
+                System.Threading.Thread.Sleep(800);
+
+                using var modbus = new ModbusTcpIp($"{host}:{port}", protocolParams);
+
+                bool isRtv = false;
+                if (TryReadFirmwareTcp(host, port, unitId, out var fw, out var _, out var _))
+                    isRtv = IsRtvFirmware(fw);
+
+                var zones = new List<ActivationZone>();
+
+                const ushort BASE_ADDR = MPC_BASE_ADDR;       // 0x0300
+                const ushort WRITE_OFFSET = MPC_WRITE_OFFSET; // 44
+                const int ZONE_STRIDE = MPC_ZONE_STRIDE;      // 10
+                ushort FIRST_ZONE_BASE = (ushort)(BASE_ADDR + WRITE_OFFSET); // 0x032C
+
+                for (int mainZone = 1; mainZone <= 4; mainZone++)
+                {
+                    for (int subZone = 1; subZone <= 5; subZone++)
+                    {
+                        if ((mainZone > 1 || subZone > 1) && subZone == 1)
+                        {
+                            modbus.WriteToHoldingRegister(unitId, 0x103F, 4562, out _, "Re-unlock for zone");
+                            System.Threading.Thread.Sleep(300);
+                        }
+
+                        int zoneIndex = ((mainZone - 1) * 5) + (subZone - 1);
+                        ushort zoneBase = (ushort)(FIRST_ZONE_BASE + (zoneIndex * ZONE_STRIDE));
+
+                        var data = modbus.ReadDataFrom16bitRegisters(
+                            unitId, zoneBase, 10, RegType16b.HoldingRegister, out var zoneState,
+                            $"Read zone {mainZone}-{subZone}");
+
+                        if (zoneState != ModbusStateCode.Success || data == null || data.Length < 10) continue;
+                        if (data.All(v => v == 0)) continue;
+
+                        // SWAP: [0..1]=Lat, [2..3]=Lon (WS)
+                        double latitude = WordsToFloatWS(data[0], data[1]);
+                        double longitude = WordsToFloatWS(data[2], data[3]);
+
+                        // Scalars are float32 WS too
+                        double height = WordsToFloatWS(data[4], data[5]);
+                        double width = WordsToFloatWS(data[6], data[7]);
+                        int azimuth = (int)Math.Round(WordsToFloatWS(data[8], data[9]));
+
+                        if (double.IsFinite(latitude) && double.IsFinite(longitude) && width > 0 && height > 0)
+                        {
+                            zones.Add(new ActivationZone
+                            {
+                                Name = $"Zone {mainZone}-{subZone}",
+                                MainZone = mainZone - 1,
+                                SubZone = subZone - 1,
+                                Latitude = latitude,
+                                Longitude = longitude,
+                                Width = width,
+                                Height = height,
+                                Azimuth = Math.Clamp(azimuth, 0, 359)
+                            });
+                        }
+                    }
+                }
+
+                if (isRtv)
+                {
+                    var rtvSwitches = ReadRtvSwitchZonesTcp(modbus, unitId);
+                    zones.AddRange(rtvSwitches);
+                }
+
+                TryWriteUnlockTcp(host, port, unitId, 0x103F, 0,
+                    connectTimeoutMs: 3000, sendTimeoutMs: 2000, receiveTimeoutMs: 5000,
+                    out _, out _);
+
+                return (true, zones, isRtv, null);
+            }
+            catch (Exception ex)
+            {
+                return (false, new List<ActivationZone>(), false, ex.Message);
+            }
+        }
+
+        private async Task<(bool ok, List<ActivationZone> zones, string? error)> ReadZonesFromModbusRtuWorkerAsync(byte unitId)
+        {
+            var s = Settings ?? ExportSettings.FromWindow(this);
+            if (s == null) return (false, new List<ActivationZone>(), "Missing serial settings.");
+
+            try
+            {
+                const ushort UNLOCK_REGISTER = 0x103F;
+                const ushort UNLOCK_VALUE = 4562;
+
+                var (uok, ustate, uerr) = await WriteHoldingRegistersRtuAsync(s, unitId, UNLOCK_REGISTER, new[] { UNLOCK_VALUE }, timeoutMs: 2000);
+                if (!uok || ustate != ModbusStateCode.Success)
+                    return (false, new List<ActivationZone>(), $"Failed to unlock device over RS485: {ustate}{(string.IsNullOrWhiteSpace(uerr) ? "" : $" ({uerr})")}");
+
+                await Task.Delay(500);
+
+                bool isRtv = false;
+                {
+                    var (okFw, stFw, dataFw, _) = await ReadHoldingRegistersRtuAsync(s, unitId, 0x0000, 0x0020, timeoutMs: 2000);
+                    if (okFw && stFw == ModbusStateCode.Success && dataFw != null)
+                    {
+                        var fw = DecodeAsciiFromRegs(dataFw);
+                        isRtv = IsRtvFirmware(fw);
+                    }
+                }
+
+                var zones = new List<ActivationZone>();
+                const ushort BASE_ADDR = MPC_BASE_ADDR;       // 0x0300
+                const ushort WRITE_OFFSET = MPC_WRITE_OFFSET; // 44
+                const int ZONE_STRIDE = MPC_ZONE_STRIDE;      // 10
+                ushort FIRST_ZONE_BASE = (ushort)(BASE_ADDR + WRITE_OFFSET);
+
+                for (int mainZone = 1; mainZone <= 4; mainZone++)
+                {
+                    for (int subZone = 1; subZone <= 5; subZone++)
+                    {
+                        if ((mainZone > 1 || subZone > 1) && subZone == 1)
+                        {
+                            await WriteHoldingRegistersRtuAsync(s, unitId, UNLOCK_REGISTER, new[] { UNLOCK_VALUE }, timeoutMs: 2000);
+                            await Task.Delay(300);
+                        }
+
+                        int zoneIndex = ((mainZone - 1) * 5) + (subZone - 1);
+                        ushort zoneBase = (ushort)(FIRST_ZONE_BASE + (zoneIndex * ZONE_STRIDE));
+
+                        var (ok, st, data, err) = await ReadHoldingRegistersRtuAsync(s, unitId, zoneBase, 10, timeoutMs: 2000);
+                        if (!ok || st != ModbusStateCode.Success || data == null || data.Length < 9)
+                            continue;
+
+                        if (data.All(v => v == 0))
+                            continue;
+
+                        // Float32 WS
+                        double longitude = WordsToFloatWS(data[0], data[1]);
+                        double latitude = WordsToFloatWS(data[2], data[3]);
+
+                        ushort lengthCm = data[4];
+                        ushort widthCm = data[6];
+                        ushort azimuth = data[8];
+
+                        double width = widthCm / 100.0;
+                        double height = lengthCm / 100.0;
+
+                        if (double.IsFinite(latitude) && double.IsFinite(longitude) && width > 0 && height > 0)
+                        {
+                            zones.Add(new ActivationZone
+                            {
+                                Name = $"Zone {mainZone}-{subZone}",
+                                MainZone = mainZone - 1,
+                                SubZone = subZone - 1,
+                                Latitude = latitude,
+                                Longitude = longitude,
+                                Width = width,
+                                Height = height,
+                                Azimuth = azimuth
+                            });
+                        }
+                    }
+                }
+
+                if (isRtv)
+                {
+                    var rtvSwitches = await ReadRtvSwitchZonesRtuAsync(s, unitId, timeoutMs: 2000);
+                    zones.AddRange(rtvSwitches);
+                }
+
+                await WriteHoldingRegistersRtuAsync(s, unitId, UNLOCK_REGISTER, new[] { (ushort)0 }, timeoutMs: 2000);
+
+                return (true, zones, null);
+            }
+            catch (Exception ex)
+            {
+                return (false, new List<ActivationZone>(), ex.Message);
+            }
+        }
+
+        private void UpdateButtonStates(bool isReadMode)
+        {
+            // Use the actual button names from your XAML
+            if (Start != null)
+                Start.IsEnabled = !isReadMode;
+
+            if (ReadButton != null)
+                ReadButton.IsEnabled = isReadMode;
+        }
+
+        private void ReadZonesFromModbusTcp(string host, int port, byte unitId)
+        {
+            try
+            {
+                var protocolParams = new ProtocolParams
+                {
+                    Flags = ProtocolFlags.OffsetFromOne,
+                    SuccessiveRequestDelay = 250,
+                    ConnectionTimeout = 5000,
+                    SendTimeout = 3000,
+                    ReceiveTimeout = 5000,
+                    ReceiveAgainTimeout = 3000
+                };
+
+                if (!TryWriteUnlockTcp(host, port, unitId, 0x103F, 4562,
+                    connectTimeoutMs: 3000, sendTimeoutMs: 2000, receiveTimeoutMs: 5000,
+                    out var unlockState, out var unlockErr))
+                {
+                    MessageBox.Show($"Failed to unlock device: {unlockState}{(string.IsNullOrWhiteSpace(unlockErr) ? "" : $" ({unlockErr})")}",
+                        "Read Registers", MessageBoxButton.OK, MessageBoxImage.Error);
+                    return;
+                }
+                System.Threading.Thread.Sleep(800);
+
+                using var modbus = new ModbusTcpIp($"{host}:{port}", protocolParams);
+
+                bool isRtv = false;
+                if (TryReadFirmwareTcp(host, port, unitId, out var fw, out var fwState, out var fwErr))
+                    isRtv = IsRtvFirmware(fw);
+
+                var zones = new List<ActivationZone>();
+
+                const ushort BASE_ADDR = MPC_BASE_ADDR;       // 0x0300
+                const ushort WRITE_OFFSET = MPC_WRITE_OFFSET; // 44
+                const int ZONE_STRIDE = MPC_ZONE_STRIDE;      // 10
+                ushort FIRST_ZONE_BASE = (ushort)(BASE_ADDR + WRITE_OFFSET); // 0x032C
+
+                for (int mainZone = 1; mainZone <= 4; mainZone++)
+                {
+                    for (int subZone = 1; subZone <= 5; subZone++)
+                    {
+                        if ((mainZone > 1 || subZone > 1) && subZone == 1)
+                        {
+                            modbus.WriteToHoldingRegister(unitId, 0x103F, 4562, out _, "Re-unlock for zone");
+                            System.Threading.Thread.Sleep(300);
+                        }
+
+                        int zoneIndex = ((mainZone - 1) * 5) + (subZone - 1);
+                        ushort zoneBase = (ushort)(FIRST_ZONE_BASE + (zoneIndex * ZONE_STRIDE));
+
+                        var data = modbus.ReadDataFrom16bitRegisters(
+                            unitId, zoneBase, 10, RegType16b.HoldingRegister, out var zoneState,
+                            $"Read zone {mainZone}-{subZone}");
+
+                        if (zoneState != ModbusStateCode.Success || data == null || data.Length < 10) continue;
+                        if (data.All(v => v == 0)) continue;
+
+                        // SWAP: [0..1]=Lat, [2..3]=Lon (WS)
+                        double latitude = WordsToFloatWS(data[0], data[1]);
+                        double longitude = WordsToFloatWS(data[2], data[3]);
+
+                        // Scalars are float32 WS too
+                        double height = WordsToFloatWS(data[4], data[5]);
+                        double width = WordsToFloatWS(data[6], data[7]);
+                        int azimuth = (int)Math.Round(WordsToFloatWS(data[8], data[9]));
+
+                        if (double.IsFinite(latitude) && double.IsFinite(longitude) && width > 0 && height > 0)
+                        {
+                            zones.Add(new ActivationZone
+                            {
+                                Name = $"Zone {mainZone}-{subZone}",
+                                MainZone = mainZone - 1,
+                                SubZone = subZone - 1,
+                                Latitude = latitude,
+                                Longitude = longitude,
+                                Width = width,
+                                Height = height,
+                                Azimuth = Math.Clamp(azimuth, 0, 359)
+                            });
+                        }
+                    }
+                }
+
+                if (isRtv)
+                {
+                    var rtvSwitches = ReadRtvSwitchZonesTcp(modbus, unitId);
+                    zones.AddRange(rtvSwitches);
+                }
+
+                if (zones.Count > 0)
+                {
+                    if (Owner is not MainWindow mw)
+                    {
+                        MessageBox.Show("Cannot access main window.", "Read Registers",
+                            MessageBoxButton.OK, MessageBoxImage.Error);
+                        return;
+                    }
+                    mw.ActivationZonesCollection.Clear();
+                    foreach (var z in zones) mw.ActivationZonesCollection.Add(z);
+
+                    Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        try { mw.ReprojectActivationZonesOnMapChange(); mw.BringAllOverlaysToFront(); } catch { }
+                    }));
+
+                    MessageBox.Show($"Successfully read {zones.Count} zone(s) from device.",
+                        "Read Registers", MessageBoxButton.OK, MessageBoxImage.Information);
+                }
+                else
+                {
+                    MessageBox.Show("No valid zones found on the device.",
+                        "Read Registers", MessageBoxButton.OK, MessageBoxImage.Warning);
+                }
+
+                TryWriteUnlockTcp(host, port, unitId, 0x103F, 0,
+                   connectTimeoutMs: 3000, sendTimeoutMs: 2000, receiveTimeoutMs: 5000,
+                   out _, out _);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error reading zones: {ex.Message}", "Read Registers", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+        // ADD: FC03 RTU reader
+        private static async Task<(bool ok, ModbusStateCode state, ushort[]? data, string? error)> ReadHoldingRegistersRtuAsync(
+            ExportSettings s,
+            byte slave,
+            ushort regAddr,
+            ushort count,
+            int timeoutMs)
+        {
+            if (count <= 0) return (false, ModbusStateCode.IllegalResponseLength, null, "Count must be > 0");
+            try
+            {
+                using var sp = new SerialPort(
+                    s.SerialPortName!,
+                    s.SerialBaudrate ?? 19200,
+                    ParseParity(s.SerialParity),
+                    s.SerialDataBits ?? 8,
+                    ParseStopBits(s.SerialStopBits))
+                {
+                    Handshake = Handshake.None,
+                    ReadTimeout = timeoutMs,
+                    WriteTimeout = timeoutMs
+                };
+                sp.Open();
+
+                // Build FC03 request: [slave][0x03][addr_hi][addr_lo][qty_hi][qty_lo][crc_lo][crc_hi]
+                var req = new byte[8];
+                req[0] = slave;
+                req[1] = 0x03;
+                req[2] = (byte)(regAddr >> 8);
+                req[3] = (byte)(regAddr & 0xFF);
+                req[4] = (byte)(count >> 8);
+                req[5] = (byte)(count & 0xFF);
+                ushort crc = Crc16Modbus(req, 0, 6);
+                req[6] = (byte)(crc & 0xFF);
+                req[7] = (byte)(crc >> 8);
+
+                await sp.BaseStream.WriteAsync(req, 0, req.Length, CancellationToken.None).ConfigureAwait(false);
+
+                // Read header [slave][0x03][byteCount]
+                var hdr = new byte[3];
+                int read = 0;
+                using var cts = new CancellationTokenSource(timeoutMs);
+                while (read < hdr.Length)
+                {
+                    int n = await sp.BaseStream.ReadAsync(hdr, read, hdr.Length - read, cts.Token).ConfigureAwait(false);
+                    if (n <= 0) break;
+                    read += n;
+                }
+                if (read < hdr.Length) return (false, ModbusStateCode.Timeout, null, "RTU: header timeout");
+
+                if (hdr[0] != slave) return (false, ModbusStateCode.WrongResponse, null, "Wrong slave");
+                if (hdr[1] != 0x03)
+                {
+                    if ((hdr[1] & 0x80) != 0) return (false, ModbusStateCode.WrongResponse, null, $"Exception {hdr[2]}");
+                    return (false, ModbusStateCode.WrongResponse, null, "Wrong function");
+                }
+
+                int byteCount = hdr[2];
+                if (byteCount != count * 2) return (false, ModbusStateCode.IllegalResponseLength, null, "Byte count mismatch");
+
+                // Read data + CRC
+                var rest = new byte[byteCount + 2];
+                read = 0;
+                while (read < rest.Length)
+                {
+                    int n = await sp.BaseStream.ReadAsync(rest, read, rest.Length - read, cts.Token).ConfigureAwait(false);
+                    if (n <= 0) break;
+                    read += n;
+                }
+                if (read < rest.Length) return (false, ModbusStateCode.Timeout, null, "RTU: payload timeout");
+
+                ushort crcCalc = Crc16Modbus(stackalloc byte[] { hdr[0], hdr[1], hdr[2] }.ToArray().Concat(rest.Take(byteCount)).ToArray(), 0, 3 + byteCount);
+                ushort crcResp = (ushort)(rest[byteCount] | (rest[byteCount + 1] << 8));
+                if (crcCalc != crcResp) return (false, ModbusStateCode.CRC, null, "CRC failed");
+
+                // Convert to ushorts (big-endian words)
+                var regs = new ushort[count];
+                for (int i = 0; i < count; i++)
+                {
+                    regs[i] = (ushort)((rest[i * 2] << 8) | rest[i * 2 + 1]);
+                }
+
+                return (true, ModbusStateCode.Success, regs, null);
+            }
+            catch (OperationCanceledException)
+            {
+                return (false, ModbusStateCode.Timeout, null, "Operation timed out.");
+            }
+            catch (TimeoutException)
+            {
+                return (false, ModbusStateCode.Timeout, null, "Serial timeout.");
+            }
+            catch (Exception ex)
+            {
+                return (false, ModbusStateCode.UndefinedError, null, ex.Message);
+            }
+        }
+
+        // ADD: RTU read zones like TCP, but using ReadHoldingRegistersRtuAsync and RTU unlock
+        private async Task ReadZonesFromModbusRtuAsync(byte unitId)
+        {
+            var s = Settings ?? ExportSettings.FromWindow(this);
+            if (s == null)
+            {
+                MessageBox.Show("Missing serial settings.", "Read Registers", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            try
+            {
+                const ushort UNLOCK_REGISTER = 0x103F;
+                const ushort UNLOCK_VALUE = 4562;
+
+                var (uok, ustate, uerr) = await WriteHoldingRegistersRtuAsync(s, unitId, UNLOCK_REGISTER, new[] { UNLOCK_VALUE }, timeoutMs: 2000);
+                if (!uok || ustate != ModbusStateCode.Success)
+                {
+                    MessageBox.Show($"Failed to unlock device over RS485: {ustate}{(string.IsNullOrWhiteSpace(uerr) ? "" : $" ({uerr})")}",
+                        "Read Registers", MessageBoxButton.OK, MessageBoxImage.Error);
+                    return;
+                }
+                await Task.Delay(500);
+
+                bool isRtv = false;
+                {
+                    var (okFw, stFw, dataFw, errFw) = await ReadHoldingRegistersRtuAsync(s, unitId, 0x0000, 0x0020, timeoutMs: 2000);
+                    if (okFw && stFw == ModbusStateCode.Success && dataFw != null)
+                    {
+                        var fw = DecodeAsciiFromRegs(dataFw);
+                        isRtv = IsRtvFirmware(fw);
+                    }
+                }
+
+                var zones = new List<ActivationZone>();
+                const ushort BASE_ADDR = MPC_BASE_ADDR;       // 0x0300
+                const ushort WRITE_OFFSET = MPC_WRITE_OFFSET; // 44
+                const int ZONE_STRIDE = MPC_ZONE_STRIDE;      // 10
+                ushort FIRST_ZONE_BASE = (ushort)(BASE_ADDR + WRITE_OFFSET);
+
+                for (int mainZone = 1; mainZone <= 4; mainZone++)
+                {
+                    for (int subZone = 1; subZone <= 5; subZone++)
+                    {
+                        if ((mainZone > 1 || subZone > 1) && subZone == 1)
+                        {
+                            await WriteHoldingRegistersRtuAsync(s, unitId, UNLOCK_REGISTER, new[] { UNLOCK_VALUE }, timeoutMs: 2000);
+                            await Task.Delay(300);
+                        }
+
+                        int zoneIndex = ((mainZone - 1) * 5) + (subZone - 1);
+                        ushort zoneBase = (ushort)(FIRST_ZONE_BASE + (zoneIndex * ZONE_STRIDE));
+
+                        var (ok, st, data, err) = await ReadHoldingRegistersRtuAsync(s, unitId, zoneBase, 10, timeoutMs: 2000);
+                        if (!ok || st != ModbusStateCode.Success || data == null || data.Length < 9)
+                            continue;
+
+                        if (data.All(v => v == 0))
+                            continue;
+
+                        // Float32 WS
+                        double longitude = WordsToFloatWS(data[0], data[1]);
+                        double latitude = WordsToFloatWS(data[2], data[3]);
+
+                        ushort lengthCm = data[4];
+                        ushort widthCm = data[6];
+                        ushort azimuth = data[8];
+
+                        double width = widthCm / 100.0;
+                        double height = lengthCm / 100.0;
+
+                        if (double.IsFinite(latitude) && double.IsFinite(longitude) && width > 0 && height > 0)
+                        {
+                            zones.Add(new ActivationZone
+                            {
+                                Name = $"Zone {mainZone}-{subZone}",
+                                MainZone = mainZone - 1,
+                                SubZone = subZone - 1,
+                                Latitude = latitude,
+                                Longitude = longitude,
+                                Width = width,
+                                Height = height,
+                                Azimuth = azimuth
+                            });
+                        }
+                    }
+                }
+
+                if (isRtv)
+                {
+                    var rtvSwitches = await ReadRtvSwitchZonesRtuAsync(s, unitId, timeoutMs: 2000);
+                    zones.AddRange(rtvSwitches);
+                }
+
+                if (zones.Count == 0)
+                {
+                    MessageBox.Show("No valid zones found on the device (RS485).",
+                        "Read Registers", MessageBoxButton.OK, MessageBoxImage.Warning);
+                }
+                else
+                {
+                    if (Owner is not MainWindow mw || mw.ActivationZonesCollection == null)
+                    {
+                        MessageBox.Show("Cannot access main window.", "Read Registers",
+                            MessageBoxButton.OK, MessageBoxImage.Error);
+                        return;
+                    }
+
+                    mw.ActivationZonesCollection.Clear();
+                    foreach (var z in zones) mw.ActivationZonesCollection.Add(z);
+
+                    Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        try
+                        {
+                            mw.ReprojectActivationZonesOnMapChange();
+                            mw.BringAllOverlaysToFront();
+                        }
+                        catch { }
+                    }));
+
+                    MessageBox.Show($"Successfully read {zones.Count} zone(s) over RS485.",
+                        "Read Registers", MessageBoxButton.OK, MessageBoxImage.Information);
+                }
+
+                await WriteHoldingRegistersRtuAsync(s, unitId, UNLOCK_REGISTER, new[] { (ushort)0 }, timeoutMs: 2000);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error reading zones over RS485: {ex.Message}", "Read Registers", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+        // --- Helpers for switch-zone detection and RTV firmware ---
+        private static bool IsSwitchRow(ActivationZone z) =>
+        z != null &&
+        (
+            string.Equals(z?.Rectangle?.Tag as string, "SwitchZone", StringComparison.OrdinalIgnoreCase)
+            || (!string.IsNullOrWhiteSpace(z?.Name) &&
+                (
+                    z.Name.StartsWith("Switch", StringComparison.OrdinalIgnoreCase)
+                    || z.Name.StartsWith("Vyhyb", StringComparison.OrdinalIgnoreCase)   // Vyhybka
+                    || z.Name.StartsWith("Výhyb", StringComparison.OrdinalIgnoreCase)   // Výhybka
+                ))
+        );
+
+        private static bool IsRtvFirmware(string firmware) =>
+            !string.IsNullOrWhiteSpace(firmware) &&
+            firmware.IndexOf("RTV", StringComparison.OrdinalIgnoreCase) >= 0;
+
+        private static string DecodeAsciiFromRegs(ushort[]? data)
+        {
+            if (data == null || data.Length == 0) return string.Empty;
+            var sb = new StringBuilder();
+            foreach (ushort reg in data)
+            {
+                byte hi = (byte)(reg >> 8);
+                if (hi == 0) break;
+                sb.Append((char)hi);
+                byte lo = (byte)(reg & 0xFF);
+                if (lo == 0) break;
+                sb.Append((char)lo);
+            }
+            return sb.ToString();
+        }
+
+        // RTV switch base: 0x03B0 + (main*7 + sub) * 0x0A (main/sub zero-based)
+        private static ushort RtvSwitchBaseAddr(int mainZero, int subZero)
+            => (ushort)(0x03B0 + ((mainZero * 7 + subZero) * 0x0A));
+
+        // --- WRITE: MPC-RTV switch zones over TCP (same layout as activation zones) ---
+        // replace the whole WriteRtvSwitchesByExactRegistersOnly with this version
+        private static bool WriteRtvSwitchesByExactRegistersOnly(
+            string host, int port, byte unitId,
+            IReadOnlyList<ActivationZone> switchZones,
+            int connectTimeoutMs, int sendTimeoutMs, int receiveTimeoutMs,
+            out ModbusStateCode state, out string? error)
+        {
+            state = ModbusStateCode.Success;
+            error = null;
+
+            const int interWriteDelayMs = 350;
+            const ushort UNLOCK_REGISTER = 0x103F;
+            const ushort UNLOCK_VALUE = 4562;
+
+            try
+            {
+                var protocolParams = new ProtocolParams
+                {
+                    Flags = ProtocolFlags.OffsetFromOne, // REQUIRED
+                    SuccessiveRequestDelay = 200,
+                    ConnectionTimeout = Math.Min(connectTimeoutMs, 5000),
+                    SendTimeout = Math.Min(sendTimeoutMs, 3000),
+                    ReceiveTimeout = Math.Min(receiveTimeoutMs, 5000),
+                    ReceiveAgainTimeout = 3000
+                };
+
+                using var modbus = new ModbusTcpIp($"{host}:{port}", protocolParams);
+
+                if (!modbus.WriteToHoldingRegister(unitId, Off1(UNLOCK_REGISTER), UNLOCK_VALUE, out state, "Unlock device"))
+                {
+                    error = $"Failed to unlock device (state={state}).";
+                    return false;
+                }
+                System.Threading.Thread.Sleep(600);
+
+                foreach (var z in switchZones)
+                {
+                    int main = Math.Clamp(z.MainZone, 0, 4);
+                    int sub = Math.Clamp(z.SubZone, 0, 6);
+                    ushort zoneBase = RtvSwitchBaseAddr(main, sub);
+
+                    int lat32 = (int)Math.Round(z.Latitude * 1_000_000.0, MidpointRounding.AwayFromZero);
+                    int lon32 = (int)Math.Round(z.Longitude * 1_000_000.0, MidpointRounding.AwayFromZero);
+
+                    ushort latHi = (ushort)((lat32 >> 16) & 0xFFFF);
+                    ushort latLo = (ushort)(lat32 & 0xFFFF);
+                    ushort lonHi = (ushort)((lon32 >> 16) & 0xFFFF);
+                    ushort lonLo = (ushort)(lon32 & 0xFFFF);
+
+                    ushort lengthCm = ToUInt16(z.Height * 100.0);
+                    ushort widthCm = ToUInt16(z.Width * 100.0);
+                    ushort az = (ushort)Math.Clamp(z.Azimuth, 0, 359);
+
+                    // Re-unlock per zone
+                    modbus.WriteToHoldingRegister(unitId, Off1(UNLOCK_REGISTER), UNLOCK_VALUE, out _, "Re-unlock RTV");
+                    System.Threading.Thread.Sleep(250);
+
+                    if (!modbus.WriteToHoldingRegister(unitId, Off1(zoneBase), latHi, out state, $"RTV {main + 1}-{sub + 1} lat0")) { error = $"W @0x{zoneBase:X4} st={state}"; return false; }
+                    System.Threading.Thread.Sleep(interWriteDelayMs);
+                    if (!modbus.WriteToHoldingRegister(unitId, Off1((ushort)(zoneBase + 1)), latLo, out state, $"RTV {main + 1}-{sub + 1} lat1")) { error = $"W @0x{zoneBase + 1:X4} st={state}"; return false; }
+                    System.Threading.Thread.Sleep(interWriteDelayMs);
+                    if (!modbus.WriteToHoldingRegister(unitId, Off1((ushort)(zoneBase + 2)), lonHi, out state, $"RTV {main + 1}-{sub + 1} lon0")) { error = $"W @0x{zoneBase + 2:X4} st={state}"; return false; }
+                    System.Threading.Thread.Sleep(interWriteDelayMs);
+                    if (!modbus.WriteToHoldingRegister(unitId, Off1((ushort)(zoneBase + 3)), lonLo, out state, $"RTV {main + 1}-{sub + 1} lon1")) { error = $"W @0x{zoneBase + 3:X4} st={state}"; return false; }
+                    System.Threading.Thread.Sleep(interWriteDelayMs);
+                    if (!modbus.WriteToHoldingRegister(unitId, Off1((ushort)(zoneBase + 4)), lengthCm, out state, $"RTV {main + 1}-{sub + 1} len")) { error = $"W @0x{zoneBase + 4:X4} st={state}"; return false; }
+                    System.Threading.Thread.Sleep(interWriteDelayMs);
+                    if (!modbus.WriteToHoldingRegister(unitId, Off1((ushort)(zoneBase + 6)), widthCm, out state, $"RTV {main + 1}-{sub + 1} wid")) { error = $"W @0x{zoneBase + 6:X4} st={state}"; return false; }
+                    System.Threading.Thread.Sleep(interWriteDelayMs);
+                    if (!modbus.WriteToHoldingRegister(unitId, Off1((ushort)(zoneBase + 8)), az, out state, $"RTV {main + 1}-{sub + 1} az")) { error = $"W @0x{zoneBase + 8:X4} st={state}"; return false; }
+                    System.Threading.Thread.Sleep(interWriteDelayMs);
+
+                    // Verify
+                    ushort[]? rd = modbus.ReadDataFrom16bitRegisters(unitId, Off1(zoneBase), 10, RegType16b.HoldingRegister, out var stRd, $"Verify RTV {main + 1}-{sub + 1}");
+                    if (stRd != ModbusStateCode.Success || rd == null || rd.Length < 9)
+                    {
+                        error = $"Readback failed at 0x{zoneBase:X4}, state={stRd}";
+                        return false;
+                    }
+                    int rbLat = (rd[0] << 16) | rd[1];
+                    int rbLon = (rd[2] << 16) | rd[3];
+                    if (rbLat != lat32 || rbLon != lon32)
+                    {
+                        error = $"Mismatch after write at 0x{zoneBase:X4} (lat/lon differ).";
+                        return false;
+                    }
+                }
+
+                modbus.WriteToHoldingRegister(unitId, Off1(UNLOCK_REGISTER), 0, out _, "Lock device");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                state = ModbusStateCode.UndefinedError;
+                error = ex.Message;
+                return false;
+            }
+        }
+
+
+        // --- READ: MPC-RTV switch zones over TCP ---
+        private static List<ActivationZone> ReadRtvSwitchZonesTcp(ModbusTcpIp modbus, byte unitId)
+        {
+            var list = new List<ActivationZone>();
+
+            // main: 0..4 (=> 1..5), sub: 0..6 (=> 1..7)
+            for (int m = 0; m <= 4; m++)
+            {
+                for (int s = 0; s <= 6; s++)
+                {
+                    ushort baseAddr = RtvSwitchBaseAddr(m, s);
+                    var data = modbus.ReadDataFrom16bitRegisters(
+                        unitId, baseAddr, 10, RegType16b.HoldingRegister, out var st,
+                        $"Read RTV {m + 1}-{s + 1}");
+
+                    if (st != ModbusStateCode.Success || data == null || data.Length < 9)
+                        continue;
+
+                    // Empty slot?
+                    if (data.All(v => v == 0)) continue;
+
+                    int lat = (data[0] << 16) | data[1];
+                    int lon = (data[2] << 16) | data[3];
+                    if (lat == 0 && lon == 0) continue;
+
+                    ushort lengthCm = data[4];
+                    ushort widthCm = data[6];
+                    ushort az = data[8];
+
+                    list.Add(new ActivationZone
+                    {
+                        Name = $"Switch {m + 1}-{s + 1}",
+                        MainZone = m,
+                        SubZone = s,
+                        Latitude = lat / 1_000_000.0,
+                        Longitude = lon / 1_000_000.0,
+                        Height = lengthCm / 100.0,
+                        Width = widthCm / 100.0,
+                        Azimuth = az
+                    });
+                }
+            }
+
+            return list;
+        }
+
+        // --- READ: MPC-RTV switch zones over RTU ---
+        private static async Task<List<ActivationZone>> ReadRtvSwitchZonesRtuAsync(ExportSettings s, byte unitId, int timeoutMs)
+        {
+            var list = new List<ActivationZone>();
+
+            for (int m = 0; m <= 4; m++)
+            {
+                for (int sIdx = 0; sIdx <= 6; sIdx++)
+                {
+                    ushort baseAddr = RtvSwitchBaseAddr(m, sIdx);
+                    var (ok, st, data, err) = await ReadHoldingRegistersRtuAsync(s, unitId, baseAddr, 10, timeoutMs);
+                    if (!ok || st != ModbusStateCode.Success || data == null || data.Length < 9)
+                        continue;
+
+                    if (data.All(v => v == 0)) continue;
+
+                    int lat = (data[0] << 16) | data[1];
+                    int lon = (data[2] << 16) | data[3];
+                    if (lat == 0 && lon == 0) continue;
+
+                    ushort lengthCm = data[4];
+                    ushort widthCm = data[6];
+                    ushort az = data[8];
+
+                    list.Add(new ActivationZone
+                    {
+                        Name = $"Switch {m + 1}-{sIdx + 1}",
+                        MainZone = m,
+                        SubZone = sIdx,
+                        Latitude = lat / 1_000_000.0,
+                        Longitude = lon / 1_000_000.0,
+                        Height = lengthCm / 100.0,
+                        Width = widthCm / 100.0,
+                        Azimuth = az
+                    });
+                }
+            }
+
+            return list;
+        }
+
+        // Helper: only export zones with sane geo + size
+        private static bool HasValidGeoAndSize(ActivationZone z) =>
+            z != null
+            && double.IsFinite(z.Latitude) && double.IsFinite(z.Longitude)
+            && z.Width > 0 && z.Height > 0;
+
+
+        private static bool WriteActivationZoneCountTcp(
+        string host, int port, byte unitId, int zoneCount,
+        int connectTimeoutMs, int sendTimeoutMs, int receiveTimeoutMs,
+        out ModbusStateCode state, out string? error)
+        {
+            state = ModbusStateCode.Success;
+            error = null;
+            return true;
+        }
+
+
+        private static async Task<(bool ok, ModbusStateCode state, string? error)> WriteActivationZoneCountRtuAsync(
+        ExportSettings s, byte unitId, int zoneCount, int timeoutMs)
+        {
+            // Per request: do not touch 0x0300 at all. Header write disabled.
+            return (true, ModbusStateCode.Success, null);
+        }
+
+
+
+        // --- WRITE: MPC activation zones over RTU (exact registers, no header) ---
+        private static async Task<(bool ok, ModbusStateCode state, string? error)> WriteMpcZonesByExactRegistersRtuAsync(
+        ExportSettings s, byte unitId, IReadOnlyList<ActivationZone> zones, int timeoutMs)
+        {
+            const ushort UNLOCK_REGISTER = 0x103F;
+            const ushort UNLOCK_VALUE = 4562;
+
+            try
+            {
+                var (uok, ust, uerr) = await WriteHoldingRegistersRtuAsync(s, unitId, UNLOCK_REGISTER, new[] { UNLOCK_VALUE }, timeoutMs);
+                if (!uok || ust != ModbusStateCode.Success)
+                    return (false, ust, $"Unlock failed: {uerr}");
+
+                await Task.Delay(500);
+
+                const ushort BASE_ADDR = MPC_BASE_ADDR;       // 0x0300
+                const ushort WRITE_OFFSET = MPC_WRITE_OFFSET; // 44
+                const int ZONE_STRIDE = MPC_ZONE_STRIDE;      // 10
+                ushort FIRST_ZONE_BASE = (ushort)(BASE_ADDR + WRITE_OFFSET);
+
+                foreach (var z in zones)
+                {
+                    int mainZone = Math.Clamp(z.MainZone + 1, 1, 4);
+                    int subZone = Math.Clamp(z.SubZone + 1, 1, 5);
+
+                    int zoneIndex = ((mainZone - 1) * 5) + (subZone - 1);
+                    ushort zoneBase = (ushort)(FIRST_ZONE_BASE + (zoneIndex * ZONE_STRIDE));
+
+                    // Float32 WS. SWAP: [0..1]=Lat, [2..3]=Lon
+                    var (yLo, yHi) = FloatToWordsWS((float)z.Latitude);
+                    var (xLo, xHi) = FloatToWordsWS((float)z.Longitude);
+
+                    // Scalars as float32 WS
+                    var (hLo, hHi) = FloatToWordsWS((float)z.Height);
+                    var (wLo, wHi) = FloatToWordsWS((float)z.Width);
+                    var (azLo, azHi) = FloatToWordsWS((float)Math.Clamp(z.Azimuth, 0, 359));
+
+                    await WriteHoldingRegistersRtuAsync(s, unitId, UNLOCK_REGISTER, new[] { UNLOCK_VALUE }, timeoutMs);
+                    await Task.Delay(250);
+
+                    // Lat [0-1]
+                    var (okLatLo, stLatLo, errLatLo) = await WriteHoldingRegistersRtuAsync(s, unitId, zoneBase, new[] { yLo, yHi }, timeoutMs);
+                    if (!okLatLo || stLatLo != ModbusStateCode.Success) return (false, stLatLo, $"RTU Lat(lo,hi) failed @0x{zoneBase:X4}: {errLatLo}");
+                    await Task.Delay(200);
+
+                    // Lon [2-3]
+                    var (okLonLo, stLonLo, errLonLo) = await WriteHoldingRegistersRtuAsync(s, unitId, (ushort)(zoneBase + 2), new[] { xLo, xHi }, timeoutMs);
+                    if (!okLonLo || stLonLo != ModbusStateCode.Success) return (false, stLonLo, $"RTU Lon(lo,hi) failed @0x{(zoneBase + 2):X4}: {errLonLo}");
+                    await Task.Delay(200);
+
+                    // Height [4-5]
+                    var (okH, stH, errH) = await WriteHoldingRegistersRtuAsync(s, unitId, (ushort)(zoneBase + 4), new[] { hLo, hHi }, timeoutMs);
+                    if (!okH || stH != ModbusStateCode.Success) return (false, stH, $"RTU height(lo,hi) failed @0x{(zoneBase + 4):X4}: {errH}");
+                    await Task.Delay(200);
+
+                    // Width [6-7]
+                    var (okW, stW, errW) = await WriteHoldingRegistersRtuAsync(s, unitId, (ushort)(zoneBase + 6), new[] { wLo, wHi }, timeoutMs);
+                    if (!okW || stW != ModbusStateCode.Success) return (false, stW, $"RTU width(lo,hi) failed @0x{(zoneBase + 6):X4}: {errW}");
+                    await Task.Delay(200);
+
+                    // Azimuth [8-9]
+                    var (okA, stA, errA) = await WriteHoldingRegistersRtuAsync(s, unitId, (ushort)(zoneBase + 8), new[] { azLo, azHi }, timeoutMs);
+                    if (!okA || stA != ModbusStateCode.Success) return (false, stA, $"RTU azimuth(lo,hi) failed @0x{(zoneBase + 8):X4}: {errA}");
+                    await Task.Delay(200);
+                }
+
+                await WriteHoldingRegistersRtuAsync(s, unitId, UNLOCK_REGISTER, new[] { (ushort)0 }, timeoutMs);
+                return (true, ModbusStateCode.Success, null);
+            }
+            catch (Exception ex)
+            {
+                return (false, ModbusStateCode.UndefinedError, ex.Message);
+            }
+        }
+
+        // Helper: try to write a single holding register for unlock/lock with robust fallbacks
+        private static bool TryWriteUnlockTcp(string host, int port, byte unitId, ushort addr, ushort value,
+            int connectTimeoutMs, int sendTimeoutMs, int receiveTimeoutMs,
+            out ModbusStateCode state, out string? error)
+        {
+            // 1) Raw wire write first (exact address)
+            if (WriteHoldingRegistersTcpDirectExact(host, port, unitId, addr, new[] { value },
+                connectTimeoutMs, sendTimeoutMs, receiveTimeoutMs, out state, out error))
+                return true;
+
+            // 2) Fallback: library with OffsetFromOne -> pass Off1(addr)
+            try
+            {
+                var p = new ProtocolParams
+                {
+                    Flags = ProtocolFlags.OffsetFromOne,
+                    SuccessiveRequestDelay = 100,
+                    ConnectionTimeout = Math.Min(connectTimeoutMs, 5000),
+                    SendTimeout = Math.Min(sendTimeoutMs, 3000),
+                    ReceiveTimeout = Math.Min(receiveTimeoutMs, 5000),
+                    ReceiveAgainTimeout = 3000
+                };
+                using var modbus = new ModbusTcpIp($"{host}:{port}", p);
+
+                if (modbus.WriteToHoldingRegister(unitId, Off1(addr), value, out state, "Unlock/Lock (Off1)"))
+                    return state == ModbusStateCode.Success;
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+            }
+
+            // 3) Last fallback: library without Off1 (some builds ignore the flag for FC16)
+            try
+            {
+                var p2 = new ProtocolParams
+                {
+                    Flags = ProtocolFlags.OffsetFromOne,
+                    SuccessiveRequestDelay = 100,
+                    ConnectionTimeout = Math.Min(connectTimeoutMs, 5000),
+                    SendTimeout = Math.Min(sendTimeoutMs, 3000),
+                    ReceiveTimeout = Math.Min(receiveTimeoutMs, 5000),
+                    ReceiveAgainTimeout = 3000
+                };
+                using var modbus2 = new ModbusTcpIp($"{host}:{port}", p2);
+
+                if (modbus2.WriteToHoldingRegister(unitId, addr, value, out state, "Unlock/Lock (raw addr)"))
+                    return state == ModbusStateCode.Success;
+            }
+            catch (Exception ex2)
+            {
+                error = ex2.Message;
+            }
+
+            if (string.IsNullOrWhiteSpace(error)) error = "All unlock/lock attempts failed.";
+            return false;
+        }
+
+        private static string BuildZonesDebugReport(IEnumerable<ActivationZone> zones, int maxRows = 8, string title = "Zones debug")
+        {
+            var z = zones.ToList();
+            var sb = new StringBuilder();
+            sb.AppendLine(title);
+            sb.AppendLine($"Total: {z.Count}");
+            if (z.Count > 0)
+            {
+                var latMin = z.Min(a => a.Latitude);
+                var latMax = z.Max(a => a.Latitude);
+                var lonMin = z.Min(a => a.Longitude);
+                var lonMax = z.Max(a => a.Longitude);
+                var wMin = z.Min(a => a.Width);
+                var wMax = z.Max(a => a.Width);
+                var hMin = z.Min(a => a.Height);
+                var hMax = z.Max(a => a.Height);
+                sb.AppendLine($"Lat range: {latMin} .. {latMax}");
+                sb.AppendLine($"Lon range: {lonMin} .. {lonMax}");
+                sb.AppendLine($"Width range: {wMin} .. {wMax}");
+                sb.AppendLine($"Height range: {hMin} .. {hMax}");
+            }
+            sb.AppendLine("Sample:");
+            foreach (var a in z.Take(maxRows))
+            {
+                sb.AppendLine($"  {a.MainZone + 1}-{a.SubZone + 1}: Lat={a.Latitude}, Lon={a.Longitude}, W={a.Width}, H={a.Height}, Az={a.Azimuth}, Name='{a.Name}'");
+            }
+            return sb.ToString();
+        }
+
+        // Float32 <-> two 16-bit holding registers using the same mapping you provided.
+        // Mapping (Float -> UInt32):
+        //   u = (b[1] << 24) | (b[0] << 16) | (b[3] << 8) | b[2];  // b = BitConverter.GetBytes(float)
+        // We then split u to (hi=upper16, lo=lower16).
+        private static (ushort hi, ushort lo) FloatToMpcWords(float value)
+        {
+            // BitConverter is little-endian on .NET
+            var b = BitConverter.GetBytes(value);
+            uint u = ((uint)b[1] << 24) | ((uint)b[0] << 16) | ((uint)b[3] << 8) | (uint)b[2];
+            return ((ushort)(u >> 16), (ushort)(u & 0xFFFF));
+        }
+
+        // Overload to accept double (casts to float32 on-wire)
+        private static (ushort hi, ushort lo) DoubleToMpcWords(double value)
+        {
+            return FloatToMpcWords((float)value);
+        }
+
+        // Reverse mapping (UInt32 -> Float) matching your ConvertUInt32ToFloat:
+        // byteArray[2] = value >> 24; byteArray[3] = value >> 16; byteArray[0] = value >> 8; byteArray[1] = value >> 0;
+        // Array.Reverse(byteArray); then BitConverter.ToSingle.
+        private static float MpcWordsToFloat(ushort hi, ushort lo)
+        {
+            uint u = ((uint)hi << 16) | lo;
+            var byteArray = new byte[4];
+            byteArray[2] = (byte)((u >> 24) & 0xFF);
+            byteArray[3] = (byte)((u >> 16) & 0xFF);
+            byteArray[0] = (byte)((u >> 8) & 0xFF);
+            byteArray[1] = (byte)(u & 0xFF);
+            Array.Reverse(byteArray);
+            return BitConverter.ToSingle(byteArray, 0);
+        }
+
+        private static (ushort hi, ushort lo) FloatToWordsBE(float value)
+        {
+            var b = BitConverter.GetBytes(value); // LE in .NET
+            ushort hi = (ushort)((b[3] << 8) | b[2]);
+            ushort lo = (ushort)((b[1] << 8) | b[0]);
+            return (hi, lo);
+        }
+
+        // Two 16-bit registers -> Float32 (big-endian per 16-bit word)
+        private static float WordsToFloatBE(ushort hi, ushort lo)
+        {
+            var b = new byte[4];
+            b[0] = (byte)(lo & 0xFF);
+            b[1] = (byte)(lo >> 8);
+            b[2] = (byte)(hi & 0xFF);
+            b[3] = (byte)(hi >> 8);
+            return BitConverter.ToSingle(b, 0);
+        }
+
+        // --- WRITE: MPC-RTV switch zones over RTU (RS485) ---
+        private static async Task<(bool ok, ModbusStateCode state, string? error)> WriteRtvSwitchesRtuAsync(
+            ExportSettings s, byte unitId, IReadOnlyList<ActivationZone> switchZones, int timeoutMs)
+        {
+            const ushort UNLOCK_REGISTER = 0x103F;
+            const ushort UNLOCK_VALUE = 4562;
+
+            try
+            {
+                // Unlock once
+                var (uok, ust, uerr) = await WriteHoldingRegistersRtuAsync(s, unitId, UNLOCK_REGISTER, new[] { UNLOCK_VALUE }, timeoutMs);
+                if (!uok || ust != ModbusStateCode.Success)
+                    return (false, ust, $"Unlock failed: {uerr}");
+
+                await Task.Delay(400);
+
+                foreach (var z in switchZones)
+                {
+                    int main = Math.Clamp(z.MainZone, 0, 4);
+                    int sub = Math.Clamp(z.SubZone, 0, 6);
+                    ushort baseAddr = RtvSwitchBaseAddr(main, sub);
+
+                    // Coordinates as 32-bit signed microdegrees (HI word first, then LO)
+                    int lat32 = (int)Math.Round(z.Latitude * 1_000_000.0, MidpointRounding.AwayFromZero);
+                    int lon32 = (int)Math.Round(z.Longitude * 1_000_000.0, MidpointRounding.AwayFromZero);
+                    ushort latHi = (ushort)((lat32 >> 16) & 0xFFFF);
+                    ushort latLo = (ushort)(lat32 & 0xFFFF);
+                    ushort lonHi = (ushort)((lon32 >> 16) & 0xFFFF);
+                    ushort lonLo = (ushort)(lon32 & 0xFFFF);
+
+                    ushort lengthCm = ToUInt16(z.Height * 100.0);
+                    ushort widthCm = ToUInt16(z.Width * 100.0);
+                    ushort az = (ushort)Math.Clamp(z.Azimuth, 0, 359);
+
+                    // Re-unlock per zone (robustness)
+                    await WriteHoldingRegistersRtuAsync(s, unitId, UNLOCK_REGISTER, new[] { UNLOCK_VALUE }, timeoutMs);
+                    await Task.Delay(250);
+
+                    // Lat [0-1]
+                    var (ok1, st1, err1) = await WriteHoldingRegistersRtuAsync(s, unitId, baseAddr, new[] { latHi, latLo }, timeoutMs);
+                    if (!ok1 || st1 != ModbusStateCode.Success) return (false, st1, $"RTU lat failed @0x{baseAddr:X4}: {err1}");
+                    await Task.Delay(200);
+
+                    // Lon [2-3]
+                    var (ok2, st2, err2) = await WriteHoldingRegistersRtuAsync(s, unitId, (ushort)(baseAddr + 2), new[] { lonHi, lonLo }, timeoutMs);
+                    if (!ok2 || st2 != ModbusStateCode.Success) return (false, st2, $"RTU lon failed @0x{(baseAddr + 2):X4}: {err2}");
+                    await Task.Delay(200);
+
+                    // Length [4]
+                    var (ok3, st3, err3) = await WriteHoldingRegistersRtuAsync(s, unitId, (ushort)(baseAddr + 4), new[] { lengthCm }, timeoutMs);
+                    if (!ok3 || st3 != ModbusStateCode.Success) return (false, st3, $"RTU length failed @0x{(baseAddr + 4):X4}: {err3}");
+                    await Task.Delay(200);
+
+                    // Width [6]
+                    var (ok4, st4, err4) = await WriteHoldingRegistersRtuAsync(s, unitId, (ushort)(baseAddr + 6), new[] { widthCm }, timeoutMs);
+                    if (!ok4 || st4 != ModbusStateCode.Success) return (false, st4, $"RTU width failed @0x{(baseAddr + 6):X4}: {err4}");
+                    await Task.Delay(200);
+
+                    // Azimuth [8]
+                    var (ok5, st5, err5) = await WriteHoldingRegistersRtuAsync(s, unitId, (ushort)(baseAddr + 8), new[] { az }, timeoutMs);
+                    if (!ok5 || st5 != ModbusStateCode.Success) return (false, st5, $"RTU azimuth failed @0x{(baseAddr + 8):X4}: {err5}");
+                    await Task.Delay(200);
+
+                    // Optional verify
+                    var (rok, rst, rdata, rerr) = await ReadHoldingRegistersRtuAsync(s, unitId, baseAddr, 10, timeoutMs);
+                    if (!rok || rst != ModbusStateCode.Success || rdata == null || rdata.Length < 9)
+                        return (false, rst, $"Verify read failed @0x{baseAddr:X4}: {rerr}");
+
+                    int rbLat = (rdata[0] << 16) | rdata[1];
+                    int rbLon = (rdata[2] << 16) | rdata[3];
+                    if (rbLat != lat32 || rbLon != lon32 || rdata[4] != lengthCm || rdata[6] != widthCm || rdata[8] != az)
+                        return (false, ModbusStateCode.WrongResponse, $"Verify mismatch @0x{baseAddr:X4}");
+                }
+
+                // Lock device
+                await WriteHoldingRegistersRtuAsync(s, unitId, UNLOCK_REGISTER, new[] { (ushort)0 }, timeoutMs);
+                return (true, ModbusStateCode.Success, null);
+            }
+            catch (Exception ex)
+            {
+                return (false, ModbusStateCode.UndefinedError, ex.Message);
+            }
+        }
+
+        // Float32 -> two 16-bit registers (word-swapped: LO first, then HI)
+        private static (ushort first, ushort second) FloatToWordsWS(float value)
+        {
+            var (hi, lo) = FloatToWordsBE(value);
+            return (lo, hi);
+        }
+
+        // Two regs -> Float32 (word-swapped: LO first, then HI)
+        private static float WordsToFloatWS(ushort first, ushort second)
+        {
+            // first=LO, second=HI -> feed BE as (HI, LO)
+            return WordsToFloatBE(second, first);
+        }
+
+        private async void ReinitMPC_Click(object sender, RoutedEventArgs e)
+        {
+            ShowBusy("Sending reinit command...");
+            await Task.Delay(50);
+
+            try
+            {
+                Settings = ExportSettings.FromWindow(this);
+                if (Settings == null)
+                {
+                    await ShowMessageAfterBusyAsync("Export setting are missing.", "Reinit MPC", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+                if (!TryValidateSettings(Settings, out var validationError))
+                {
+                    await ShowMessageAfterBusyAsync(validationError, "Reinit MPC - validation", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+
+                byte unitId = (byte)Math.Clamp(Settings.ModemDec ?? 1, 1, 247);
+                const ushort REINIT_ADDR = 0x0183;   // MS_REG_V2X_REINIT
+                const ushort REINIT_VAL = 0x0001;   // Reinit command
+
+                if (Settings.IsTcpSelected)
+                {
+                    var host = Settings.TcpHost?.Trim();
+                    var port = Settings.TcpPort ?? 502;
+                    if (string.IsNullOrWhiteSpace(host))
+                    {
+                        await ShowMessageAfterBusyAsync("TCP/IP host is necessary", "Reinit MPC", MessageBoxButton.OK, MessageBoxImage.Warning);
+                        return;
+                    }
+
+                    // run TCP reinit on a background thread
+                    var res = await Task.Run(() => ReinitTcpWorker(host!, port, unitId, REINIT_ADDR, REINIT_VAL));
+
+                    if (!res.ok)
+                    {
+                        await ShowMessageAfterBusyAsync(res.msgOrError, "Reinit MPC", MessageBoxButton.OK, MessageBoxImage.Error);
+                        return;
+                    }
+
+                    await ShowMessageAfterBusyAsync($"Reinit command was sent to {host}:{port} (UnitId {unitId}).",
+                        "Reinit MPC", MessageBoxButton.OK, MessageBoxImage.Information);
+                }
+                else
+                {
+                    // RS485 – already async, just show dialogs after hiding busy
+                    var (ok16, st16, err16) = await WriteHoldingRegistersRtuAsync(Settings, unitId, REINIT_ADDR, new[] { REINIT_VAL }, timeoutMs: 2000);
+                    if (ok16 && st16 == ModbusStateCode.Success)
+                    {
+                        await ShowMessageAfterBusyAsync(
+                            $"Reinit command via RS485 was sent to {Settings.SerialPortName} (slave {unitId}).",
+                            "Reinit MPC", MessageBoxButton.OK, MessageBoxImage.Information);
+                    }
+                    else
+                    {
+                        var extra = string.IsNullOrWhiteSpace(err16) ? "" : $" ({err16})";
+                        await ShowMessageAfterBusyAsync($"Reinit via rs485 failed: state={st16}{extra}",
+                            "Reinit MPC", MessageBoxButton.OK, MessageBoxImage.Error);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                await ShowMessageAfterBusyAsync($"Reinit error: {ex.Message}", "Reinit MPC", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+            finally
+            {
+                HideBusy();
+            }
+        }
+
+        // Add this new TCP worker (pure, no UI)
+        private static (bool ok, string msgOrError) ReinitTcpWorker(string host, int port, byte unitId, ushort reinitAddr, ushort reinitVal)
+        {
+            const ushort UNLOCK_REGISTER = 0x103F;
+            const ushort UNLOCK_VALUE = 4562;
+
+            try
+            {
+                // robust unlock
+                if (!TryWriteUnlockTcp(host, port, unitId, UNLOCK_REGISTER, UNLOCK_VALUE,
+                                       connectTimeoutMs: 3000, sendTimeoutMs: 2000, receiveTimeoutMs: 5000,
+                                       out var stUnlock, out var errUnlock))
+                {
+                    return (false, $"Error unlocking targeted address (state={stUnlock}{(string.IsNullOrWhiteSpace(errUnlock) ? "" : $", {errUnlock}")}).");
+                }
+                System.Threading.Thread.Sleep(600);
+
+                var protocolParams = new ProtocolParams
+                {
+                    Flags = ProtocolFlags.OffsetFromOne,
+                    SuccessiveRequestDelay = 250,
+                    ConnectionTimeout = 3000,
+                    SendTimeout = 2000,
+                    ReceiveTimeout = 3000,
+                    ReceiveAgainTimeout = 2000
+                };
+
+                using var modbus = new ModbusTcpIp($"{host}:{port}", protocolParams);
+
+                if (!modbus.WriteToHoldingRegister(unitId, reinitAddr, reinitVal, out var st, "V2X REINIT"))
+                {
+                    return (false, $"Reinit error: state={st}");
+                }
+
+                // lock back
+                TryWriteUnlockTcp(host, port, unitId, UNLOCK_REGISTER, 0,
+                    connectTimeoutMs: 3000, sendTimeoutMs: 2000, receiveTimeoutMs: 5000,
+                    out _, out _);
+
+                return (true, "OK");
+            }
+            catch (Exception ex)
+            {
+                return (false, ex.Message);
+            }
+        }
+
+
+        // TCP: FC06 - Write Single Register (exact on-wire address)
+        private static bool WriteSingleRegisterTcpFC16(
+        string host, int port, byte unitId,
+        ushort addr, ushort value,
+        int connectTimeoutMs, int sendTimeoutMs, int receiveTimeoutMs,
+        out ModbusStateCode state, out string? error)
+        {
+            state = ModbusStateCode.Success;
+            error = null;
+
+            try
+            {
+                using var client = new System.Net.Sockets.TcpClient();
+                var connectTask = client.ConnectAsync(host, port);
+                if (!connectTask.Wait(connectTimeoutMs))
+                {
+                    state = ModbusStateCode.Timeout;
+                    error = "Connect timeout";
+                    return false;
+                }
+
+                client.NoDelay = true;
+                client.SendTimeout = Math.Max(sendTimeoutMs, 3000);
+                client.ReceiveTimeout = Math.Max(receiveTimeoutMs, 5000);
+
+                using var stream = client.GetStream();
+
+                // MBAP (7) + PDU (FC16: 1 + 2 + 2 + 2 + 1 + 2)
+                ushort txId = 1;
+                ushort regCount = 1;
+
+                byte[] buf = new byte[13];
+                // MBAP
+                buf[0] = (byte)(txId >> 8);
+                buf[1] = (byte)(txId & 0xFF);
+                buf[2] = 0x00;
+                buf[3] = 0x00;
+                ushort lenField = (ushort)(1 + 6); // UnitId + PDU length
+                buf[4] = (byte)(lenField >> 8);
+                buf[5] = (byte)(lenField & 0xFF);
+                buf[6] = unitId;
+
+                // PDU: FC16
+                buf[7] = 0x10;                  // Function code
+                buf[8] = (byte)(addr >> 8);     // Start addr hi
+                buf[9] = (byte)(addr & 0xFF);   // Start addr lo
+                buf[10] = (byte)(regCount >> 8); // Quantity hi
+                buf[11] = (byte)(regCount & 0xFF); // Quantity lo
+                buf[12] = 2;                     // Byte count
+                                                 // values
+                var valBytes = new byte[2] { (byte)(value >> 8), (byte)(value & 0xFF) };
+
+                stream.Write(buf, 0, buf.Length);
+                stream.Write(valBytes, 0, 2);
+
+                // MBAP header
+                if (!ReadExact(stream, 7, client.ReceiveTimeout, out var mbapResp))
+                {
+                    state = ModbusStateCode.Timeout;
+                    error = "No MBAP response";
+                    return false;
+                }
+                int respLen = (mbapResp[4] << 8) | mbapResp[5];
+                if (!ReadExact(stream, respLen, client.ReceiveTimeout, out var rest))
+                {
+                    state = ModbusStateCode.Timeout;
+                    error = "Response timeout";
+                    return false;
+                }
+
+                // Exception?
+                if ((rest[1] & 0x80) != 0)
+                {
+                    state = ModbusStateCode.IllegalDataAddr;
+                    error = $"Exception code 0x{rest[2]:X2}";
+                    return false;
+                }
+
+                // expected response: register count + values
+                if (rest[0] != unitId || rest[1] != 0x10)
+                {
+                    state = ModbusStateCode.WrongResponse;
+                    error = "Unexpected response";
+                    return false;
+                }
+
+                return true;
+
+                static bool ReadExact(System.IO.Stream s, int needed, int timeoutMs, out byte[] data)
+                {
+                    data = new byte[needed];
+                    int read = 0;
+                    var start = DateTime.UtcNow;
+                    while (read < needed)
+                    {
+                        if ((DateTime.UtcNow - start).TotalMilliseconds > timeoutMs)
+                            return false;
+                        int n;
+                        try { n = s.Read(data, read, needed - read); }
+                        catch { return false; }
+                        if (n <= 0) return false;
+                        read += n;
+                    }
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                state = ModbusStateCode.UndefinedError;
+                error = ex.Message;
+                return false;
+            }
+        }
+
+
+        // RTU: FC06 - Write Single Register
+        private static async Task<(bool ok, ModbusStateCode state, string? error)> WriteSingleRegisterRtuAsync(
+            ExportSettings s, byte slave, ushort addr, ushort value, int timeoutMs)
+        {
+            try
+            {
+                using var sp = new SerialPort(
+                    s.SerialPortName!,
+                    s.SerialBaudrate ?? 19200,
+                    ParseParity(s.SerialParity),
+                    s.SerialDataBits ?? 8,
+                    ParseStopBits(s.SerialStopBits))
+                {
+                    Handshake = Handshake.None,
+                    ReadTimeout = timeoutMs,
+                    WriteTimeout = timeoutMs
+                };
+                sp.Open();
+
+                // [slave][0x06][addr_hi][addr_lo][val_hi][val_lo][crc_lo][crc_hi]
+                var req = new byte[8];
+                req[0] = slave;
+                req[1] = 0x06;
+                req[2] = (byte)(addr >> 8);
+                req[3] = (byte)(addr & 0xFF);
+                req[4] = (byte)(value >> 8);
+                req[5] = (byte)(value & 0xFF);
+                ushort crc = Crc16Modbus(req, 0, 6);
+                req[6] = (byte)(crc & 0xFF);
+                req[7] = (byte)(crc >> 8);
+
+                await sp.BaseStream.WriteAsync(req, 0, req.Length, CancellationToken.None).ConfigureAwait(false);
+
+                // Expect echo of the same 8 bytes
+                var resp = new byte[8];
+                int read = 0;
+                using var cts = new CancellationTokenSource(timeoutMs);
+                while (read < resp.Length)
+                {
+                    int n = await sp.BaseStream.ReadAsync(resp, read, resp.Length - read, cts.Token).ConfigureAwait(false);
+                    if (n <= 0) break;
+                    read += n;
+                }
+                if (read < resp.Length)
+                    return (false, ModbusStateCode.Timeout, "RTU: response timeout");
+
+                // CRC
+                ushort crcCalc = Crc16Modbus(resp, 0, 6);
+                if (resp[6] != (byte)(crcCalc & 0xFF) || resp[7] != (byte)(crcCalc >> 8))
+                    return (false, ModbusStateCode.CRC, "RTU: CRC failed");
+
+                if (resp[0] != slave || resp[1] != 0x06)
+                    return (false, ModbusStateCode.WrongResponse, "RTU: wrong function/slave");
+
+                ushort echoAddr = (ushort)((resp[2] << 8) | resp[3]);
+                ushort echoVal = (ushort)((resp[4] << 8) | resp[5]);
+                if (echoAddr != addr || echoVal != value)
+                    return (false, ModbusStateCode.WrongResponse, "RTU: echo mismatch");
+
+                return (true, ModbusStateCode.Success, null);
+            }
+            catch (OperationCanceledException)
+            {
+                return (false, ModbusStateCode.Timeout, "RTU: timed out");
+            }
+            catch (TimeoutException)
+            {
+                return (false, ModbusStateCode.Timeout, "RTU: serial timeout");
+            }
+            catch (Exception ex)
+            {
+                return (false, ModbusStateCode.UndefinedError, ex.Message);
+            }
+        }
+    }
+}

@@ -1,0 +1,69 @@
+﻿using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using System.Xml;
+
+namespace V2XController
+{
+    internal class V2XMessageParser
+    {
+        public static string GetMessageType(string rawXml)
+        {
+            if (rawXml.Contains("<CAM>")) return "CAM";
+            if (rawXml.Contains("<SRV>")) return "SRV";
+            return "UNKNOWN";
+        }
+
+        public static V2XMessage ParseV2XMessage(string rawXml)
+        {
+            var xmlDoc = new XmlDocument();
+            xmlDoc.LoadXml(rawXml);
+
+            var msg = new V2XMessage();
+            msg.MessageType = GetMessageType(rawXml);
+
+            string fullStatId = xmlDoc.SelectSingleNode("//vehPt")?.Attributes["statId"]?.Value ?? "";
+
+            if (fullStatId.Length >= 4)
+                msg.VehicleID = fullStatId.Substring(fullStatId.Length - 4);
+            else
+                msg.VehicleID = fullStatId;
+
+            msg.MessageID = xmlDoc.SelectSingleNode("//MessageID")?.InnerText;
+            msg.Timestamp = DateTime.Parse(xmlDoc.SelectSingleNode("//Timestamp")?.InnerText ?? DateTime.Now.ToString());
+            msg.Latitude = double.TryParse(xmlDoc.SelectSingleNode("//Latitude")?.InnerText, out var lat) ? lat : 0.0;
+            msg.Longitude = double.TryParse(xmlDoc.SelectSingleNode("//Longitude")?.InnerText, out var lon) ? lon : 0.0;
+            msg.Speed = double.TryParse(xmlDoc.SelectSingleNode("//Speed")?.InnerText, out var spd) ? spd : 0.0;
+            msg.Heading = double.TryParse(xmlDoc.SelectSingleNode("//Heading")?.InnerText, out var hdg) ? hdg : 0.0;
+            
+            return msg;
+        }
+
+        public static List<V2XMessage> LoadMessagesFromCSV(string path)
+        {
+            var messages = new List<V2XMessage>();
+
+            foreach (var line in File.ReadLines(path).Skip(1))
+            {
+                var parts = line.Split(',');
+                if (parts.Length < 6) continue;
+
+                messages.Add(new V2XMessage
+                {
+                    VehicleID = parts[0],
+                    Timestamp = DateTime.Parse(parts[1]),
+                    Latitude = double.Parse(parts[2]),
+                    Longitude = double.Parse(parts[3]),
+                    Speed = double.Parse(parts[4]),
+                    Heading = double.Parse(parts[5]),
+                    MessageType = "CSV"
+                });
+            }
+
+            return messages;
+        }
+    }
+}

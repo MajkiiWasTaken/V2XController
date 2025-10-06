@@ -1,0 +1,15 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<ExportProfiles>
+  <Profile name="Test_SerialPort" type="Serial">
+    <Modem raw="0xAC" dec="172" hex="0xAC" />
+    <Serial port="COM3" baudrate="56700" databits="8" parity="none" stopbits="1" handshake="None" />
+  </Profile>
+  <Profile name="Test_IP" type="TCP">
+    <Modem raw="0xAB" dec="171" hex="0xAB" />
+    <TCP host="192.168.25.48" port="419" />
+  </Profile>
+  <Profile name="Testtest" type="Serial">
+    <Modem raw="131" dec="131" hex="0x83" />
+    <Serial port="COM10" baudrate="56700" databits="8" parity="none" stopbits="1" handshake="None" />
+  </Profile>
+</ExportProfiles>

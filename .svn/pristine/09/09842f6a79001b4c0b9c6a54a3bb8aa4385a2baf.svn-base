@@ -1,0 +1,46 @@
+﻿using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace V2XController
+{
+    internal class V2XMessage
+    {
+
+        public string VehicleID { get; set; }
+        public DateTime Timestamp { get; set; }
+        public double Latitude { get; set; }
+        public double Longitude { get; set; }
+        public double Speed { get; set; }
+        public double Heading { get; set; }
+        public string MessageType { get; set; } //BSM,CAM, etc.
+        public string RawContent { get; set; }
+
+        public List<V2XMessage> LoadMessagesFromCSV(string path)
+        {
+            var messages = new List<V2XMessage>();
+
+            foreach (var line in File.ReadLines(path).Skip(1))
+            {
+                var parts = line.Split(',');
+                if (parts.Length < 6) continue;
+
+                messages.Add(new V2XMessage
+                {
+                    VehicleID = parts[0],
+                    Timestamp = DateTime.Parse(parts[1]),
+                    Latitude = double.Parse(parts[2]),
+                    Longitude = double.Parse(parts[3]),
+                    Speed = double.Parse(parts[4]),
+                    Heading = double.Parse(parts[5]),
+                });
+            }
+
+            return messages;
+
+        }
+    }
+}
