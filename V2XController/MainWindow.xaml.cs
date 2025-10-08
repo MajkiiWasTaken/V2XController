@@ -19,6 +19,7 @@ using System.Text.Json;
 using System.Windows.Data;
 using System.Collections.Concurrent;
 using System.Windows.Documents;
+using System.Windows.Media.Animation;
 using ComCommon;
 using ModbusNewLib;
 using Logger;
@@ -405,6 +406,20 @@ namespace V2XController
             return Math.Clamp(y, 0, n - 1);
         }
 
+        private CancellationTokenSource? _tileCts;
+        private readonly SemaphoreSlim _tileSemaphore = new SemaphoreSlim(4); //tile semaphore limit
+
+
+        private double visualOffsetX = 0;
+        private double visualOffsetY = 0;
+
+        private int lastTileX, lastTileY;
+        private bool isTileLoadPending = false;
+
+        private double tileOffsetX = 0;
+        private double tileOffsetY = 0;
+
+
 
 
         //||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
@@ -476,7 +491,7 @@ namespace V2XController
                 {
                     stops = await LoadStopsFromOSM();
                     Console.WriteLine($"[STOPS] Loaded {stops.Count} tram stops from OSM.");
-                    DrawStopsOnCanvas();
+                    DrawStopsOnCanvasSafe();
                 }
                 catch (Exception ex)
                 {
@@ -514,7 +529,8 @@ namespace V2XController
 
             //loading map tiles on the grid
             var (centerX, centerY) = LatLonToTileXY(latitude, longitude, zoom);
-            _ = LoadTiles(centerX - TileCount / 2, centerY - TileCount / 2);
+            _ = LoadTilesSmoothAsync(centerX - TileCount / 2, centerY - TileCount / 2);
+
 
             //Mouse wheel events for zooming
             TileCanvas.MouseWheel += TileCanvas_MouseWheel;
@@ -671,126 +687,125 @@ namespace V2XController
         }
 
         // Loading map tiles on the grid
-        private async Task LoadTiles(int startX, int startY)
+        private async Task LoadTilesSmoothAsync(int startX, int startY)
         {
-            _currentTopLeftTileX = startX;
-            _currentTopLeftTileY = startY;
+            // Cancel previous loading
+            _tileCts?.Cancel();
+            _tileCts?.Dispose();
+            _tileCts = new CancellationTokenSource();
+            var ct = _tileCts.Token;
 
-            // remove all existing images from the canvas
-            TileCanvas.Children
-                .OfType<Image>()
-                .ToList()
-                .ForEach(img => TileCanvas.Children.Remove(img));
-
-            isDrawing = false;
-            currentRect = null;
-            _currentMapRectangle = null;
-
-            using HttpClient client = new HttpClient();
-            client.DefaultRequestHeaders.UserAgent.Clear();
-            client.DefaultRequestHeaders.UserAgent.ParseAdd("V2XController/1.0 (Michal.Svrcek@hrosistavby.cz)");
-
-            var images = new List<Image>();
-
-            for (int x = 0; x < TileCount; x++)
+            try
             {
-                for (int y = 0; y < TileCount; y++)
+                _currentTopLeftTileX = startX;
+                _currentTopLeftTileY = startY;
+
+                isDrawing = false;
+                currentRect = null;
+                _currentMapRectangle = null;
+
+                var order = GenerateSpiralOrder(TileCount);
+                var newImages = new List<Image>(TileCount * TileCount);
+                var tasks = new List<Task>();
+
+                for (int idx = 0; idx < order.Count; idx++)
                 {
-                    int tileX = startX + x;
-                    int tileY = startY + y;
-                    string url = $"https://tile.openstreetmap.org/{zoom}/{tileX}/{tileY}.png";
+                    if (ct.IsCancellationRequested) break;
 
-                    try
+                    var (offX, offY) = order[idx];
+                    int tileX = startX + (offX + TileCount / 2);
+                    int tileY = startY + (offY + TileCount / 2);
+                    int canvasX = offX + TileCount / 2;
+                    int canvasY = offY + TileCount / 2;
+
+                    // Slight delay for progressive loading feel
+                    await Task.Delay((idx == 0) ? 0 : 40, ct).ConfigureAwait(false);
+
+                    var task = Task.Run(async () =>
                     {
-                        byte[] data = await client.GetByteArrayAsync(url);
-                        BitmapImage bitmap = new BitmapImage();
-                        bitmap.BeginInit();
-                        bitmap.StreamSource = new MemoryStream(data);
-                        bitmap.DecodePixelWidth = TilePixelSize;
-                        bitmap.DecodePixelHeight = TilePixelSize;
-                        bitmap.EndInit();
-
-                        Image image = new Image
+                        try
                         {
-                            Width = TilePixelSize,
-                            Height = TilePixelSize,
-                            Source = bitmap
-                        };
+                            await _tileSemaphore.WaitAsync(ct).ConfigureAwait(false);
 
-                        Canvas.SetLeft(image, x * TilePixelSize);
-                        Canvas.SetTop(image, y * TilePixelSize);
-                        Panel.SetZIndex(image, 0);
-                        images.Add(image);
+                            var bmp = await FetchTileAsync(zoom, tileX, tileY, ct).ConfigureAwait(false);
 
-                        await Task.Delay(1);
-                    }
-                    catch (Exception ex)
+                            await Dispatcher.InvokeAsync(() =>
+                            {
+                                if (ct.IsCancellationRequested) return;
+
+                                Image img = CreateTileImage(bmp);
+                                Canvas.SetLeft(img, canvasX * TilePixelSize);
+                                Canvas.SetTop(img, canvasY * TilePixelSize);
+                                TileCanvas.Children.Add(img);
+                                newImages.Add(img);
+                            });
+                        }
+                        catch (OperationCanceledException) { /* ignorujeme */ }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"Load tile {zoom}/{tileX}/{tileY} failed: {ex.Message}");
+                        }
+                        finally
+                        {
+                            _tileSemaphore.Release();
+                        }
+                    }, ct);
+
+                    tasks.Add(task);
+                }
+
+                try
+                {
+                    await Task.WhenAll(tasks).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) { }
+
+                // Update canvas: remove old tiles, keep overlaye
+                if (!ct.IsCancellationRequested)
+                {
+                    await Dispatcher.InvokeAsync(() =>
                     {
-                        Console.WriteLine($"Error while loading {url}: {ex.Message}");
-                    }
+                        var toRemove = TileCanvas.Children
+                            .OfType<Image>()
+                            .Where(img => !newImages.Contains(img))
+                            .ToList();
+                        foreach (var r in toRemove) TileCanvas.Children.Remove(r);
+
+                        // Add overlayy
+                        if (!TileCanvas.Children.Contains(connectionLine)) TileCanvas.Children.Add(connectionLine);
+                        foreach (var pt in points)
+                        {
+                            if (!TileCanvas.Children.Contains(pt.Ellipse)) TileCanvas.Children.Add(pt.Ellipse);
+                            if (!TileCanvas.Children.Contains(pt.Text)) TileCanvas.Children.Add(pt.Text);
+                        }
+                        foreach (var rect in mapRectangles)
+                        {
+                            if (!TileCanvas.Children.Contains(rect.Shape)) TileCanvas.Children.Add(rect.Shape);
+                            Panel.SetZIndex(rect.Shape, 100);
+                        }
+                        foreach (var pt in points)
+                        {
+                            Panel.SetZIndex(pt.Ellipse, 200);
+                            Panel.SetZIndex(pt.Text, 201);
+                        }
+                        Panel.SetZIndex(connectionLine, 150);
+                    });
+
+                    // Reproject overlays
+                    ReprojectAllZonesOnMapChange();
+                    ReprojectDrawnTramsOnMapChange();
+                    ReprojectActiveVehiclesOnMapChange();
+                    ReprojectReplayOnMapChange();
+                    DrawStopsOnCanvasSafe();
+                    await BringAllOverlaysToFrontSafeAsync();
                 }
             }
-
-            foreach (var img in images)
-                TileCanvas.Children.Add(img);
-
-            if (!TileCanvas.Children.Contains(connectionLine)) TileCanvas.Children.Add(connectionLine);
-
-            foreach (var pt in points)
+            catch (TaskCanceledException)
             {
-                if (!TileCanvas.Children.Contains(pt.Ellipse))
-                    TileCanvas.Children.Add(pt.Ellipse);
-
-                if (!TileCanvas.Children.Contains(pt.Text))
-                    TileCanvas.Children.Add(pt.Text);
-            }
-
-            foreach (var rect in mapRectangles)
-            {
-                if (!TileCanvas.Children.Contains(rect.Shape))
-                    TileCanvas.Children.Add(rect.Shape);
-                Panel.SetZIndex(rect.Shape, 100);
-            }
-            foreach (var pt in points)
-            {
-                Panel.SetZIndex(pt.Ellipse, 200);
-                Panel.SetZIndex(pt.Text, 201);
-            }
-            Panel.SetZIndex(connectionLine, 150);
-
-            // Reproject all zones (activation + switches) and drawn trams after tiles are in place
-            ReprojectAllZonesOnMapChange();
-            ReprojectDrawnTramsOnMapChange();
-
-            ReprojectActiveVehiclesOnMapChange();
-            ReprojectReplayOnMapChange();
-
-            DrawStopsOnCanvas();
-
-            BringAllOverlaysToFront();
-        }
-
-        // Remove replay trail polylines and dots, keep vehicle points/labels
-        private void StripReplayTrailsKeepPoints()
-        {
-            // remove replay polylines
-            var toRemove = TileCanvas.Children
-                .OfType<Polyline>()
-                .Where(pl => pl.Tag is string s && s.StartsWith("replay_trail_", StringComparison.OrdinalIgnoreCase))
-                .ToList();
-
-            foreach (var pl in toRemove)
-                TileCanvas.Children.Remove(pl);
-
-            // remove replay dots
-            foreach (var mp in _replayVehicles.Values.ToList())
-            {
-                if (mp?.TrailDots == null) continue;
-                foreach (var d in mp.TrailDots.ToList())
-                    TileCanvas.Children.Remove(d);
-                mp.TrailDots.Clear();
+                // IGNORUJ: očekávané při rychlém panningu
             }
         }
+
 
         private async Task<BitmapSource?> FetchTileAsync(int z, int x, int y, CancellationToken ct)
         {
@@ -828,6 +843,46 @@ namespace V2XController
                 return null; // draw nothing for this tile
             }
         }
+
+        private Image CreateTileImage(BitmapSource? bmp)
+        {
+            var img = new Image
+            {
+                Width = TilePixelSize,
+                Height = TilePixelSize,
+                Opacity = 0,
+                Stretch = Stretch.Fill,
+                Source = bmp
+            };
+
+            // fade-in
+            var fade = new DoubleAnimation(0.0, 1.0, new Duration(TimeSpan.FromMilliseconds(250)))
+            {
+                EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut }
+            };
+            img.BeginAnimation(UIElement.OpacityProperty, fade);
+
+            return img;
+        }
+
+        private List<(int offX, int offY)> GenerateSpiralOrder(int count)
+        {
+            int n = count;
+            var list = new List<(int, int)>();
+            int center = n / 2;
+            var distances = new List<((int, int) pos, int dist)>();
+
+            for (int x = 0; x < n; x++)
+            for (int y = 0; y < n; y++)
+                distances.Add(((x - center, y - center), Math.Abs(x - center) + Math.Abs(y - center)));
+
+            // sort by manhattan distance, then by maybe Euclidean (stable)
+            foreach (var item in distances.OrderBy(d => d.dist).ThenBy(d => d.pos.Item1 * d.pos.Item1 + d.pos.Item2 * d.pos.Item2))
+                list.Add(item.pos);
+
+            return list;
+        }
+
 
 
         private void TileCanvas_MouseWheel(object sender, MouseWheelEventArgs e) { }
@@ -1048,7 +1103,8 @@ namespace V2XController
                     scale.ScaleY = 1;
 
                     var (centerX, centerY) = LatLonToTileXY(latitude, longitude, zoom);
-                    await LoadTiles(centerX - TileCount / 2, centerY - TileCount / 2);
+                    await LoadTilesSmoothAsync(centerX - TileCount / 2, centerY - TileCount / 2);
+
 
                     // Also refresh altitude for new center/zoom area
                     _ = EnsureLocalAreaAltitudeAsync(force: true);
@@ -1072,21 +1128,19 @@ namespace V2XController
             _zoomDebounceTimer.Start();
         }
 
-
-        //Dragging the map with MMB
+        // Dragging the map with MMB
         private void TileCanvas_PreviewMouseDown(object sender, MouseButtonEventArgs e)
         {
             if (e.ChangedButton == MouseButton.Middle)
             {
                 middleMousePanStart = e.GetPosition(this);
                 isMiddleMousePanning = true;
-                isPanning = true;
                 TileCanvas.CaptureMouse();
                 e.Handled = true;
             }
         }
 
-        // MouseMove - jen vizuální posun
+        // MouseMove - continuous pan and tile loading
         private void TileCanvas_MouseMove_MiddlePan(object sender, MouseEventArgs e)
         {
             if (!isMiddleMousePanning) return;
@@ -1094,62 +1148,308 @@ namespace V2XController
             Point current = e.GetPosition(this);
             Vector delta = current - middleMousePanStart;
 
-            // vizuální posun bufferu
-            translate.X += delta.X;
-            translate.Y += delta.Y;
+            tileOffsetX += delta.X;
+            tileOffsetY += delta.Y;
+
+            // Posun všech dlaždic o aktuální delta
+            foreach (var img in TileCanvas.Children.OfType<Image>())
+            {
+                Canvas.SetLeft(img, Canvas.GetLeft(img) + delta.X);
+                Canvas.SetTop(img, Canvas.GetTop(img) + delta.Y);
+            }
+
+            // Overlay body
+            MoveOverlays(delta.X, delta.Y);
 
             middleMousePanStart = current;
+
+            // Pokud offset překročil velikost dlaždice, posuň top-left index a resetni offset
+            int shiftX = 0, shiftY = 0;
+
+            if (Math.Abs(tileOffsetX) >= TilePixelSize)
+            {
+                shiftX = (int)(tileOffsetX / TilePixelSize);
+                _currentTopLeftTileX -= shiftX;
+                tileOffsetX -= shiftX * TilePixelSize;
+            }
+
+            if (Math.Abs(tileOffsetY) >= TilePixelSize)
+            {
+                shiftY = (int)(tileOffsetY / TilePixelSize);
+                _currentTopLeftTileY -= shiftY;
+                tileOffsetY -= shiftY * TilePixelSize;
+            }
+
+            // Načíst nové dlaždice jen pokud posun o celou dlaždici
+            if (shiftX != 0 || shiftY != 0)
+            {
+                _ = LoadTilesSmoothAsync(_currentTopLeftTileX, _currentTopLeftTileY);
+            }
+
             e.Handled = true;
         }
 
-        // MouseUp - commit posunu
+
+        private void MoveOverlays(double deltaX, double deltaY)
+        {
+            foreach (var pt in points)
+            {
+                if (pt.Ellipse != null)
+                {
+                    Canvas.SetLeft(pt.Ellipse, Canvas.GetLeft(pt.Ellipse) + deltaX);
+                    Canvas.SetTop(pt.Ellipse, Canvas.GetTop(pt.Ellipse) + deltaY);
+                }
+                if (pt.Text != null)
+                {
+                    Canvas.SetLeft(pt.Text, Canvas.GetLeft(pt.Text) + deltaX);
+                    Canvas.SetTop(pt.Text, Canvas.GetTop(pt.Text) + deltaY);
+                }
+            }
+
+            if (connectionLine != null)
+            {
+                for (int i = 0; i < connectionLine.Points.Count; i++)
+                {
+                    connectionLine.Points[i] = new Point(
+                        connectionLine.Points[i].X + deltaX,
+                        connectionLine.Points[i].Y + deltaY
+                    );
+                }
+            }
+        }
+
+
+        // Shift all Image tiles by tile offset
+        private void ShiftTiles(int shiftX, int shiftY)
+        {
+            foreach (var img in TileCanvas.Children.OfType<Image>())
+            {
+                Canvas.SetLeft(img, Canvas.GetLeft(img) + shiftX * TilePixelSize);
+                Canvas.SetTop(img, Canvas.GetTop(img) + shiftY * TilePixelSize);
+            }
+
+            foreach (var pt in points)
+            {
+                if (pt.Ellipse != null)
+                {
+                    Canvas.SetLeft(pt.Ellipse, Canvas.GetLeft(pt.Ellipse) + shiftX * TilePixelSize);
+                    Canvas.SetTop(pt.Ellipse, Canvas.GetTop(pt.Ellipse) + shiftY * TilePixelSize);
+                }
+                if (pt.Text != null)
+                {
+                    Canvas.SetLeft(pt.Text, Canvas.GetLeft(pt.Text) + shiftX * TilePixelSize);
+                    Canvas.SetTop(pt.Text, Canvas.GetTop(pt.Text) + shiftY * TilePixelSize);
+                }
+            }
+
+            if (connectionLine != null)
+            {
+                for (int i = 0; i < connectionLine.Points.Count; i++)
+                {
+                    connectionLine.Points[i] = new Point(
+                        connectionLine.Points[i].X + shiftX * TilePixelSize,
+                        connectionLine.Points[i].Y + shiftY * TilePixelSize
+                    );
+                }
+            }
+        }
+
+
+        // MouseUp - commit pan
         private async void TileCanvas_PreviewMouseUp(object sender, MouseButtonEventArgs e)
         {
-            if (e.ChangedButton == MouseButton.Middle)
+            if (e.ChangedButton != MouseButton.Middle) return;
+
+            isMiddleMousePanning = false;
+            TileCanvas.ReleaseMouseCapture();
+
+            // Logický střed mapy podle aktuálních dlaždic
+            var canvasCenter = new Point(CanvasSize / 2.0, CanvasSize / 2.0);
+            var lonlat = CanvasPixelsToLatLon(canvasCenter, latitude, longitude, zoom);
+            SetMapCenter(lat: lonlat.Y, lon: lonlat.X, updateTextBoxes: true);
+
+            // Načti aktuální dlaždice
+            var (centerX, centerY) = LatLonToTileXY(latitude, longitude, zoom);
+            await LoadTilesSmoothAsync(centerX - TileCount / 2, centerY - TileCount / 2);
+
+            // Reproject overlaye
+            ReprojectAllZonesOnMapChange();
+            ReprojectActiveVehiclesOnMapChange();
+            ReprojectReplayOnMapChange();
+            await BringAllOverlaysToFrontSafeAsync();
+        }
+
+
+        // ======================================
+        // Kontrola a načtení nových dlaždic během panování
+        // ======================================
+        private async Task CheckAndLoadTilesDuringPanAsync()
+        {
+            if (!isMiddleMousePanning || isTileLoadPending) return;
+
+            // Spočti vizuální střed v pixelové soustavě canvasu
+            var canvasCenter = new Point(CanvasSize / 2, CanvasSize / 2);
+            var visualCenter = new Point(canvasCenter.X - translate.X, canvasCenter.Y - translate.Y);
+
+            // Přepočet na lat/lon
+            var lonlat = CanvasPixelsToLatLon(visualCenter, latitude, longitude, zoom);
+
+            // Přepočet na tile koordináty
+            var (tileX, tileY) = LatLonToTileXY(lonlat.Y, lonlat.X, zoom);
+
+            // Jen pokud je nový tile odlišný od posledního commitnutého
+            if (tileX != lastTileX || tileY != lastTileY)
             {
-                isMiddleMousePanning = false;
-                TileCanvas.ReleaseMouseCapture();
-                isPanning = false;
+                lastTileX = tileX;
+                lastTileY = tileY;
+                isTileLoadPending = true;
 
-                // Compute the geo at the visual canvas center after temporary translate
-                var canvasCenter = new Point(CanvasSize / 2.0, CanvasSize / 2.0);
-                var visualCenter = new Point(canvasCenter.X - translate.X, canvasCenter.Y - translate.Y);
+                int startTileX = tileX - TileCount / 2;
+                int startTileY = tileY - TileCount / 2;
 
-                var lonlat = CanvasPixelsToLatLon(visualCenter, latitude, longitude, zoom); // Point(lon, lat)
-                SetMapCenter(lat: lonlat.Y, lon: lonlat.X, updateTextBoxes: true);
+                await LoadTilesSmoothAsync(startTileX, startTileY);
 
-                // Load tiles for the new center
-                var (centerX, centerY) = LatLonToTileXY(latitude, longitude, zoom);
-                await LoadTiles(centerX - TileCount / 2, centerY - TileCount / 2);
-
-                // Reset the temporary visual pan
-                translate.X = 0;
-                translate.Y = 0;
-
-                // Reproject overlays and refresh
-                ReprojectAllZonesOnMapChange();
-                ReprojectActiveVehiclesOnMapChange();
-                ReprojectReplayOnMapChange();
-                BringAllOverlaysToFront();
-
-                _ = EnsureLocalAreaAltitudeAsync(force: true);
-
-                // Start trails fresh after pan commit
-                ResetAllTramTrails();
-                StripReplayTrailsKeepPoints();
-                DrawRadiusCircle();
-
-                e.Handled = true;
+                isTileLoadPending = false;
             }
         }
 
 
 
+        private async Task HandleTileShiftAsync()
+        {
+            int shiftX = 0, shiftY = 0;
+
+            if (visualOffsetX > TilePixelSize) { shiftX = -1; visualOffsetX -= TilePixelSize; }
+            if (visualOffsetX < -TilePixelSize) { shiftX = 1; visualOffsetX += TilePixelSize; }
+            if (visualOffsetY > TilePixelSize) { shiftY = -1; visualOffsetY -= TilePixelSize; }
+            if (visualOffsetY < -TilePixelSize) { shiftY = 1; visualOffsetY += TilePixelSize; }
+
+            if (shiftX != 0 || shiftY != 0)
+            {
+                _currentTopLeftTileX += shiftX;
+                _currentTopLeftTileY += shiftY;
+
+                await LoadTilesShiftAsync(shiftX, shiftY);
+
+                // Odstranění starých dlaždic mimo canvas
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    foreach (var img in TileCanvas.Children.OfType<Image>().ToList())
+                    {
+                        double left = Canvas.GetLeft(img);
+                        double top = Canvas.GetTop(img);
+                        if (left < -TilePixelSize || left > CanvasSize || top < -TilePixelSize || top > CanvasSize)
+                            TileCanvas.Children.Remove(img);
+                    }
+                });
+            }
+        }
+
+
+
+
+
+
+        private async Task CheckTileShiftAsync()
+        {
+            int shiftX = 0;
+            int shiftY = 0;
+
+            if (visualOffsetX >= TilePixelSize / 2) { shiftX = -1; visualOffsetX -= TilePixelSize; }
+            if (visualOffsetX <= -TilePixelSize / 2) { shiftX = 1; visualOffsetX += TilePixelSize; }
+            if (visualOffsetY >= TilePixelSize / 2) { shiftY = -1; visualOffsetY -= TilePixelSize; }
+            if (visualOffsetY <= -TilePixelSize / 2) { shiftY = 1; visualOffsetY += TilePixelSize; }
+
+            if (shiftX != 0 || shiftY != 0)
+            {
+                _currentTopLeftTileX += shiftX;
+                _currentTopLeftTileY += shiftY;
+
+                await LoadTilesShiftAsync(shiftX, shiftY);
+
+                // Odstranit staré dlaždice, které jsou mimo viditelnou oblast
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    foreach (var img in TileCanvas.Children.OfType<Image>().ToList())
+                    {
+                        double left = Canvas.GetLeft(img);
+                        double top = Canvas.GetTop(img);
+
+                        if (left < -TilePixelSize || left > CanvasSize || top < -TilePixelSize || top > CanvasSize)
+                            TileCanvas.Children.Remove(img);
+                    }
+                });
+            }
+        }
+
+
+        private async Task LoadTilesShiftAsync(int shiftX, int shiftY)
+        {
+            _currentTopLeftTileX += shiftX;
+            _currentTopLeftTileY += shiftY;
+
+            // Load jen nové dlaždice, které se objevily
+            int startX = _currentTopLeftTileX;
+            int startY = _currentTopLeftTileY;
+
+            var tasks = new List<Task>();
+
+            for (int x = 0; x < TileCount; x++)
+            for (int y = 0; y < TileCount; y++)
+            {
+                // Jen nové kraje (např. když shiftX = 1, jen pravý sloupec)
+                if ((shiftX == 1 && x != TileCount - 1) || (shiftX == -1 && x != 0)) continue;
+                if ((shiftY == 1 && y != TileCount - 1) || (shiftY == -1 && y != 0)) continue;
+
+                int tileX = startX + x;
+                int tileY = startY + y;
+
+                tasks.Add(Task.Run(async () =>
+                {
+                    var bmp = await FetchTileAsync(zoom, tileX, tileY, CancellationToken.None);
+                    await Dispatcher.InvokeAsync(() =>
+                    {
+                        var img = CreateTileImage(bmp);
+                        Canvas.SetLeft(img, x * TilePixelSize + visualOffsetX);
+                        Canvas.SetTop(img, y * TilePixelSize + visualOffsetY);
+                        TileCanvas.Children.Add(img);
+                    });
+                }));
+            }
+
+            await Task.WhenAll(tasks);
+        }
+
+
+        private void StripReplayTrailsKeepPoints()
+        {
+            // odstranění starých replay polylines
+            var toRemovePolylines = TileCanvas.Children
+                .OfType<Polyline>()
+                .Where(pl => pl.Tag is string s && s.StartsWith("replay_trail_", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            foreach (var pl in toRemovePolylines)
+                TileCanvas.Children.Remove(pl);
+
+            // odstranění starých replay teček (dots)
+            foreach (var vehicle in _replayVehicles.Values.ToList())
+            {
+                if (vehicle?.TrailDots == null) continue;
+
+                foreach (var dot in vehicle.TrailDots.ToList())
+                    TileCanvas.Children.Remove(dot);
+
+                vehicle.TrailDots.Clear();
+            }
+        }
+
         // RefreshMap: keep at current center and start trails fresh (remove re-draw of old trails)
         public async void RefreshMap()
         {
             var (centerX, centerY) = LatLonToTileXY(latitude, longitude, zoom);
-            await LoadTiles(centerX - TileCount / 2, centerY - TileCount / 2);
+            await LoadTilesSmoothAsync(centerX - TileCount / 2, centerY - TileCount / 2);
+
 
             _ = EnsureLocalAreaAltitudeAsync(force: true);
 
@@ -1163,7 +1463,7 @@ namespace V2XController
             DrawRadiusCircle();
 
             await Task.Delay(1);
-            BringAllOverlaysToFront();
+            await BringAllOverlaysToFrontSafeAsync();
         }
 
         //Meters per px
@@ -2446,8 +2746,10 @@ namespace V2XController
             });
         }
 
+
+
         // async method for removing vehicle trail gradually
-        // replace entire RemoveTrailGradually
+
         private async Task RemoveTrailGradually(string vehicleId, MapPoint vehicle, CancellationToken token)
         {
             try
@@ -2845,7 +3147,8 @@ namespace V2XController
 
             // Now load tiles for the loaded center/zoom
             var (centerX, centerY) = LatLonToTileXY(latitude, longitude, zoom);
-            await LoadTiles(centerX - TileCount / 2, centerY - TileCount / 2);
+            await LoadTilesSmoothAsync(centerX - TileCount / 2, centerY - TileCount / 2);
+
 
             _ = EnsureLocalAreaAltitudeAsync(force: true);
 
@@ -3922,7 +4225,8 @@ namespace V2XController
                     LongitudeBox.TextChanged += LongitudeBox_TextChanged;
 
                     var (centerX, centerY) = LatLonToTileXY(latitude, longitude, zoom);
-                    await LoadTiles(centerX - TileCount / 2, centerY - TileCount / 2);
+                    await LoadTilesSmoothAsync(centerX - TileCount / 2, centerY - TileCount / 2);
+
                 }
 
                 // Clear and load zones and rails (unchanged)
@@ -4034,7 +4338,7 @@ namespace V2XController
                         else return;
                     }
 
-                    BringAllOverlaysToFront();
+                    await BringAllOverlaysToFrontSafeAsync();
                 }
             }
 
@@ -4306,7 +4610,8 @@ namespace V2XController
                     LongitudeBox.TextChanged += LongitudeBox_TextChanged;
 
                     var (centerX, centerY) = LatLonToTileXY(latitude, longitude, zoom);
-                    await LoadTiles(centerX - TileCount / 2, centerY - TileCount / 2);
+                    await LoadTilesSmoothAsync(centerX - TileCount / 2, centerY - TileCount / 2);
+
                 }
                 lines.RemoveAt(0);
             }
@@ -4925,53 +5230,60 @@ namespace V2XController
         }
 
         // Replace the existing static DrawStops(...) with this instance method
-        private void DrawStopsOnCanvas()
+        private void DrawStopsOnCanvasSafe()
         {
-            if (TileCanvas == null || stops == null || stops.Count == 0)
-                return;
+            if (TileCanvas == null) return;
 
-            // Remove previous stop visuals
-            foreach (var el in TileCanvas.Children.OfType<FrameworkElement>()
-                         .Where(el => Equals(el.Tag, "Stop"))
-                         .ToList())
+            // Použij Dispatcher
+            TileCanvas.Dispatcher.Invoke(() =>
             {
-                TileCanvas.Children.Remove(el);
-            }
+                if (stops == null || stops.Count == 0)
+                    return;
 
-            foreach (var stop in stops)
-            {
-                var (x, y) = ConvertLatLonToCanvasXY(stop.Latitude, stop.Longitude);
-
-                var stopMarker = new Ellipse
+                // Remove previous stop visuals
+                foreach (var el in TileCanvas.Children.OfType<FrameworkElement>()
+                             .Where(el => Equals(el.Tag, "Stop"))
+                             .ToList())
                 {
-                    Width = 8,
-                    Height = 8,
-                    Fill = Brushes.Red,
-                    Stroke = Brushes.White,
-                    StrokeThickness = 1,
-                    Tag = "Stop",
-                    IsHitTestVisible = false
-                };
-                Canvas.SetLeft(stopMarker, x - 4);
-                Canvas.SetTop(stopMarker, y - 4);
-                Panel.SetZIndex(stopMarker, 500);
-                TileCanvas.Children.Add(stopMarker);
+                    TileCanvas.Children.Remove(el);
+                }
 
-                var stopLabel = new TextBlock
+                foreach (var stop in stops)
                 {
-                    Text = stop.StopName,
-                    FontWeight = FontWeights.Bold,
-                    Foreground = Brushes.Black,
-                    FontSize = 15,
-                    Tag = "Stop",
-                    IsHitTestVisible = false
-                };
-                Canvas.SetLeft(stopLabel, x + 6);
-                Canvas.SetTop(stopLabel, y - 6);
-                Panel.SetZIndex(stopLabel, 501);
-                TileCanvas.Children.Add(stopLabel);
-            }
+                    var (x, y) = ConvertLatLonToCanvasXY(stop.Latitude, stop.Longitude);
+
+                    var stopMarker = new Ellipse
+                    {
+                        Width = 8,
+                        Height = 8,
+                        Fill = Brushes.Red,
+                        Stroke = Brushes.White,
+                        StrokeThickness = 1,
+                        Tag = "Stop",
+                        IsHitTestVisible = false
+                    };
+                    Canvas.SetLeft(stopMarker, x - 4);
+                    Canvas.SetTop(stopMarker, y - 4);
+                    Panel.SetZIndex(stopMarker, 500);
+                    TileCanvas.Children.Add(stopMarker);
+
+                    var stopLabel = new TextBlock
+                    {
+                        Text = stop.StopName,
+                        FontWeight = FontWeights.Bold,
+                        Foreground = Brushes.Black,
+                        FontSize = 15,
+                        Tag = "Stop",
+                        IsHitTestVisible = false
+                    };
+                    Canvas.SetLeft(stopLabel, x + 6);
+                    Canvas.SetTop(stopLabel, y - 6);
+                    Panel.SetZIndex(stopLabel, 501);
+                    TileCanvas.Children.Add(stopLabel);
+                }
+            });
         }
+
 
         // Funkce pro přepočet Lat/Lon → globální pixely
         private static (double pixelX, double pixelY) LatLonToPixelXY(double lat, double lon, int zoom)
@@ -5753,93 +6065,97 @@ namespace V2XController
         }
 
 
-        public void BringAllOverlaysToFront()
+        public async Task BringAllOverlaysToFrontSafeAsync()
         {
             if (TileCanvas == null) return;
 
-            // Ensure rectangles are above map tiles
-            if (mapRectangles != null)
+            await Dispatcher.InvokeAsync(() =>
             {
-                foreach (var mr in mapRectangles.Where(m => m?.Shape != null))
+                // Ensure rectangles are above map tiles
+                if (mapRectangles != null)
                 {
-                    var shape = mr.Shape;
-                    if (shape != null && TileCanvas.Children.Contains(shape))
-                        Panel.SetZIndex(shape, 100);
-                }
-            }
-
-            // Ensure points are above rectangles
-            if (points != null)
-            {
-                foreach (var pt in points.Where(p => p != null))
-                {
-                    if (pt.Ellipse != null && TileCanvas.Children.Contains(pt.Ellipse))
-                        Panel.SetZIndex(pt.Ellipse, 200);
-                    if (pt.Text != null && TileCanvas.Children.Contains(pt.Text))
-                        Panel.SetZIndex(pt.Text, 201);
-                }
-            }
-
-            // Connection line above rectangles, below points
-            if (connectionLine != null && TileCanvas.Children.Contains(connectionLine))
-                Panel.SetZIndex(connectionLine, 150);
-
-            // Vehicle overlays (tram trails, etc.)
-            if (activeVehicles != null)
-            {
-                foreach (var vehicle in activeVehicles.Values.Where(v => v != null))
-                {
-                    if (vehicle.Ellipse != null && TileCanvas.Children.Contains(vehicle.Ellipse))
-                        Panel.SetZIndex(vehicle.Ellipse, 1000);
-                    if (vehicle.Text != null && TileCanvas.Children.Contains(vehicle.Text))
-                        Panel.SetZIndex(vehicle.Text, 1000);
-                }
-            }
-
-            // Activation zones above map
-            if (activationZones != null)
-            {
-                foreach (var zone in activationZones.Values.Where(z => z?.Rectangle != null))
-                {
-                    var r = zone.Rectangle;
-                    if (r != null && TileCanvas.Children.Contains(r))
-                        Panel.SetZIndex(r, 100);
-                }
-            }
-
-            // Drawn trams
-            if (drawnTrams != null && drawnTramTrails != null)
-            {
-                for (int idx = 0; idx < drawnTrams.Length; idx++)
-                {
-                    var tram = drawnTrams[idx];
-                    if (tram == null) continue;
-
-                    if (tram.Ellipse != null && TileCanvas.Children.Contains(tram.Ellipse))
-                        Panel.SetZIndex(tram.Ellipse, 1000);
-                    if (tram.Text != null && TileCanvas.Children.Contains(tram.Text))
-                        Panel.SetZIndex(tram.Text, 1000);
-                    if (idx >= 0 && idx < drawnTramTrails.Length && drawnTramTrails[idx] != null &&
-                        TileCanvas.Children.Contains(drawnTramTrails[idx]))
-                        Panel.SetZIndex(drawnTramTrails[idx], 999);
-
-                    if (tram.TrailDots != null)
+                    foreach (var mr in mapRectangles.Where(m => m?.Shape != null))
                     {
-                        foreach (var dot in tram.TrailDots.Where(d => d != null))
-                            if (TileCanvas.Children.Contains(dot))
-                                Panel.SetZIndex(dot, 1001);
+                        var shape = mr.Shape;
+                        if (shape != null && TileCanvas.Children.Contains(shape))
+                            Panel.SetZIndex(shape, 100);
                     }
                 }
-            }
 
-            // Tram trails with legacy tag
-            foreach (var poly in TileCanvas.Children.OfType<Polyline>().Where(l => (l.Tag as string) == "tram_trail"))
-                Panel.SetZIndex(poly, 999);
+                // Ensure points are above rectangles
+                if (points != null)
+                {
+                    foreach (var pt in points.Where(p => p != null))
+                    {
+                        if (pt.Ellipse != null && TileCanvas.Children.Contains(pt.Ellipse))
+                            Panel.SetZIndex(pt.Ellipse, 200);
+                        if (pt.Text != null && TileCanvas.Children.Contains(pt.Text))
+                            Panel.SetZIndex(pt.Text, 201);
+                    }
+                }
 
-            // Dimension textblock always on top
-            if (dimensionTextBlock != null && TileCanvas.Children.Contains(dimensionTextBlock))
-                Panel.SetZIndex(dimensionTextBlock, int.MaxValue);
+                // Connection line above rectangles, below points
+                if (connectionLine != null && TileCanvas.Children.Contains(connectionLine))
+                    Panel.SetZIndex(connectionLine, 150);
+
+                // Vehicle overlays
+                if (activeVehicles != null)
+                {
+                    foreach (var vehicle in activeVehicles.Values.Where(v => v != null))
+                    {
+                        if (vehicle.Ellipse != null && TileCanvas.Children.Contains(vehicle.Ellipse))
+                            Panel.SetZIndex(vehicle.Ellipse, 1000);
+                        if (vehicle.Text != null && TileCanvas.Children.Contains(vehicle.Text))
+                            Panel.SetZIndex(vehicle.Text, 1000);
+                    }
+                }
+
+                // Activation zones
+                if (activationZones != null)
+                {
+                    foreach (var zone in activationZones.Values.Where(z => z?.Rectangle != null))
+                    {
+                        var r = zone.Rectangle;
+                        if (r != null && TileCanvas.Children.Contains(r))
+                            Panel.SetZIndex(r, 100);
+                    }
+                }
+
+                // Drawn trams
+                if (drawnTrams != null && drawnTramTrails != null)
+                {
+                    for (int idx = 0; idx < drawnTrams.Length; idx++)
+                    {
+                        var tram = drawnTrams[idx];
+                        if (tram == null) continue;
+
+                        if (tram.Ellipse != null && TileCanvas.Children.Contains(tram.Ellipse))
+                            Panel.SetZIndex(tram.Ellipse, 1000);
+                        if (tram.Text != null && TileCanvas.Children.Contains(tram.Text))
+                            Panel.SetZIndex(tram.Text, 1000);
+                        if (idx >= 0 && idx < drawnTramTrails.Length && drawnTramTrails[idx] != null &&
+                            TileCanvas.Children.Contains(drawnTramTrails[idx]))
+                            Panel.SetZIndex(drawnTramTrails[idx], 999);
+
+                        if (tram.TrailDots != null)
+                        {
+                            foreach (var dot in tram.TrailDots.Where(d => d != null))
+                                if (TileCanvas.Children.Contains(dot))
+                                    Panel.SetZIndex(dot, 1001);
+                        }
+                    }
+                }
+
+                // Tram trails with legacy tag
+                foreach (var poly in TileCanvas.Children.OfType<Polyline>().Where(l => (l.Tag as string) == "tram_trail"))
+                    Panel.SetZIndex(poly, 999);
+
+                // Dimension textblock always on top
+                if (dimensionTextBlock != null && TileCanvas.Children.Contains(dimensionTextBlock))
+                    Panel.SetZIndex(dimensionTextBlock, int.MaxValue);
+            });
         }
+
 
         private void CheckBox_Checked(object sender, RoutedEventArgs e)
         {
@@ -6416,11 +6732,11 @@ namespace V2XController
             }
         }
 
-        public void ReprojectAllZonesOnMapChange()
+        public async Task ReprojectAllZonesOnMapChange()
         {
             ReprojectActivationZonesOnMapChange();
             ReprojectSwitchZonesOnMapChange();
-            BringAllOverlaysToFront();
+            await BringAllOverlaysToFrontSafeAsync();
         }
 
         // place near other reproject methods
@@ -8689,7 +9005,7 @@ namespace V2XController
             UpdateUiEnabledState();
         }
 
-        public void ClearMapAndTable()
+        public async Task ClearMapAndTable()
         {
             try
             {
@@ -8771,7 +9087,7 @@ namespace V2XController
                 {
                     ReprojectActivationZonesOnMapChange();
                     ReprojectSwitchZonesOnMapChange();
-                    BringAllOverlaysToFront();
+                    await BringAllOverlaysToFrontSafeAsync();
                 }
                 catch { }
             }

@@ -2475,9 +2475,9 @@ namespace V2XController
                     mw.ActivationZonesCollection.Clear();
                     foreach (var z in res.zones) mw.ActivationZonesCollection.Add(z);
 
-                    Dispatcher.BeginInvoke(new Action(() =>
+                    await Dispatcher.BeginInvoke(new Action(async () =>
                     {
-                        try { mw.ReprojectActivationZonesOnMapChange(); mw.BringAllOverlaysToFront(); } catch { }
+                        try {mw.ReprojectActivationZonesOnMapChange(); await mw.BringAllOverlaysToFrontSafeAsync(); } catch { }
                     }));
 
                     await ShowMessageAfterBusyAsync($"Successfully read {res.zones.Count} zone(s) from device.",
@@ -2511,9 +2511,9 @@ namespace V2XController
                     mw.ActivationZonesCollection.Clear();
                     foreach (var z in res.zones) mw.ActivationZonesCollection.Add(z);
 
-                    Dispatcher.BeginInvoke(new Action(() =>
+                    await Dispatcher.BeginInvoke(new Action(async () =>
                     {
-                        try { mw.ReprojectActivationZonesOnMapChange(); mw.BringAllOverlaysToFront(); } catch { }
+                        try {mw.ReprojectActivationZonesOnMapChange(); await mw.BringAllOverlaysToFrontSafeAsync(); } catch { }
                     }));
 
                     await ShowMessageAfterBusyAsync($"Successfully read {res.zones.Count} zone(s) over RS485.",
@@ -2831,9 +2831,9 @@ namespace V2XController
                     mw.ActivationZonesCollection.Clear();
                     foreach (var z in zones) mw.ActivationZonesCollection.Add(z);
 
-                    Dispatcher.BeginInvoke(new Action(() =>
+                    Dispatcher.BeginInvoke(new Action(async () =>
                     {
-                        try { mw.ReprojectActivationZonesOnMapChange(); mw.BringAllOverlaysToFront(); } catch { }
+                        try { mw.ReprojectActivationZonesOnMapChange(); await mw.BringAllOverlaysToFrontSafeAsync(); } catch { }
                     }));
 
                     MessageBox.Show($"Successfully read {zones.Count} zone(s) from device.",
@@ -3064,12 +3064,12 @@ namespace V2XController
                     mw.ActivationZonesCollection.Clear();
                     foreach (var z in zones) mw.ActivationZonesCollection.Add(z);
 
-                    Dispatcher.BeginInvoke(new Action(() =>
+                    await Dispatcher.BeginInvoke(new Action(async () =>
                     {
                         try
                         {
                             mw.ReprojectActivationZonesOnMapChange();
-                            mw.BringAllOverlaysToFront();
+                            await mw.BringAllOverlaysToFrontSafeAsync();
                         }
                         catch { }
                     }));
