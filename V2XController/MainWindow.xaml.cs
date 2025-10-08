@@ -1189,6 +1189,7 @@ namespace V2XController
             e.Handled = true;
         }
 
+        //moving overlays
 
         private void MoveOverlays(double deltaX, double deltaY)
         {
