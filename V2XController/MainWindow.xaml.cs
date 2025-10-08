@@ -420,6 +420,12 @@ namespace V2XController
         private double tileOffsetY = 0;
 
 
+        private double mapOffsetX = 0;
+        private double mapOffsetY = 0;
+        private int baseTileX;
+        private int baseTileY;
+
+
 
 
         //||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
@@ -687,9 +693,8 @@ namespace V2XController
         }
 
         // Loading map tiles on the grid
-        private async Task LoadTilesSmoothAsync(int startX, int startY)
+        private async Task LoadTilesSmoothAsync(int startX, int startY, double offsetX = 0, double offsetY = 0)
         {
-            // Cancel previous loading
             _tileCts?.Cancel();
             _tileCts?.Dispose();
             _tileCts = new CancellationTokenSource();
@@ -715,18 +720,16 @@ namespace V2XController
                     var (offX, offY) = order[idx];
                     int tileX = startX + (offX + TileCount / 2);
                     int tileY = startY + (offY + TileCount / 2);
-                    int canvasX = offX + TileCount / 2;
-                    int canvasY = offY + TileCount / 2;
 
-                    // Slight delay for progressive loading feel
-                    await Task.Delay((idx == 0) ? 0 : 40, ct).ConfigureAwait(false);
+                    // vizuální pozice se zohledněním offsetu
+                    double canvasX = (offX + TileCount / 2) * TilePixelSize + offsetX;
+                    double canvasY = (offY + TileCount / 2) * TilePixelSize + offsetY;
 
                     var task = Task.Run(async () =>
                     {
                         try
                         {
                             await _tileSemaphore.WaitAsync(ct).ConfigureAwait(false);
-
                             var bmp = await FetchTileAsync(zoom, tileX, tileY, ct).ConfigureAwait(false);
 
                             await Dispatcher.InvokeAsync(() =>
@@ -734,13 +737,13 @@ namespace V2XController
                                 if (ct.IsCancellationRequested) return;
 
                                 Image img = CreateTileImage(bmp);
-                                Canvas.SetLeft(img, canvasX * TilePixelSize);
-                                Canvas.SetTop(img, canvasY * TilePixelSize);
+                                Canvas.SetLeft(img, canvasX);
+                                Canvas.SetTop(img, canvasY);
                                 TileCanvas.Children.Add(img);
                                 newImages.Add(img);
                             });
                         }
-                        catch (OperationCanceledException) { /* ignorujeme */ }
+                        catch (OperationCanceledException) { }
                         catch (Exception ex)
                         {
                             Console.WriteLine($"Load tile {zoom}/{tileX}/{tileY} failed: {ex.Message}");
@@ -754,13 +757,8 @@ namespace V2XController
                     tasks.Add(task);
                 }
 
-                try
-                {
-                    await Task.WhenAll(tasks).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException) { }
+                await Task.WhenAll(tasks).ConfigureAwait(false);
 
-                // Update canvas: remove old tiles, keep overlaye
                 if (!ct.IsCancellationRequested)
                 {
                     await Dispatcher.InvokeAsync(() =>
@@ -769,29 +767,34 @@ namespace V2XController
                             .OfType<Image>()
                             .Where(img => !newImages.Contains(img))
                             .ToList();
-                        foreach (var r in toRemove) TileCanvas.Children.Remove(r);
 
-                        // Add overlayy
+                        foreach (var r in toRemove)
+                            TileCanvas.Children.Remove(r);
+
+                        // Overlayy zpět nahoru
                         if (!TileCanvas.Children.Contains(connectionLine)) TileCanvas.Children.Add(connectionLine);
+
                         foreach (var pt in points)
                         {
                             if (!TileCanvas.Children.Contains(pt.Ellipse)) TileCanvas.Children.Add(pt.Ellipse);
                             if (!TileCanvas.Children.Contains(pt.Text)) TileCanvas.Children.Add(pt.Text);
                         }
+
                         foreach (var rect in mapRectangles)
                         {
                             if (!TileCanvas.Children.Contains(rect.Shape)) TileCanvas.Children.Add(rect.Shape);
                             Panel.SetZIndex(rect.Shape, 100);
                         }
+
                         foreach (var pt in points)
                         {
                             Panel.SetZIndex(pt.Ellipse, 200);
                             Panel.SetZIndex(pt.Text, 201);
                         }
+
                         Panel.SetZIndex(connectionLine, 150);
                     });
 
-                    // Reproject overlays
                     ReprojectAllZonesOnMapChange();
                     ReprojectDrawnTramsOnMapChange();
                     ReprojectActiveVehiclesOnMapChange();
@@ -800,10 +803,7 @@ namespace V2XController
                     await BringAllOverlaysToFrontSafeAsync();
                 }
             }
-            catch (TaskCanceledException)
-            {
-                // IGNORUJ: očekávané při rychlém panningu
-            }
+            catch (TaskCanceledException) { }
         }
 
 
@@ -1346,11 +1346,6 @@ namespace V2XController
             }
         }
 
-
-
-
-
-
         private async Task CheckTileShiftAsync()
         {
             int shiftX = 0;
@@ -1448,24 +1443,39 @@ namespace V2XController
         // RefreshMap: keep at current center and start trails fresh (remove re-draw of old trails)
         public async void RefreshMap()
         {
-            var (centerX, centerY) = LatLonToTileXY(latitude, longitude, zoom);
-            await LoadTilesSmoothAsync(centerX - TileCount / 2, centerY - TileCount / 2);
+            double centerTileX = LonToTileX(longitude, zoom); 
+            double centerTileY = LatToTileY(latitude, zoom);  
 
+            double leftTopTileX = centerTileX - TileCount / 2.0;
+            double leftTopTileY = centerTileY - TileCount / 2.0;
+
+            baseTileX = (int)Math.Floor(leftTopTileX);
+            baseTileY = (int)Math.Floor(leftTopTileY);
+
+            double fracX = leftTopTileX - baseTileX;
+            double fracY = leftTopTileY - baseTileY;
+
+            double offsetX = -fracX * TilePixelSize;
+            double offsetY = -fracY * TilePixelSize;
+
+            await LoadTilesSmoothAsync(baseTileX, baseTileY, offsetX, offsetY);
+
+            // Canvas.SetLeft(TileCanvas, baseTileX);
+            // Canvas.SetTop(TileCanvas, baseTileY);
 
             _ = EnsureLocalAreaAltitudeAsync(force: true);
-
             ResetAllTramTrails();
 
-            // Reproject everything consistently after refresh
             ReprojectAllZonesOnMapChange();
             ReprojectActiveVehiclesOnMapChange();
             ReprojectReplayOnMapChange();
-            ReprojectSwitchZonesOnMapChange(); // harmless duplicate through AllZones if kept, safe to call
+            ReprojectSwitchZonesOnMapChange();
             DrawRadiusCircle();
 
             await Task.Delay(1);
             await BringAllOverlaysToFrontSafeAsync();
         }
+
 
         //Meters per px
         private double MetersPerPixel(double latitude, int zoom)
@@ -1911,8 +1921,6 @@ namespace V2XController
             }
         }
 
-
-
         private void UpdateRectanglePositionFromStartPoint(ActivationZone zone)
         {
             double width = zone.Rectangle.Width;
@@ -1927,9 +1935,6 @@ namespace V2XController
             // rotation around base of the rectangle
             ApplyZoneRotation(zone);
         }
-
-
-
 
         private void TileCanvas_MouseMove(object sender, MouseEventArgs e)
         {
@@ -2485,7 +2490,7 @@ namespace V2XController
 
 
         // srv radius circle drawing
-        // srv radius circle drawing
+
         private void DrawRadiusCircle()
         {
             // Do nothing (and ensure removal) when the checkbox is unchecked
@@ -2546,7 +2551,6 @@ namespace V2XController
         {
             var now = DateTime.Now;
 
-            // 1. removing drawn trams and tram table entries that are older than 23 seconds
             var toRemoveFromTable = TramTable
                 .Where(t => (now - t.LastMessageTimestamp)?.TotalSeconds > TableRowTimeout.TotalSeconds)
                 .ToList(); ;
@@ -2578,7 +2582,6 @@ namespace V2XController
                     TramTable.Remove(item);
             }
 
-            // 2. removing drawn trams that are older than 60 seconds
             for (int i = 0; i < drawnTrams.Length; i++)
             {
                 var tram = drawnTrams[i];
@@ -2586,7 +2589,6 @@ namespace V2XController
 
                 if (tram.IsRecorded)
                 {
-                    // IMPORTANT: do not remove recorded (playback) trams while playback is running
                     if (isPlaying) continue;
 
                     if ((now - tram.LastUpdate).TotalSeconds > 60)
@@ -3311,9 +3313,6 @@ namespace V2XController
             zone.Bounds = new Rect(minX, minY, maxX - minX, maxY - minY);
         }
 
-        // Change the following method to static so it can be called from a static context
-
-        // After:
         private static double Lerp(double a, double b, double t)
         {
             return a + (b - a) * t;
@@ -3321,8 +3320,7 @@ namespace V2XController
 
 
         //Playback timer ticks
-        // 3) On natural replay end: clear playback visuals and let RS485 resume (isPlaying=false already resumes intake)
-        // Playback timer ticks – do not clear visuals on natural end; just stop
+
         private void PlaybackTimer_Tick(object? sender, EventArgs e)
         {
             playbackElapsedTime = TimeSpan.FromTicks((long)((DateTime.Now - playbackStartTime).Ticks * playbackSpeedFactor));
@@ -3464,7 +3462,6 @@ namespace V2XController
                 Title = "Save live RS485 CAM buffer"
             };
 
-            // Replace SaveLiveCamBuffer() writer to include center header
             if (dlg.ShowDialog() == true)
             {
                 WriteCamrecWithCenter(dlg.FileName, recordedCamMessages);
@@ -3860,7 +3857,7 @@ namespace V2XController
         }
 
         // updating points and vehicle trails on the map
-        // replacing entire UpdateVehicleTrail(V2XMessage msg)
+        
         private void UpdateVehicleTrail(V2XMessage msg)
         {
             var isSrv = msg.MessageType == "SRV";
@@ -4089,7 +4086,6 @@ namespace V2XController
 
         }
 
-        // 1) Add optional suppressLocalRender parameter; mark parsed msg as manual to skip HandleV2XMessage rendering
         private void SendPointAsCamMessage(
         string vehicleId,
         double latitude,
@@ -4851,7 +4847,6 @@ namespace V2XController
             }
         }
 
-        // Helper: ensure ellipse/text exist for a MapPoint before positioning
         private void EnsureMapPointVisuals(MapPoint vehicle, Brush color, bool isSrv)
         {
             if (vehicle == null) return;
