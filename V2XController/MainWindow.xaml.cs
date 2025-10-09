@@ -25,7 +25,7 @@ using ModbusNewLib;
 using Logger;
 
 //TODO:
-
+//fix the map panning (now it works but its not as we wanted) !!!
 
 namespace V2XController
 {
@@ -793,13 +793,14 @@ namespace V2XController
                         }
 
                         Panel.SetZIndex(connectionLine, 150);
+
+                        ReprojectAllZonesOnMapChange();
+                        ReprojectDrawnTramsOnMapChange();
+                        ReprojectActiveVehiclesOnMapChange();
+                        ReprojectReplayOnMapChange();
+                        DrawStopsOnCanvasSafe();
                     });
 
-                    ReprojectAllZonesOnMapChange();
-                    ReprojectDrawnTramsOnMapChange();
-                    ReprojectActiveVehiclesOnMapChange();
-                    ReprojectReplayOnMapChange();
-                    DrawStopsOnCanvasSafe();
                     await BringAllOverlaysToFrontSafeAsync();
                 }
             }
@@ -1440,28 +1441,14 @@ namespace V2XController
             }
         }
 
-        // RefreshMap: keep at current center and start trails fresh (remove re-draw of old trails)
         public async void RefreshMap()
         {
-            double centerTileX = LonToTileX(longitude, zoom); 
-            double centerTileY = LatToTileY(latitude, zoom);  
+            // Snap to integer tile grid to keep imagery aligned with overlay math
+            var (centerX, centerY) = LatLonToTileXY(latitude, longitude, zoom);
+            int startX = centerX - TileCount / 2;
+            int startY = centerY - TileCount / 2;
 
-            double leftTopTileX = centerTileX - TileCount / 2.0;
-            double leftTopTileY = centerTileY - TileCount / 2.0;
-
-            baseTileX = (int)Math.Floor(leftTopTileX);
-            baseTileY = (int)Math.Floor(leftTopTileY);
-
-            double fracX = leftTopTileX - baseTileX;
-            double fracY = leftTopTileY - baseTileY;
-
-            double offsetX = -fracX * TilePixelSize;
-            double offsetY = -fracY * TilePixelSize;
-
-            await LoadTilesSmoothAsync(baseTileX, baseTileY, offsetX, offsetY);
-
-            // Canvas.SetLeft(TileCanvas, baseTileX);
-            // Canvas.SetTop(TileCanvas, baseTileY);
+            await LoadTilesSmoothAsync(startX, startY, 0, 0);
 
             _ = EnsureLocalAreaAltitudeAsync(force: true);
             ResetAllTramTrails();
@@ -4884,14 +4871,33 @@ namespace V2XController
         // Updating or adding vehicle data in the table
         private void UpdateOrAddVehicleData(string vehicleId, double speed, DateTime messageTime, bool isReplay = false)
         {
-            // Display uses the recording/local time (camTimeStr shown in the table)
             DateTime displayLocalTime = TimeZoneInfo.ConvertTimeFromUtc(messageTime.ToUniversalTime(), czechTimeZone);
             string camTimeStr = displayLocalTime.ToString("HH:mm:ss");
 
-            // SecondsSinceLastCam (and cleanup) should be driven by arrival time, not device clock
-            DateTime lastMsgStamp = DateTime.Now; // live arrival
-            if (isReplay) lastMsgStamp = DateTime.Now; // keep “now” in replay so rows live 23s from processed frame
+            if (isReplay)
+            {
+                var existingReplay = TramTable.FirstOrDefault(t => t.VehicleId == vehicleId);
+                if (existingReplay == null)
+                {
+                    TramTable.Add(new TramInfo
+                    {
+                        VehicleId = vehicleId,
+                        Speed = speed,
+                        LastCamTime = camTimeStr,
+                        SecondsSinceLastCam = 0,     
+                        LastMessageTimestamp = null  
+                    });
+                }
+                else
+                {
+                    existingReplay.Speed = speed;
+                    existingReplay.LastCamTime = camTimeStr;
+                    existingReplay.LastMessageTimestamp = null;
+                }
+                return;
+            }
 
+            DateTime lastMsgStamp = DateTime.Now; // arrival time on live feed
             var existing = TramTable.FirstOrDefault(t => t.VehicleId == vehicleId);
             if (existing == null)
             {
@@ -4908,7 +4914,7 @@ namespace V2XController
             {
                 existing.Speed = speed;
                 existing.LastCamTime = camTimeStr;
-                existing.SecondsSinceLastCam = 0; // reset on each CAM
+                existing.SecondsSinceLastCam = 0;
                 existing.LastMessageTimestamp = lastMsgStamp;
             }
         }
@@ -5230,7 +5236,6 @@ namespace V2XController
         {
             if (TileCanvas == null) return;
 
-            // Použij Dispatcher
             TileCanvas.Dispatcher.Invoke(() =>
             {
                 if (stops == null || stops.Count == 0)
@@ -5294,13 +5299,6 @@ namespace V2XController
             return (pixelX, pixelY);
         }
 
-
-
-
-
-
-
-
         //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
         //WPF Component methods
@@ -5355,14 +5353,6 @@ namespace V2XController
             SetDrawingMode(DrawingMode.Point);
             Keyboard.Focus(this);
         }
-
-
-
-
-
-
-
-        // add near other small constants/fields inside MainWindow
 
         private void RedrawPlaybackToTime(TimeSpan time)
         {
@@ -5673,12 +5663,11 @@ namespace V2XController
         }
 
 
-        // helper: update TramTable + counters + CamIdLabel for frames exactly at time 't' (replay)
         private void UpdateReplayStatsForTime(TimeSpan t)
         {
             if (_replayFrames == null || _replayFrames.Count == 0) return;
 
-            // Rekonstruuj "wall-clock" čas zprávy, aby LastCamTime seděl na čas z nahrávky
+            // Convert relative timeline to absolute UTC for display
             var msgUtc = _replayStartUtc?.Add(t) ?? DateTime.UtcNow;
 
             string lastShortId = null;
@@ -5691,31 +5680,26 @@ namespace V2XController
                 if (FilterReplayByAltitude(id, t))
                     continue;
 
-                // jen rámce, které nastaly přesně v čase t (skokové přehrávání)
+                // only frames exactly at time 't' (step behavior)
                 var frame = frames.FirstOrDefault(f => f.Timestamp == t);
                 if (frame == null) continue;
 
-                // CAM OK + tabulka
+                // Stats and last-id label
                 IncrementCamOkCount();
-
                 lastShortId = !string.IsNullOrEmpty(id) && id.Length > 4 ? id[^4..] : id;
 
+                // Speed (m/s) for the exact frame (if available)
                 double speed = 0.0;
                 var key = $"{id}|{t.Ticks}";
                 if (_playbackSpeedByIdAndTs.TryGetValue(key, out var spd))
-                    speed = spd; // m/s
+                    speed = spd;
 
-                // Zapíšeme do tabulky (převede si na lokální čas)
-                UpdateOrAddVehicleData(lastShortId, speed, msgUtc);
-                // inside UpdateReplayStatsForTime(TimeSpan t)
+                // Update row’s LastCamTime/Speed without touching countdown or LastMessageTimestamp
                 UpdateOrAddVehicleData(lastShortId, speed, msgUtc, isReplay: true);
-
             }
 
-            // Poslední zpracované ID do labelu
             if (!string.IsNullOrEmpty(lastShortId))
                 CamIdLabel.Content = $"TRAM ID: {lastShortId}";
-
         }
 
         private void RefreshMap_Click(object sender, RoutedEventArgs e)
@@ -7437,7 +7421,6 @@ namespace V2XController
         {
             if (_keyframes.Count == 0) return;
 
-            // Vypočti cílový čas podle pozice slideru
             int idx = (int)Math.Round(ReplaySlider.Value);
             idx = Math.Clamp(idx, 0, Math.Max(0, _keyframes.Count - 1));
             var t = _keyframes[idx];
@@ -7448,6 +7431,10 @@ namespace V2XController
                 playbackElapsedTime = t;
                 UpdateReplayTimerLabel();
                 UpdateTimerLabel();
+
+                // Keep table in sync with current timeline while dragging
+                SyncTramTableForReplay(t);
+
                 return;
             }
 
