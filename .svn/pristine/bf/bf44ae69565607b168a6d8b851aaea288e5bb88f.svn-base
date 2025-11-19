@@ -204,12 +204,13 @@ namespace V2XController
         {
             Brushes.DarkViolet,
             Brushes.Blue,
-            Brushes.DarkGreen,
+            Brushes.Green,
+            Brushes.Orange,
             Brushes.Purple,
+            Brushes.Cyan,
             Brushes.Magenta,
             Brushes.Brown,
-            Brushes.Navy,
-            Brushes.Maroon
+            Brushes.Yellow,
         };
         private readonly Dictionary<string, Brush> vehicleColorMap = new Dictionary<string, Brush>();
 
@@ -424,7 +425,7 @@ namespace V2XController
         private int baseTileX;
         private int baseTileY;
 
-        private readonly Dictionary<string, double> _playbackAccuracyByIdAndTs = new();
+
 
 
         //||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
@@ -480,6 +481,8 @@ namespace V2XController
             };
             camTimer.Start();
 
+            // in constructor, extend the Loaded handler
+            // v konstruktoru, v Loaded handleru, přidej první řádek:
             Loaded += async (s, e) =>
             {
                 _ = EnsureLocalAreaAltitudeAsync(force: true);
@@ -501,9 +504,6 @@ namespace V2XController
                     Console.WriteLine($"[STOPS] Failed to load stops: {ex.Message}");
                 }
             };
-
-            if (TramBox != null)
-                TramBox.SelectionChanged += TramBox_SelectionChanged;
 
             //trams
             Tram1TB.Text = "9999";
@@ -593,6 +593,7 @@ namespace V2XController
             ActivationZonesDataGrid.CurrentCellChanged += ActivationZonesDataGrid_CurrentCellChanged;
 
             this.Closing += MainWindow_Closing;
+
         }
 
         private void MainWindow_Closing(object sender, CancelEventArgs e)
@@ -2950,25 +2951,38 @@ namespace V2XController
         // increment cam ok messages count (crc must be ok)
         private void IncrementCamOkCount()
         {
-            return;
+            camOkCount++;
+
+            Dispatcher.Invoke(() =>
+                CamOkLabel.Content = $"CAM OK: {camOkCount}");
         }
 
         //increment cam error messages count (crc is not ok)
         private void IncrementCamErrorCount()
         {
-            return;
+            camErrorCount++;
+
+            Dispatcher.Invoke(() =>
+            {
+                CamErrorLabel.Content = $"CAM Errors: {camErrorCount}";
+            });
         }
 
         // increment srv ok messages count
         private void IncrementSrvOkCount()
         {
-            return;
+            srvOkCount++;
+
+            Dispatcher.Invoke(() =>
+                SrvOkLabel.Content = $"SRV OK: {srvOkCount}");
         }
 
         // increment srv error messages count
         private void IncrementSrvErrorCount()
         {
-            return;
+            srvErrorCount++;
+            Dispatcher.Invoke(() =>
+                SrvErrorLabel.Content = $"SRV Errors: {srvErrorCount}");
         }
 
 
@@ -3584,18 +3598,6 @@ namespace V2XController
                 if (TryFilterCamByAltitude(rawXml))
                     return;
 
-                // LIVE UI FILTER: if user selected a specific tram in TramBox, only render CAMs for that tram.
-                var sel = TramBox?.SelectedItem as string;
-                bool filtering = !string.IsNullOrEmpty(sel) && !string.Equals(sel, "All", StringComparison.OrdinalIgnoreCase);
-
-                // If filtering and this incoming CAM does not match the selected short id -> skip rendering entirely.
-                // (We still keep timeshift buffering elsewhere; this prevents unwanted live visuals/table rows)
-                if (filtering)
-                {
-                    if (string.IsNullOrEmpty(msg.VehicleID) || !IsReplayFilterMatch(msg.VehicleID))
-                        return;
-                }
-
                 if (!vehicleColorMap.TryGetValue(msg.VehicleID, out Brush tramColor))
                 {
                     int colorIndex = vehicleColorMap.Count % vehicleColors.Count;
@@ -3613,6 +3615,7 @@ namespace V2XController
                         ResetVehicleInstance(msg.VehicleID);
                     }
                 }
+                // NOTE: no buffering here; timeshift buffering is done in StartV2XListenerAsync
 
                 if (!(msg.VehicleID?.StartsWith("000000") ?? false) || isPlaying == true)
                 {
@@ -3633,7 +3636,6 @@ namespace V2XController
                     }
                     else
                     {
-                        // Create visuals only for vehicles that passed the TramBox filter above
                         var (x, y) = ConvertLatLonToCanvasXY(msg.Latitude, msg.Longitude);
 
                         var ellipse = new Ellipse
@@ -3689,7 +3691,7 @@ namespace V2XController
                         // create the oriented box
                         var topCenterNew = new Point(x, y);
                         var liveHeadingAdj = (msg.Heading - 180 + 360) % 360;
-                        UpdateOrCreateVehicleBox(msg.VehicleID, topCenterNew, tramColor, liveHeadingAdj);
+                        UpdateOrCreateVehicleBox(msg.VehicleID, topCenterNew, tramColor, liveHeadingAdj); ;
                     }
                 }
 
@@ -3699,10 +3701,9 @@ namespace V2XController
 
                 string statId = string.IsNullOrEmpty(msg.VehicleID) ? "-" : msg.VehicleID;
                 string camIdShort = statId.Length > 4 ? statId[^4..] : statId;
+                CamIdLabel.Content = $"TRAM ID: {camIdShort}";
 
-                // Only update table for live vehicles that we actually rendered (respecting TramBox selection)
-                if (!filtering || IsReplayFilterMatch(msg.VehicleID))
-                    UpdateOrAddVehicleData(camIdShort, msg.Speed, msg.Timestamp);
+                UpdateOrAddVehicleData(camIdShort, msg.Speed, msg.Timestamp);
 
                 if (!(msg.VehicleID?.StartsWith("000000") ?? false))
                     UpdateVehicleTrail(msg);
@@ -3739,6 +3740,8 @@ namespace V2XController
                     TerminalLog($"ERROR: SRV parse failed - {ex.Message}", Brushes.Red);
                 }
 
+                LastSrvLabel.Content = $"Last SRV: {lastRecTime}";
+                SrvIdLabel.Content = $"SRV ID: {logicalId}";
 
                 if (isValid) IncrementSrvOkCount();
                 else IncrementSrvErrorCount();
@@ -4323,16 +4326,9 @@ namespace V2XController
                 }
             }
 
+            // CAM elements
             var camElements = doc.Descendants("CAM").ToList();
             var srvElements = doc.Descendants("SrvMessages").Descendants("SRV").ToList();
-
-            // collect all distinct vehicle IDs present in the replay and populate TramBox
-            var allVehicleIds = camElements
-                .Select(el => el.Element("vehPt")?.Attribute("statId")?.Value)
-                .Where(id => !string.IsNullOrWhiteSpace(id))
-                .Distinct()
-                .ToList();
-            PopulateTramBoxFromIds(allVehicleIds);
 
             // Pre-scan earliest across CAM and SRV
             DateTime? earliest = null;
@@ -4387,6 +4383,7 @@ namespace V2XController
             {
                 try
                 {
+
                     var vehPt = el.Element("vehPt");
                     if (vehPt == null) continue;
 
@@ -4398,12 +4395,15 @@ namespace V2XController
                     string speedStr = vehPt.Attribute("speed")?.Value;
                     string headingStr = vehPt.Attribute("heading")?.Value;
 
+
+
                     if (string.IsNullOrEmpty(id) || string.IsNullOrEmpty(latStr) || string.IsNullOrEmpty(lngStr) || string.IsNullOrEmpty(lastRecStr))
                         continue;
 
                     if (!double.TryParse(latStr, NumberStyles.Any, CultureInfo.InvariantCulture, out double lat)) continue;
                     if (!double.TryParse(lngStr, NumberStyles.Any, CultureInfo.InvariantCulture, out double lng)) continue;
                     var timestamp = DateTime.Parse(lastRecStr, null, DateTimeStyles.RoundtripKind);
+
 
                     var tsUtc = timestamp.ToUniversalTime();
                     if (!minUtc.HasValue || tsUtc < minUtc) minUtc = tsUtc;
@@ -4427,7 +4427,6 @@ namespace V2XController
                     }
 
                     geoList.Add((relTs, lat, lng));
-
                     if (double.TryParse(headingStr, NumberStyles.Any, CultureInfo.InvariantCulture, out double hdg))
                     {
                         string keyHead = $"{id}|{relTs.Ticks}";
@@ -4445,25 +4444,6 @@ namespace V2XController
                         string keyAlt = $"{id}|{relTs.Ticks}";
                         _playbackAltitudeByIdAndTs[keyAlt] = altVal;
                     }
-
-                    // --- NEW: parse accuracy (try several attribute names) ---
-                    double accVal = 0.0;
-                    var accAttrNames = new[] { "accuracy", "acc", "accuracy_m", "accuracyMeters", "hacc" };
-                    foreach (var an in accAttrNames)
-                    {
-                        var at = vehPt.Attribute(an);
-                        if (at != null && double.TryParse(at.Value, NumberStyles.Any, CultureInfo.InvariantCulture, out var parsedAcc))
-                        {
-                            accVal = parsedAcc;
-                            break;
-                        }
-                    }
-                    if (accVal > 0)
-                    {
-                        string keyAcc = $"{id}|{relTs.Ticks}";
-                        _playbackAccuracyByIdAndTs[keyAcc] = accVal; // meters
-                    }
-                    // --- end NEW ---
 
                     int idx = vehicleIds.IndexOf(id);
                     if (idx >= 0 && idx < tramFrames.Length)
@@ -4629,18 +4609,6 @@ namespace V2XController
                 return;
             }
 
-            // collect all distinct vehicle IDs present in the recording and populate TramBox
-            var allVehicleIds = camMessages
-                .Select(l =>
-                {
-                    try { var m = V2XMessageParser.ParseV2XMessage(l); return m?.VehicleID; }
-                    catch { return null; }
-                })
-                .Where(id => !string.IsNullOrWhiteSpace(id))
-                .Distinct()
-                .ToList();
-            PopulateTramBoxFromIds(allVehicleIds);
-
             // detect up to 2 vehicles
             var vehicleIds = camMessages
                 .Select(l =>
@@ -4699,63 +4667,36 @@ namespace V2XController
                     }
                     geoList.Add((relTs, msg.Latitude, msg.Longitude));
 
-                    // store heading/speed/alt as before
                     string keyHead = $"{msg.VehicleID}|{relTs.Ticks}";
                     _playbackHeadingByIdAndTs[keyHead] = msg.Heading;
 
                     string keyAll = $"{msg.VehicleID}|{relTs.Ticks}";
                     _playbackSpeedByIdAndTs[keyAll] = msg.Speed; // m/s expected
 
+                    int idx = vehicleIds.IndexOf(msg.VehicleID);
+                    if (idx >= 0 && idx < tramFrames.Length)
+                    {
+                        tramFrames[idx].Add(new MovementFrame
+                        {
+                            Timestamp = relTs,
+                            Position = new Point(rx, ry)
+                        });
+
+                        string key = $"{msg.VehicleID}|{relTs.Ticks}";
+                        _playbackSpeedByIdAndTs[key] = msg.Speed; // m/s expected
+                    }
+
                     if (TryExtractAltitudeFromCamXml(raw, out var altVal))
                     {
                         string keyAlt = $"{msg.VehicleID}|{relTs.Ticks}";
                         _playbackAltitudeByIdAndTs[keyAlt] = altVal;
                     }
-
-                    // --- NEW: try parse accuracy attribute from raw XML (robust)
-                    double accVal = 0.0;
-                    try
-                    {
-                        int vehPtStart = raw.IndexOf("<vehPt", StringComparison.OrdinalIgnoreCase);
-                        if (vehPtStart >= 0)
-                        {
-                            int tagEnd = raw.IndexOf('>', vehPtStart);
-                            if (tagEnd > vehPtStart)
-                            {
-                                var tag = raw.Substring(vehPtStart, tagEnd - vehPtStart);
-                                var accAttrNames = new[] { "accuracy", "acc", "accuracy_m", "accuracyMeters", "hacc" };
-                                foreach (var an in accAttrNames)
-                                {
-                                    var idxAttr = tag.IndexOf(an + "=\"", StringComparison.OrdinalIgnoreCase);
-                                    if (idxAttr >= 0)
-                                    {
-                                        int vStart = idxAttr + an.Length + 2;
-                                        int vEnd = tag.IndexOf('"', vStart);
-                                        if (vEnd > vStart)
-                                        {
-                                            var accStr = tag.Substring(vStart, vEnd - vStart);
-                                            if (double.TryParse(accStr, NumberStyles.Any, CultureInfo.InvariantCulture, out var parsedAcc))
-                                            {
-                                                accVal = parsedAcc;
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    catch { /* ignore parse errors */ }
-
-                    if (accVal > 0)
-                    {
-                        string keyAcc = $"{msg.VehicleID}|{relTs.Ticks}";
-                        _playbackAccuracyByIdAndTs[keyAcc] = accVal;
-                    }
                 }
-                catch { }
-            }   
-                
+                catch
+                {
+                    // ignore bad lines
+                }
+            }
 
             for (int i = 0; i < drawnTrams.Length && i < vehicleIds.Count; i++)
             {
@@ -4820,6 +4761,7 @@ namespace V2XController
         }
 
         // Show speed in m/s for live vehicles; keep simulated filter logic unchanged
+        // Replace whole method
         private void UpdateVehicleCanvasPosition(MapPoint vehicle, Point newPos, Brush color, bool isSrv, string label, double? speed = null)
         {
             if (vehicle == null) return;
@@ -5417,6 +5359,8 @@ namespace V2XController
             playbackElapsedTime = time;
             _playbackIndex = GetIndexForTime(time);
 
+
+
             // Cleanup lingering manual visuals during replay
             if (_playbackLoaded)
             {
@@ -5439,26 +5383,10 @@ namespace V2XController
                 }
             }
 
-            // Determine filter
-            var selectedFilter = TramBox?.SelectedItem as string;
-            bool filtering = !string.IsNullOrEmpty(selectedFilter) && !string.Equals(selectedFilter, "All", StringComparison.OrdinalIgnoreCase);
-
-            // iterate replay frames and draw only matching vehicles when filtering
+            // inside RedrawPlaybackToTime(TimeSpan time), replace the foreach over _replayFrames with this:
             foreach (var kv in _replayFrames)
             {
                 var id = kv.Key;
-                if (string.IsNullOrEmpty(id)) continue;
-
-                if (filtering)
-                {
-                    if (!IsReplayFilterMatch(id))
-                    {
-                        // ensure any leftover accuracy circle for this id is removed when we skip drawing the vehicle
-                        RemoveReplayAccuracyEllipse(id);
-                        continue; // skip non-selected trams entirely
-                    }
-                }
-
                 var frames = kv.Value;
 
                 // Compute step-frame availability first
@@ -5489,29 +5417,18 @@ namespace V2XController
                     _replayBoxes.Remove(id);
                 }
 
-                if (!hasFrame)
-                {
-                    // no frame at this time => remove any stale accuracy circle for this id
-                    RemoveReplayAccuracyEllipse(id);
-                    continue;
-                }
+                // If we have no frame for this time, skip drawing (vehicle will appear only at/after its first CAM)
+                if (!hasFrame) continue;
 
                 // HIDE vehicles with last CAM older than 23s at this timeline position
                 var age = time - curFrame.Timestamp;
                 if (age > ReplayVisibilityTimeout)
-                {
-                    RemoveReplayAccuracyEllipse(id);
                     continue;
-                }
 
                 if (FilterReplayByAltitude(id, curFrame.Timestamp))
-                {
-                    RemoveReplayAccuracyEllipse(id);
                     continue;
-                }
 
                 var pos = curFrame.Position;
-
 
                 if (!vehicleColorMap.TryGetValue(id, out Brush color))
                 {
@@ -5534,51 +5451,6 @@ namespace V2XController
                 // Flip 180° to cancel +180 inside UpdateOrCreateBox so front points to travel direction
                 var replayHeadingAdj = (headingDeg - 180 + 360) % 360;
                 UpdateOrCreateReplayBox(id, new Point(pos.X, pos.Y), color, replayHeadingAdj);
-
-                var oldAccs = TileCanvas.Children.OfType<Ellipse>()
-                    .Where(el => el.Tag is string s && s.Equals($"replay_acc_{id}", StringComparison.OrdinalIgnoreCase))
-                    .ToList();
-                foreach (var a in oldAccs) TileCanvas.Children.Remove(a);
-
-                // Try draw accuracy circle for this frame
-                string keyAccForFrame = $"{id}|{curFrame.Timestamp.Ticks}";
-                if (_playbackAccuracyByIdAndTs.TryGetValue(keyAccForFrame, out var accuracyMeters) && accuracyMeters > 0)
-                {
-                    // Obtain latitude for meters-per-pixel computation
-                    var lonlat = CanvasPixelsToLatLon(new Point(pos.X, pos.Y), latitude, longitude, zoom);
-                    double localLat = lonlat.Y;
-                    double mpp = MetersPerPixel(localLat, zoom);
-                    double radiusPx = accuracyMeters / Math.Max(1e-6, mpp);
-
-                    // 20% translucent fill based on vehicle color
-                    SolidColorBrush fillBrush;
-                    if (color is SolidColorBrush scb)
-                    {
-                        var c = scb.Color;
-                        fillBrush = new SolidColorBrush(Color.FromArgb((byte)Math.Round(0.20 * 255), c.R, c.G, c.B));
-                    }
-                    else
-                    {
-                        var c = Colors.Black;
-                        fillBrush = new SolidColorBrush(Color.FromArgb((byte)Math.Round(0.20 * 255), c.R, c.G, c.B));
-                    }
-                    fillBrush.Freeze();
-
-                    var accEllipse = new Ellipse
-                    {
-                        Width = radiusPx * 2,
-                        Height = radiusPx * 2,
-                        Fill = fillBrush,
-                        Stroke = null,
-                        IsHitTestVisible = false,
-                        Tag = $"replay_acc_{id}"
-                    };
-
-                    Canvas.SetLeft(accEllipse, pos.X - radiusPx);
-                    Canvas.SetTop(accEllipse, pos.Y - radiusPx);
-                    TileCanvas.Children.Add(accEllipse);
-                    Panel.SetZIndex(accEllipse, 995); // below vehicle but above tiles
-                }
 
                 var ellipse = new Ellipse
                 {
@@ -5768,6 +5640,7 @@ namespace V2XController
             if (CircleCheckBox?.IsChecked == true && srvLatitude.HasValue && srvLongitude.HasValue)
                 DrawRadiusCircle();
 
+
             bool allPointsDone = points.All(p => time > p.MovementFrames.LastOrDefault()?.Timestamp);
             bool allReplayDone = _replayFrames.Values.All(fr => fr.Count == 0 || time >= fr[^1].Timestamp);
             bool allTramsDone = allReplayDone;
@@ -5781,8 +5654,8 @@ namespace V2XController
                     _isPlaybackSessionActive = false;
                 }
             }
-
-            // Update table according to filter
+            // at the end of RedrawPlaybackToTime(TimeSpan time), before updating ReplaySlider.Value:
+            // at the end of RedrawPlaybackToTime(TimeSpan time), replace the seconds update with:
             SyncTramTableForReplay(time);
 
             if (!isReplaySliderDragging)
@@ -5824,6 +5697,9 @@ namespace V2XController
                 // Update row’s LastCamTime/Speed without touching countdown or LastMessageTimestamp
                 UpdateOrAddVehicleData(lastShortId, speed, msgUtc, isReplay: true);
             }
+
+            if (!string.IsNullOrEmpty(lastShortId))
+                CamIdLabel.Content = $"TRAM ID: {lastShortId}";
         }
 
         private void RefreshMap_Click(object sender, RoutedEventArgs e)
@@ -6770,7 +6646,6 @@ namespace V2XController
             StopReplay?.SetValue(IsEnabledProperty, _playbackLoaded);
             ReloadReplay?.SetValue(IsEnabledProperty, _playbackLoaded);
             ReplaySlider?.SetValue(IsEnabledProperty, _playbackLoaded);
-            TramBox?.SetValue(IsEnabledProperty, _playbackLoaded);
 
             // Timeshift controls
             btnPlay?.SetValue(IsEnabledProperty, _playbackLoaded);
@@ -6782,6 +6657,8 @@ namespace V2XController
             CircleCheckBox?.SetValue(IsEnabledProperty, _isConnected);
         }
 
+        // přidej do třídy
+        // Replace the whole body of ReprojectActivationZonesOnMapChange()
         public void ReprojectActivationZonesOnMapChange()
         {
             // Reproject all non-switch zones from geo -> canvas, using per-zone latitude for MPP
@@ -7293,13 +7170,6 @@ namespace V2XController
                 if (mp.Text != null) TileCanvas.Children.Remove(mp.Text);
             }
             _replaySrvPoints.Clear();
-
-            var accEllipses = TileCanvas.Children.OfType<Ellipse>()
-                .Where(e => e.Tag is string s && s.StartsWith("replay_acc_", StringComparison.OrdinalIgnoreCase))
-                .ToList();
-            foreach (var e in accEllipses) TileCanvas.Children.Remove(e);
-
-            _playbackAccuracyByIdAndTs.Clear();
         }
 
         // Add helper to stop playback and reset timeline + visuals
@@ -7840,6 +7710,15 @@ namespace V2XController
             srvOkCount = 0;
             srvErrorCount = 0;
 
+            // labels
+            CamOkLabel.Content = "CAM OK: 0";
+            CamErrorLabel.Content = "CAM Errors: 0";
+            CamIdLabel.Content = "TRAM ID: --";
+
+            SrvOkLabel.Content = "SRV OK: 0";
+            SrvErrorLabel.Content = "SRV Errors: 0";
+            SrvIdLabel.Content = "SRV ID: --";
+            LastSrvLabel.Content = "Last SRV: --:--:--";
 
             // last message caches
             lastCamTimes.Clear();
@@ -8225,24 +8104,19 @@ namespace V2XController
             return found;
         }
 
+        // add near other small helpers (below UpdateSecondsSinceLastCamForReplay or replace its usage)
         private void SyncTramTableForReplay(TimeSpan t)
         {
             if (!_playbackLoaded || _replayFrames == null || _replayFrames.Count == 0) return;
 
-            var keep = new HashSet<string>(StringComparer.Ordinal);
 
-            var sel = TramBox?.SelectedItem as string;
-            bool filtering = !string.IsNullOrEmpty(sel) && !string.Equals(sel, "All", StringComparison.OrdinalIgnoreCase);
+            var keep = new HashSet<string>(StringComparer.Ordinal);
 
             foreach (var kv in _replayFrames)
             {
                 var fullId = kv.Key;
                 var frames = kv.Value;
                 if (frames == null || frames.Count == 0) continue;
-
-                // If filtering and this id doesn't match, skip
-                if (filtering && !IsReplayFilterMatch(fullId))
-                    continue;
 
                 // find last frame <= t
                 int idx = -1;
@@ -8257,6 +8131,7 @@ namespace V2XController
                 if (age.TotalSeconds > TableRowTimeout.TotalSeconds)
                     continue; // too old at this timeline position => don't keep row
 
+                // v SyncTramTableForReplay(TimeSpan t) před keep.Add(shortId):
                 if (FilterReplayByAltitude(fullId, lastTs))
                     continue;
 
@@ -8309,6 +8184,7 @@ namespace V2XController
             }
         }
 
+        // Add near other small helpers (e.g., below SyncTramTableForReplay)
         private bool IsTramTableRowPresentForId(string fullId)
         {
             if (string.IsNullOrEmpty(fullId)) return false;
@@ -8352,6 +8228,7 @@ namespace V2XController
             activeVehicles.Remove(id);
         }
 
+        // Add inside MainWindow class (near other small helpers)
         private void UpdateAltitudeLabelUI(double? meters)
         {
             try
@@ -9298,224 +9175,6 @@ namespace V2XController
                 TerminalLog($"DEPART: {cam.VehicleID[^Math.Min(4, cam.VehicleID.Length)..]} from {name}", Brushes.LimeGreen);
                 _vehCurrentStop[cam.VehicleID] = null;
             }
-        }
-
-        private void PopulateTramBoxFromIds(IEnumerable<string> fullIds)
-        {
-            if (TramBox == null) return;
-
-            // Extract last-4, dedupe
-            var ids = fullIds
-                .Where(id => !string.IsNullOrWhiteSpace(id))
-                .Select(id => id.Length > 4 ? id[^4..] : id)
-                .Distinct()
-                .ToList();
-
-            // Partition numeric vs non-numeric so we can sort numerically when possible
-            var numeric = new List<int>();
-            var numericMap = new Dictionary<int, string>(); // preserve original 0-padded string
-            var nonNumeric = new List<string>();
-
-            foreach (var s in ids)
-            {
-                if (int.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n))
-                {
-                    // store numeric value and keep zero-padding for display
-                    numeric.Add(n);
-                    numericMap[n] = s.PadLeft(4, '0');
-                }
-                else
-                {
-                    nonNumeric.Add(s);
-                }
-            }
-
-            numeric.Sort();
-            nonNumeric.Sort(StringComparer.Ordinal);
-
-            var sorted = new List<string>();
-            // "All" must be first element
-            sorted.Add("All");
-
-            foreach (var n in numeric)
-                sorted.Add(numericMap[n]);
-
-            foreach (var s in nonNumeric)
-                sorted.Add(s);
-
-            Dispatcher.Invoke(() =>
-            {
-                TramBox.Items.Clear();
-                foreach (var item in sorted)
-                    TramBox.Items.Add(item);
-
-                if (TramBox.Items.Count > 0)
-                    TramBox.SelectedIndex = 0;
-            });
-        }
-
-        private bool IsReplayFilterMatch(string fullId)
-        {
-            if (string.IsNullOrEmpty(fullId)) return false;
-            if (TramBox == null) return true; // no UI to filter by
-
-            var sel = TramBox.SelectedItem as string;
-            if (string.IsNullOrEmpty(sel) || string.Equals(sel, "All", StringComparison.OrdinalIgnoreCase))
-                return true;
-
-            // compare last 4 digits
-            var shortId = fullId.Length > 4 ? fullId[^4..] : fullId;
-            return string.Equals(shortId, sel, StringComparison.Ordinal);
-        }
-
-        private void TramBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
-        {
-            // Apply immediately: when a replay is loaded we want to filter visuals + table.
-            ApplyReplayFilter();
-        }
-
-        private void ApplyReplayFilter()
-        {
-            // Get current selection
-            var sel = TramBox?.SelectedItem as string;
-            bool filtering = !string.IsNullOrEmpty(sel) && !string.Equals(sel, "All", StringComparison.OrdinalIgnoreCase);
-
-            // Table-level filter (applies immediately for live/tracked rows)
-            var view = CollectionViewSource.GetDefaultView(TramTable);
-            if (view != null)
-            {
-                if (!filtering)
-                    view.Filter = null;
-                else
-                    view.Filter = o =>
-                    {
-                        if (o is TramInfo t)
-                            return string.Equals(t.VehicleId, sel, StringComparison.Ordinal);
-                        return false;
-                    };
-                Dispatcher.Invoke(() => view.Refresh());
-            }
-
-            // Decide which activeVehicles to remove (non-SRV) when filtering: collect keys first
-            var keysToRemove = new List<string>();
-            if (activeVehicles != null && filtering)
-            {
-                foreach (var kv in activeVehicles)
-                {
-                    var id = kv.Key;
-                    var mp = kv.Value;
-                    if (mp == null) continue;
-
-                    // Always keep SRV
-                    bool isSrv = string.Equals(mp.Ellipse?.Tag as string, "Srv", StringComparison.OrdinalIgnoreCase);
-                    if (isSrv) continue;
-
-                    // If this live vehicle doesn't match the selected filter, remove it now
-                    if (!IsReplayFilterMatch(id))
-                        keysToRemove.Add(id);
-                }
-            }
-
-            // Remove collected active vehicles on UI thread (use BeginInvoke to avoid nested blocking)
-            foreach (var id in keysToRemove)
-            {
-                Dispatcher.BeginInvoke(new Action(() =>
-                {
-                    if (activeVehicles.TryGetValue(id, out var vehicle))
-                    {
-                        RemoveVehicleCompletely(id, vehicle); // this already runs UI removal internally
-                    }
-                }));
-            }
-
-            // For remaining live vehicles ensure visibility state (if not removing)
-            Dispatcher.Invoke(() =>
-            {
-                if (activeVehicles != null)
-                {
-                    foreach (var kv in activeVehicles)
-                    {
-                        var id = kv.Key;
-                        var mp = kv.Value;
-                        if (mp == null) continue;
-                        bool isSrv = string.Equals(mp.Ellipse?.Tag as string, "Srv", StringComparison.OrdinalIgnoreCase);
-                        bool match = !filtering || isSrv || IsReplayFilterMatch(id);
-
-                        if (mp.Ellipse != null) mp.Ellipse.Visibility = match ? Visibility.Visible : Visibility.Collapsed;
-                        if (mp.Text != null) mp.Text.Visibility = match ? Visibility.Visible : Visibility.Collapsed;
-                        if (mp.Speed != null) mp.Speed.Visibility = match ? Visibility.Visible : Visibility.Collapsed;
-
-                        // Trails for live vehicles (polylines) toggle
-                        var trails = TileCanvas.Children.OfType<Polyline>()
-                            .Where(pl => pl.Tag is string s && s.Equals($"tram_trail_{id}", StringComparison.OrdinalIgnoreCase));
-                        foreach (var pl in trails) pl.Visibility = match ? Visibility.Visible : Visibility.Collapsed;
-
-                        // vehicle boxes
-                        if (_vehicleBoxes.TryGetValue(id, out var box))
-                            box.Visibility = match ? Visibility.Visible : Visibility.Collapsed;
-                    }
-                }
-
-                // Drawn/manual trams: hide/show according to selection
-                for (int i = 0; i < drawnTrams.Length; i++)
-                {
-                    var tram = drawnTrams[i];
-                    if (tram == null) continue;
-                    bool match = !filtering || IsReplayFilterMatch(tram.Label);
-                    if (tram.Ellipse != null) tram.Ellipse.Visibility = match ? Visibility.Visible : Visibility.Collapsed;
-                    if (tram.Text != null) tram.Text.Visibility = match ? Visibility.Visible : Visibility.Collapsed;
-                    if (drawnTramTrails[i] != null) drawnTramTrails[i].Visibility = match ? Visibility.Visible : Visibility.Collapsed;
-                    if (tram.TrailDots != null)
-                    {
-                        foreach (var d in tram.TrailDots)
-                            d.Visibility = match ? Visibility.Visible : Visibility.Collapsed;
-                    }
-                }
-
-                // Replay visuals: keep previous behavior (hide/show, do not delete replay state)
-                if (_replayVehicles != null)
-                {
-                    foreach (var kv in _replayVehicles)
-                    {
-                        var id = kv.Key;
-                        var mp = kv.Value;
-                        if (mp == null) continue;
-                        bool match = !filtering || IsReplayFilterMatch(id);
-                        if (mp.Ellipse != null) mp.Ellipse.Visibility = match ? Visibility.Visible : Visibility.Collapsed;
-                        if (mp.Text != null) mp.Text.Visibility = match ? Visibility.Visible : Visibility.Collapsed;
-                        if (mp.Speed != null) mp.Speed.Visibility = match ? Visibility.Visible : Visibility.Collapsed;
-                        if (mp.TrailDots != null)
-                        {
-                            foreach (var d in mp.TrailDots)
-                                d.Visibility = match ? Visibility.Visible : Visibility.Collapsed;
-                        }
-
-                        var trails = TileCanvas.Children.OfType<Polyline>()
-                            .Where(pl => pl.Tag is string s && s.Equals($"replay_trail_{id}", StringComparison.OrdinalIgnoreCase));
-                        foreach (var pl in trails) pl.Visibility = match ? Visibility.Visible : Visibility.Collapsed;
-
-                        if (_replayBoxes.TryGetValue(id, out var box))
-                            box.Visibility = match ? Visibility.Visible : Visibility.Collapsed;
-                    }
-                }
-            });
-
-            // If classic replay loaded, refresh replay visuals & table to reflect selection
-            if (_playbackLoaded)
-            {
-                RedrawPlaybackToTime(playbackElapsedTime);
-                SyncTramTableForReplay(playbackElapsedTime);
-            }
-        }
-
-        private void RemoveReplayAccuracyEllipse(string id)
-        {
-            if (string.IsNullOrEmpty(id) || TileCanvas == null) return;
-            var accEllipses = TileCanvas.Children
-                .OfType<Ellipse>()
-                .Where(e => e.Tag is string s && s.Equals($"replay_acc_{id}", StringComparison.OrdinalIgnoreCase))
-                .ToList();
-            foreach (var e in accEllipses) TileCanvas.Children.Remove(e);
         }
     }
 }

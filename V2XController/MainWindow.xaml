@@ -18,13 +18,6 @@
 
     <Grid>
         <Grid>
-            <Label x:Name="CamOkLabel" Content="CAM OK: 0" HorizontalAlignment="Left" Height="27" Margin="592,478,0,0" VerticalAlignment="Top" Width="105"/>
-            <Label x:Name="CamErrorLabel" Content="CAM Error: 0" HorizontalAlignment="Left" Height="27" Margin="592,505,0,0" VerticalAlignment="Top" Width="105"/>
-            <Label x:Name="CamIdLabel" Content="TRAM ID: 0" HorizontalAlignment="Left" Height="27" Margin="592,532,0,0" VerticalAlignment="Top" Width="105"/>
-            <Label x:Name="SrvOkLabel" Content="SRV OK: 0" HorizontalAlignment="Left" Height="27" Margin="697,478,0,0" VerticalAlignment="Top" Width="103"/>
-            <Label x:Name="SrvErrorLabel" Content="SRV Error: 0" HorizontalAlignment="Left" Height="27" Margin="697,505,0,0" VerticalAlignment="Top" Width="103"/>
-            <Label x:Name="SrvIdLabel" Content="SRV ID: 0" HorizontalAlignment="Left" Height="27" Margin="697,532,0,0" VerticalAlignment="Top" Width="103"/>
-            <Label x:Name="LastSrvLabel" Content="Last SRV: --:--:--" HorizontalAlignment="Left" Height="28" Margin="702,559,0,0" VerticalAlignment="Top" Width="115"/>
             <CheckBox x:Name="CircleCheckBox" FontWeight="Bold" Content="Circle around RSU" HorizontalAlignment="Left" Height="18" Margin="83,163,0,0" VerticalAlignment="Top" Width="136" Checked="CheckBox_Checked" Unchecked="CheckBox_Unchecked"/>
             <ComboBox x:Name="RadiusComboBox" IsEnabled="False" HorizontalAlignment="Left" Height="24" Margin="224,160,0,0" VerticalAlignment="Top" Width="83" SelectionChanged="RadiusComboBox_SelectionChanged">
                 <ComboBoxItem Content="250" />
@@ -53,59 +46,6 @@
             <Border BorderBrush="Black" BorderThickness="1" HorizontalAlignment="Left" Height="298" Margin="342,68,0,0" VerticalAlignment="Top" Width="428">
                 <Button x:Name="PrevCam" Content="Previous CAM" HorizontalAlignment="Left" Height="29" Margin="267,229,0,0" VerticalAlignment="Top" Width="79" Click="PrevCam_Click"/>
             </Border>
-
-            <DataGrid x:Name="ActivationZonesDataGrid"
-                      HorizontalAlignment="Left"
-                      HeadersVisibility="Column"
-                        Height="217"
-                        Margin="30,590,0,0"
-                        VerticalAlignment="Top"
-                        Width="785"
-                        ItemsSource="{Binding ActivationZonesCollection}"
-                        AutoGenerateColumns="False"
-                        CanUserAddRows="False"
-                        IsReadOnly="False"
-                        PreviewKeyDown="ActivationZonesDataGrid_PreviewKeyDown">
-                <DataGrid.Columns>
-                    <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="75" CanUserResize="False"/>
-                    <DataGridTextColumn Header="Latitude [°]" Binding="{Binding Latitude, StringFormat=F6}" Width="100" CanUserResize="False"/>
-                    <DataGridTextColumn Header="Longitude [°]" Binding="{Binding Longitude, StringFormat=F6}" Width="100" CanUserResize="False"/>
-                    <DataGridTextColumn Header="Azimuth [°]" Binding="{Binding Azimuth}" Width="75" CanUserResize="False"/>
-                    <DataGridTextColumn Header="Length [m]" Binding="{Binding Height}" Width="Auto" CanUserResize="False"/>
-                    <DataGridTextColumn Header="Width [m]" Binding="{Binding Width}" Width="Auto" CanUserResize="False"/>
-                    <DataGridTextColumn Header="Last ID" Binding="{Binding LastTramId}" IsReadOnly="True" Width="Auto" CanUserResize="False"/>
-                    <DataGridCheckBoxColumn Header="Active" Binding="{Binding IsActive}" IsReadOnly="True" Width="Auto" CanUserResize="False"/>
-                    <DataGridComboBoxColumn Header="Color" SelectedItemBinding="{Binding Color, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="75" CanUserResize="False">
-                        <DataGridComboBoxColumn.ItemsSource>
-                            <x:Array Type="{x:Type sys:String}">
-                                <sys:String>Red</sys:String>
-                                <sys:String>Green</sys:String>
-                                <sys:String>Blue</sys:String>
-                                <sys:String>Yellow</sys:String>
-                                <sys:String>Orange</sys:String>
-                                <sys:String>Cyan</sys:String>
-                                <sys:String>Magenta</sys:String>
-                                <sys:String>Black</sys:String>
-                            </x:Array>
-                        </DataGridComboBoxColumn.ItemsSource>
-                    </DataGridComboBoxColumn>
-                    <DataGridTextColumn Header="Main zone"
-                    Binding="{Binding MainZone, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                    Width="Auto" />
-                    <DataGridTextColumn Header="Sub-zone"
-                    Binding="{Binding SubZone, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                    Width="Auto" />
-                </DataGrid.Columns>
-            </DataGrid>
-            <!-- END TabControl replacement -->
-
-            <DataGrid  AutoGenerateColumns="False" HeadersVisibility="Column" ItemsSource="{Binding TramTable}" IsReadOnly="True" HorizontalAlignment="Left" Height="180" Margin="224,400,0,0" VerticalAlignment="Top" Width="270" HorizontalScrollBarVisibility="Hidden" >
-                <DataGrid.Columns>
-                    <DataGridTextColumn Header="Tram ID" Binding="{Binding VehicleId}" IsReadOnly="True" Width="75" CanUserResize="False"/>
-                    <DataGridTextColumn Header="Last CAM Time" Binding="{Binding LastCamTime}" IsReadOnly="True" Width="100" CanUserResize="False"/>
-                    <DataGridTextColumn Header="Last CAM [s]" Binding="{Binding SecondsSinceLastCam}" IsReadOnly="True" Width="75" CanUserResize="False"/>
-                </DataGrid.Columns>
-            </DataGrid>
 
 
             <Slider x:Name="ReplaySlider"
@@ -146,7 +86,60 @@
             </Border>
             <Button x:Name="ReadButtonMain" Content="Read from MPC" HorizontalAlignment="Left" Height="35" Margin="342,809,0,0" VerticalAlignment="Top" Width="140" Click="ReadButtonMain_Click"/>
             <Button x:Name="OpenTerminal" Content="Open debug terminal" HorizontalAlignment="Left" Height="35" Margin="662,809,0,0" VerticalAlignment="Top" Width="140" Click="OpenTerminal_Click"/>
+            <ComboBox x:Name="TramBox" HorizontalAlignment="Left" Height="25" Margin="494,249,0,0" VerticalAlignment="Top" Width="114"/>
             
+            <!--tables-->
+            <DataGrid x:Name="ActivationZonesDataGrid"
+  HorizontalAlignment="Left"
+  HeadersVisibility="Column"
+    Height="217"
+    Margin="30,590,0,0"
+    VerticalAlignment="Top"
+    Width="785"
+    ItemsSource="{Binding ActivationZonesCollection}"
+    AutoGenerateColumns="False"
+    CanUserAddRows="False"
+    IsReadOnly="False"
+    PreviewKeyDown="ActivationZonesDataGrid_PreviewKeyDown">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="75" CanUserResize="False"/>
+                    <DataGridTextColumn Header="Latitude [°]" Binding="{Binding Latitude, StringFormat=F6}" Width="100" CanUserResize="False"/>
+                    <DataGridTextColumn Header="Longitude [°]" Binding="{Binding Longitude, StringFormat=F6}" Width="100" CanUserResize="False"/>
+                    <DataGridTextColumn Header="Azimuth [°]" Binding="{Binding Azimuth}" Width="75" CanUserResize="False"/>
+                    <DataGridTextColumn Header="Length [m]" Binding="{Binding Height}" Width="Auto" CanUserResize="False"/>
+                    <DataGridTextColumn Header="Width [m]" Binding="{Binding Width}" Width="Auto" CanUserResize="False"/>
+                    <DataGridTextColumn Header="Last ID" Binding="{Binding LastTramId}" IsReadOnly="True" Width="Auto" CanUserResize="False"/>
+                    <DataGridCheckBoxColumn Header="Active" Binding="{Binding IsActive}" IsReadOnly="True" Width="Auto" CanUserResize="False"/>
+                    <DataGridComboBoxColumn Header="Color" SelectedItemBinding="{Binding Color, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="75" CanUserResize="False">
+                        <DataGridComboBoxColumn.ItemsSource>
+                            <x:Array Type="{x:Type sys:String}">
+                                <sys:String>Red</sys:String>
+                                <sys:String>Green</sys:String>
+                                <sys:String>Blue</sys:String>
+                                <sys:String>Yellow</sys:String>
+                                <sys:String>Orange</sys:String>
+                                <sys:String>Cyan</sys:String>
+                                <sys:String>Magenta</sys:String>
+                                <sys:String>Black</sys:String>
+                            </x:Array>
+                        </DataGridComboBoxColumn.ItemsSource>
+                    </DataGridComboBoxColumn>
+                    <DataGridTextColumn Header="Main zone"
+                        Binding="{Binding MainZone, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                        Width="Auto" />
+                    <DataGridTextColumn Header="Sub-zone"
+                        Binding="{Binding SubZone, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                        Width="Auto" />
+                </DataGrid.Columns>
+            </DataGrid>
+
+            <DataGrid  AutoGenerateColumns="False" HeadersVisibility="Column" ItemsSource="{Binding TramTable}" IsReadOnly="True" HorizontalAlignment="Left" Height="180" Margin="224,400,0,0" VerticalAlignment="Top" Width="270" HorizontalScrollBarVisibility="Hidden" >
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="Tram ID" Binding="{Binding VehicleId}" IsReadOnly="True" Width="75" CanUserResize="False"/>
+                    <DataGridTextColumn Header="Last CAM Time" Binding="{Binding LastCamTime}" IsReadOnly="True" Width="100" CanUserResize="False"/>
+                    <DataGridTextColumn Header="Last CAM [s]" Binding="{Binding SecondsSinceLastCam}" IsReadOnly="True" Width="75" CanUserResize="False"/>
+                </DataGrid.Columns>
+            </DataGrid>
 
         </Grid>
 
