@@ -427,8 +427,6 @@ namespace V2XController
 
         private readonly Dictionary<string, double> _playbackAccuracyByIdAndTs = new();
 
-        private bool _suppressFilterTramSelectionChanged = false;
-        private readonly HashSet<string> _knownLiveShortIds = new();
 
         //||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
         //Main window constructor
@@ -511,10 +509,7 @@ namespace V2XController
             if (TramBox != null)
                 TramBox.SelectionChanged += TramBox_SelectionChanged;
             if (FilterTram != null)
-            {
                 FilterTram.SelectionChanged += FilterTram_SelectionChanged;
-                PopulateLiveTramBoxFromActiveVehicles();
-            }
 
             //trams
             Tram1TB.Text = "9999";
@@ -2729,9 +2724,9 @@ namespace V2XController
                     TileCanvas.Children.Remove(tram.Speed);
 
                 drawnTramTrailPoints[idx].Clear();
-                drawnTramTrailGeoPoints[idx].Clear();   
-                drawnTramLat[idx] = null;               
-                drawnTramLon[idx] = null;               
+                drawnTramTrailGeoPoints[idx].Clear();   // nově
+                drawnTramLat[idx] = null;               // nově
+                drawnTramLon[idx] = null;               // nově
                 drawnTrams[idx] = null;
 
                 // Fix: cancel the correct token key for drawn trams
@@ -3606,6 +3601,7 @@ namespace V2XController
                 if (TryFilterCamByAltitude(rawXml))
                     return;
 
+                // LIVE UI FILTER: if user selected a specific tram in TramBox, only render CAMs for that tram.
                 var sel = TramBox?.SelectedItem as string;
                 bool filtering = !string.IsNullOrEmpty(sel) && !string.Equals(sel, "All", StringComparison.OrdinalIgnoreCase);
 
@@ -3626,18 +3622,6 @@ namespace V2XController
                         return;
                 }
 
-                if (!string.IsNullOrWhiteSpace(msg.VehicleID) && FilterTram != null)
-                {
-                    var shortId = msg.VehicleID.Length > 4 ? msg.VehicleID[^4..] : msg.VehicleID;
-                    lock (_knownLiveShortIds)
-                    {
-                        if (!_knownLiveShortIds.Contains(shortId))
-                        {
-                            _knownLiveShortIds.Add(shortId);
-                            FilterTram.Dispatcher.BeginInvoke(new Action(PopulateLiveTramBoxFromActiveVehicles));
-                        }
-                    }
-                }
 
                 // Parse accuracy from rawXml (robust: several attribute names)
                 double accuracyMeters = 0.0;
@@ -3671,17 +3655,8 @@ namespace V2XController
                             }
                         }
                     }
-
-                    // Write parsed accuracy to terminal for live CAMs
-                    if (accuracyMeters > 0)
-                    {
-                        TerminalLog($"acc = {accuracyMeters:F1} m", Brushes.LightBlue);
-                    }
                 }
-                catch
-                {
-                    // ignore parse errors
-                }
+                catch { /* ignore parse errors */ }
 
                 if (!vehicleColorMap.TryGetValue(msg.VehicleID, out Brush tramColor))
                 {
@@ -3818,10 +3793,7 @@ namespace V2XController
                         TileCanvas.Children.Add(text);
                         TileCanvas.Children.Add(speedText);
 
-                        if (FilterTram != null)
-                        {
-                            FilterTram.Dispatcher.BeginInvoke(new Action(PopulateLiveTramBoxFromActiveVehicles));
-                        }
+                        PopulateLiveTramBoxFromActiveVehicles();
 
                         _lastLatLon[msg.VehicleID] = (msg.Latitude, msg.Longitude);
                         _lastHeadingLive[msg.VehicleID] = msg.Heading;
@@ -9694,98 +9666,57 @@ namespace V2XController
 
         private void FilterTram_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
-            if (_suppressFilterTramSelectionChanged) return;
             ApplyLiveFilter();
         }
 
         private void PopulateLiveTramBoxFromActiveVehicles()
         {
-            try
+            if (FilterTram == null) return;
+
+            // build last-4 unique ids from activeVehicles keys
+            var ids = activeVehicles.Keys
+                .Where(k => !string.IsNullOrWhiteSpace(k))
+                .Select(k => k.Length > 4 ? k[^4..] : k)
+                .Distinct()
+                .ToList();
+
+            var numeric = new List<int>();
+            var numericMap = new Dictionary<int, string>();
+            var nonNumeric = new List<string>();
+
+            foreach (var s in ids)
             {
-                if (FilterTram == null) return;
-
-                List<string> idsList;
-                lock (_knownLiveShortIds)
+                if (int.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n))
                 {
-                    // Start from known set (persistent) and union with currently active vehicles
-                    var union = new HashSet<string>(_knownLiveShortIds, StringComparer.Ordinal);
-                    if (activeVehicles != null)
-                    {
-                        foreach (var k in activeVehicles.Keys)
-                        {
-                            if (string.IsNullOrWhiteSpace(k)) continue;
-                            var s = k.Length > 4 ? k[^4..] : k;
-                            union.Add(s);
-                        }
-                    }
-                    idsList = union.ToList();
+                    numeric.Add(n);
+                    numericMap[n] = s.PadLeft(4, '0');
                 }
-
-                // Partition numeric vs non-numeric so we can sort numerically when possible
-                var numeric = new List<int>();
-                var numericMap = new Dictionary<int, string>();
-                var nonNumeric = new List<string>();
-
-                foreach (var s in idsList)
-                {
-                    if (int.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n))
-                    {
-                        if (!numericMap.ContainsKey(n))
-                            numericMap[n] = s.PadLeft(4, '0');
-                        numeric.Add(n);
-                    }
-                    else
-                    {
-                        nonNumeric.Add(s);
-                    }
-                }
-
-                numeric.Sort();
-                nonNumeric.Sort(StringComparer.Ordinal);
-
-                var sorted = new List<string> { "All" };
-                foreach (var n in numeric.Distinct()) sorted.Add(numericMap[n]);
-                foreach (var s in nonNumeric.Distinct()) sorted.Add(s);
-
-                void UpdateUi()
-                {
-                    try
-                    {
-                        _suppressFilterTramSelectionChanged = true;
-                        try
-                        {
-                            var prevSel = FilterTram.SelectedItem as string;
-                            FilterTram.Items.Clear();
-                            foreach (var it in sorted) FilterTram.Items.Add(it);
-
-                            if (!string.IsNullOrEmpty(prevSel) && FilterTram.Items.Contains(prevSel))
-                                FilterTram.SelectedItem = prevSel;
-                            else if (FilterTram.Items.Count > 0)
-                                FilterTram.SelectedIndex = 0;
-                        }
-                        finally
-                        {
-                            _suppressFilterTramSelectionChanged = false;
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"PopulateLiveTramBoxFromActiveVehicles UI update failed: {ex.Message}");
-                        _suppressFilterTramSelectionChanged = false;
-                    }
-                }
-
-                if (FilterTram.Dispatcher.CheckAccess())
-                    UpdateUi();
                 else
-                    FilterTram.Dispatcher.BeginInvoke((Action)UpdateUi);
+                {
+                    nonNumeric.Add(s);
+                }
             }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"PopulateLiveTramBoxFromActiveVehicles failed: {ex.Message}");
-            }
-        }
 
+            numeric.Sort();
+            nonNumeric.Sort(StringComparer.Ordinal);
+
+            var sorted = new List<string> { "All" };
+            foreach (var n in numeric) sorted.Add(numericMap[n]);
+            foreach (var s in nonNumeric) sorted.Add(s);
+
+            Dispatcher.Invoke(() =>
+            {
+                var prevSel = FilterTram.SelectedItem as string;
+                FilterTram.Items.Clear();
+                foreach (var it in sorted) FilterTram.Items.Add(it);
+
+                // Preserve previous selection if possible, otherwise select "All"
+                if (!string.IsNullOrEmpty(prevSel) && FilterTram.Items.Contains(prevSel))
+                    FilterTram.SelectedItem = prevSel;
+                else if (FilterTram.Items.Count > 0)
+                    FilterTram.SelectedIndex = 0;
+            });
+        }
 
         private void ApplyLiveFilter()
         {

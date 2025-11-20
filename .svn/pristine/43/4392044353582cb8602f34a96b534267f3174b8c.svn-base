@@ -88,8 +88,7 @@
             <Button x:Name="OpenTerminal" Content="Open debug terminal" HorizontalAlignment="Left" Height="35" Margin="662,809,0,0" VerticalAlignment="Top" Width="140" Click="OpenTerminal_Click"/>
             <ComboBox x:Name="TramBox" HorizontalAlignment="Left" Height="25" Margin="494,249,0,0" VerticalAlignment="Top" Width="114"/>
             <CheckBox x:Name="AccuracyCB" Content="Enable accuracy circle" HorizontalAlignment="Left" Height="25" Margin="592,469,0,0" VerticalAlignment="Top" Width="208" Checked="AccuracyCB_Checked"/>
-            <ComboBox x:Name="FilterTram" HorizontalContentAlignment="Center" HorizontalAlignment="Left" Height="25" Margin="576,535,0,0" VerticalAlignment="Top" Width="186"/>
-            <Label Content="Filter tram by its ID" FontWeight="Bold" HorizontalContentAlignment="Center" HorizontalAlignment="Left" Height="31" Margin="579,499,0,0" VerticalAlignment="Top" Width="183"/>
+            <ComboBox x:Name="FilterTram" HorizontalAlignment="Left" Height="25" Margin="576,517,0,0" VerticalAlignment="Top" Width="186"/>
 
             <!--tables-->
             <DataGrid x:Name="ActivationZonesDataGrid"

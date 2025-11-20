@@ -1,29 +1,28 @@
-﻿using ComCommon;
-using Logger;
-using ModbusNewLib;
-using System;
-using System.Collections.Concurrent;
-using System.Collections.ObjectModel;
-using System.Collections.Specialized;
+﻿using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Globalization;
 using System.IO;
 using System.IO.Ports;
 using System.Net.Http;
 using System.Text;
-using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Data;
-using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
-using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
 using System.Windows.Threading;
 using System.Xml;
 using System.Xml.Linq;
+using System.Collections.Specialized;
+using System.Text.Json;
+using System.Windows.Data;
+using System.Collections.Concurrent;
+using System.Windows.Documents;
+using System.Windows.Media.Animation;
+using ComCommon;
+using ModbusNewLib;
+using Logger;
 
 //TODO:
 //fix the map panning (now it works but its not as we wanted) !!!
@@ -427,8 +426,6 @@ namespace V2XController
 
         private readonly Dictionary<string, double> _playbackAccuracyByIdAndTs = new();
 
-        private bool _suppressFilterTramSelectionChanged = false;
-        private readonly HashSet<string> _knownLiveShortIds = new();
 
         //||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
         //Main window constructor
@@ -507,14 +504,6 @@ namespace V2XController
 
             if (TramBox != null)
                 TramBox.SelectionChanged += TramBox_SelectionChanged;
-
-            if (TramBox != null)
-                TramBox.SelectionChanged += TramBox_SelectionChanged;
-            if (FilterTram != null)
-            {
-                FilterTram.SelectionChanged += FilterTram_SelectionChanged;
-                PopulateLiveTramBoxFromActiveVehicles();
-            }
 
             //trams
             Tram1TB.Text = "9999";
@@ -2654,7 +2643,6 @@ namespace V2XController
             }
         }
 
-        
         private void RemoveVehicleCompletely(string vehicleId, MapPoint vehicle)
         {
             Dispatcher.Invoke(() =>
@@ -2678,13 +2666,6 @@ namespace V2XController
                     vehicle.TrailDots.Clear();
                 }
 
-                // Remove any live accuracy ellipse for this vehicle
-                var accToRemove = TileCanvas.Children.OfType<Ellipse>()
-                    .Where(e => e.Tag is string s && s.Equals($"live_acc_{vehicleId}", StringComparison.OrdinalIgnoreCase))
-                    .ToList();
-                foreach (var e in accToRemove)
-                    TileCanvas.Children.Remove(e);
-
                 activeVehicles.Remove(vehicleId);
 
                 if (vehicleTrailCleanupTokens.TryGetValue(vehicleId, out var cts))
@@ -2703,8 +2684,6 @@ namespace V2XController
                 var tramInfo = TramTable.FirstOrDefault(t => t.VehicleId == (vehicleId.Length > 4 ? vehicleId[^4..] : vehicleId));
                 if (tramInfo != null)
                     TramTable.Remove(tramInfo);
-
-                PopulateLiveTramBoxFromActiveVehicles();
             });
         }
 
@@ -2729,9 +2708,9 @@ namespace V2XController
                     TileCanvas.Children.Remove(tram.Speed);
 
                 drawnTramTrailPoints[idx].Clear();
-                drawnTramTrailGeoPoints[idx].Clear();   
-                drawnTramLat[idx] = null;               
-                drawnTramLon[idx] = null;               
+                drawnTramTrailGeoPoints[idx].Clear();   // nově
+                drawnTramLat[idx] = null;               // nově
+                drawnTramLon[idx] = null;               // nově
                 drawnTrams[idx] = null;
 
                 // Fix: cancel the correct token key for drawn trams
@@ -3591,7 +3570,6 @@ namespace V2XController
 
 
         //Handling V2X messages !!!!!!!
-
         private void HandleV2XMessage(V2XMessage msg, string rawXml)
         {
             if (msg.IsManual)
@@ -3606,81 +3584,16 @@ namespace V2XController
                 if (TryFilterCamByAltitude(rawXml))
                     return;
 
+                // LIVE UI FILTER: if user selected a specific tram in TramBox, only render CAMs for that tram.
                 var sel = TramBox?.SelectedItem as string;
                 bool filtering = !string.IsNullOrEmpty(sel) && !string.Equals(sel, "All", StringComparison.OrdinalIgnoreCase);
 
                 // If filtering and this incoming CAM does not match the selected short id -> skip rendering entirely.
+                // (We still keep timeshift buffering elsewhere; this prevents unwanted live visuals/table rows)
                 if (filtering)
                 {
                     if (string.IsNullOrEmpty(msg.VehicleID) || !IsReplayFilterMatch(msg.VehicleID))
                         return;
-                }
-
-                var liveSel = FilterTram?.SelectedItem as string;
-                bool liveFiltering = !string.IsNullOrEmpty(liveSel) && !string.Equals(liveSel, "All", StringComparison.OrdinalIgnoreCase);
-
-                // If live filter active and incoming CAM does not match -> ignore the CAM (do not render/update)
-                if (liveFiltering)
-                {
-                    if (string.IsNullOrEmpty(msg.VehicleID) || !string.Equals(msg.VehicleID.Length > 4 ? msg.VehicleID[^4..] : msg.VehicleID, liveSel, StringComparison.Ordinal))
-                        return;
-                }
-
-                if (!string.IsNullOrWhiteSpace(msg.VehicleID) && FilterTram != null)
-                {
-                    var shortId = msg.VehicleID.Length > 4 ? msg.VehicleID[^4..] : msg.VehicleID;
-                    lock (_knownLiveShortIds)
-                    {
-                        if (!_knownLiveShortIds.Contains(shortId))
-                        {
-                            _knownLiveShortIds.Add(shortId);
-                            FilterTram.Dispatcher.BeginInvoke(new Action(PopulateLiveTramBoxFromActiveVehicles));
-                        }
-                    }
-                }
-
-                // Parse accuracy from rawXml (robust: several attribute names)
-                double accuracyMeters = 0.0;
-                try
-                {
-                    int vehPtStart = rawXml.IndexOf("<vehPt", StringComparison.OrdinalIgnoreCase);
-                    if (vehPtStart >= 0)
-                    {
-                        int tagEnd = rawXml.IndexOf('>', vehPtStart);
-                        if (tagEnd > vehPtStart)
-                        {
-                            var tag = rawXml.Substring(vehPtStart, tagEnd - vehPtStart);
-                            var accAttrNames = new[] { "accuracy", "acc", "accuracy_m", "accuracyMeters", "hacc" };
-                            foreach (var an in accAttrNames)
-                            {
-                                var idxAttr = tag.IndexOf(an + "=\"", StringComparison.OrdinalIgnoreCase);
-                                if (idxAttr >= 0)
-                                {
-                                    int vStart = idxAttr + an.Length + 2;
-                                    int vEnd = tag.IndexOf('"', vStart);
-                                    if (vEnd > vStart)
-                                    {
-                                        var accStr = tag.Substring(vStart, vEnd - vStart);
-                                        if (double.TryParse(accStr, NumberStyles.Any, CultureInfo.InvariantCulture, out var parsedAcc))
-                                        {
-                                            accuracyMeters = parsedAcc;
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Write parsed accuracy to terminal for live CAMs
-                    if (accuracyMeters > 0)
-                    {
-                        TerminalLog($"acc = {accuracyMeters:F1} m", Brushes.LightBlue);
-                    }
-                }
-                catch
-                {
-                    // ignore parse errors
                 }
 
                 if (!vehicleColorMap.TryGetValue(msg.VehicleID, out Brush tramColor))
@@ -3689,12 +3602,6 @@ namespace V2XController
                     tramColor = vehicleColors[colorIndex];
                     vehicleColorMap[msg.VehicleID] = tramColor;
                 }
-
-                // Remove any previous live accuracy ellipse for this vehicle so we can redraw/move it
-                var oldLiveAcc = TileCanvas.Children.OfType<Ellipse>()
-                    .Where(e => e.Tag is string s && s.Equals($"live_acc_{msg.VehicleID}", StringComparison.OrdinalIgnoreCase))
-                    .ToList();
-                foreach (var a in oldLiveAcc) TileCanvas.Children.Remove(a);
 
                 if (activeVehicles.TryGetValue(msg.VehicleID, out var existing))
                 {
@@ -3709,48 +3616,9 @@ namespace V2XController
 
                 if (!(msg.VehicleID?.StartsWith("000000") ?? false) || isPlaying == true)
                 {
-                    // compute canvas pos
-                    var (x, y) = ConvertLatLonToCanvasXY(msg.Latitude, msg.Longitude);
-
-                    // Draw/Update accuracy circle only if Accuracy checkbox is checked
-                    if (AccuracyCB?.IsChecked == true && accuracyMeters > 0)
-                    {
-                        // convert meters -> pixels using local latitude
-                        double mpp = MetersPerPixel(msg.Latitude, zoom);
-                        double radiusPx = accuracyMeters / Math.Max(1e-6, mpp);
-
-                        SolidColorBrush fillBrush;
-                        if (tramColor is SolidColorBrush scb)
-                        {
-                            var c = scb.Color;
-                            fillBrush = new SolidColorBrush(Color.FromArgb((byte)Math.Round(0.20 * 255), c.R, c.G, c.B));
-                        }
-                        else
-                        {
-                            var c = Colors.Black;
-                            fillBrush = new SolidColorBrush(Color.FromArgb((byte)Math.Round(0.20 * 255), c.R, c.G, c.B));
-                        }
-                        fillBrush.Freeze();
-
-                        var accEllipse = new Ellipse
-                        {
-                            Width = radiusPx * 2,
-                            Height = radiusPx * 2,
-                            Fill = fillBrush,
-                            Stroke = null,
-                            IsHitTestVisible = false,
-                            Tag = $"live_acc_{msg.VehicleID}"
-                        };
-                        Canvas.SetLeft(accEllipse, x - radiusPx);
-                        Canvas.SetTop(accEllipse, y - radiusPx);
-                        TileCanvas.Children.Add(accEllipse);
-                        Panel.SetZIndex(accEllipse, 995); // below vehicle dot but above tiles
-                    }
-                    // if checkbox is not checked we purposely do not draw any accuracy circle (old ones were already removed above)
-
                     if (activeVehicles.TryGetValue(msg.VehicleID, out var point))
                     {
-                        // update existing
+                        var (x, y) = ConvertLatLonToCanvasXY(msg.Latitude, msg.Longitude);
                         point.Position = new Point(x, y);
                         point.LastUpdate = DateTime.Now;
                         UpdateVehicleCanvasPosition(point, new Point(x, y), tramColor, false, point.Label, msg.Speed);
@@ -3765,14 +3633,15 @@ namespace V2XController
                     }
                     else
                     {
-                        // create new visuals
+                        // Create visuals only for vehicles that passed the TramBox filter above
+                        var (x, y) = ConvertLatLonToCanvasXY(msg.Latitude, msg.Longitude);
+
                         var ellipse = new Ellipse
                         {
                             Width = 12,
                             Height = 12,
                             Fill = tramColor,
-                            Tag = "Tram",
-                            IsHitTestVisible = false
+                            Tag = "Tram"
                         };
                         Canvas.SetLeft(ellipse, x - ellipse.Width / 2);
                         Canvas.SetTop(ellipse, y - ellipse.Height / 2);
@@ -3782,8 +3651,7 @@ namespace V2XController
                             Text = msg.VehicleID,
                             Foreground = tramColor,
                             FontWeight = FontWeights.Bold,
-                            Tag = "Tram",
-                            IsHitTestVisible = false
+                            Tag = "Tram"
                         };
                         Canvas.SetLeft(text, x + 8);
                         Canvas.SetTop(text, y - 6);
@@ -3793,8 +3661,7 @@ namespace V2XController
                             Text = $"{msg.Speed:F1} km/h",
                             Foreground = tramColor,
                             FontWeight = FontWeights.Bold,
-                            Tag = "Tram",
-                            IsHitTestVisible = false
+                            Tag = "Tram"
                         };
                         Canvas.SetLeft(speedText, x + 8);
                         Canvas.SetTop(speedText, y + 6);
@@ -3807,9 +3674,7 @@ namespace V2XController
                             Text = text,
                             Speed = speedText,
                             LastUpdate = DateTime.Now,
-                            VehicleColor = tramColor,
-                            TrailDots = new List<Ellipse>(),
-                            MovementFrames = new List<MovementFrame>()
+                            VehicleColor = tramColor
                         };
 
                         activeVehicles[msg.VehicleID] = newPoint;
@@ -3817,11 +3682,6 @@ namespace V2XController
                         TileCanvas.Children.Add(ellipse);
                         TileCanvas.Children.Add(text);
                         TileCanvas.Children.Add(speedText);
-
-                        if (FilterTram != null)
-                        {
-                            FilterTram.Dispatcher.BeginInvoke(new Action(PopulateLiveTramBoxFromActiveVehicles));
-                        }
 
                         _lastLatLon[msg.VehicleID] = (msg.Latitude, msg.Longitude);
                         _lastHeadingLive[msg.VehicleID] = msg.Heading;
@@ -3851,7 +3711,6 @@ namespace V2XController
             }
             else if (msg.MessageType == "SRV")
             {
-                // unchanged SRV branch...
                 SRVMessage srvMsg = null;
                 bool isValid = false;
                 string logicalId = "-";
@@ -3879,6 +3738,7 @@ namespace V2XController
                     IncrementSrvErrorCount();
                     TerminalLog($"ERROR: SRV parse failed - {ex.Message}", Brushes.Red);
                 }
+
 
                 if (isValid) IncrementSrvOkCount();
                 else IncrementSrvErrorCount();
@@ -3918,8 +3778,7 @@ namespace V2XController
                             Width = 12,
                             Height = 12,
                             Fill = Brushes.Red,
-                            Tag = "Srv",
-                            IsHitTestVisible = false
+                            Tag = "Srv"
                         };
 
                         var text = new TextBlock
@@ -3927,8 +3786,7 @@ namespace V2XController
                             Text = srvV2xMsg.VehicleID,
                             FontWeight = FontWeights.Bold,
                             Foreground = Brushes.Black,
-                            Tag = "Srv",
-                            IsHitTestVisible = false
+                            Tag = "Srv"
                         };
 
                         var newPoint = new MapPoint
@@ -5682,47 +5540,44 @@ namespace V2XController
                     .ToList();
                 foreach (var a in oldAccs) TileCanvas.Children.Remove(a);
 
-                // Try draw accuracy circle for this frame only when Accuracy checkbox is checked
-                if (AccuracyCB?.IsChecked == true)
+                // Try draw accuracy circle for this frame
+                string keyAccForFrame = $"{id}|{curFrame.Timestamp.Ticks}";
+                if (_playbackAccuracyByIdAndTs.TryGetValue(keyAccForFrame, out var accuracyMeters) && accuracyMeters > 0)
                 {
-                    string keyAccForFrame = $"{id}|{curFrame.Timestamp.Ticks}";
-                    if (_playbackAccuracyByIdAndTs.TryGetValue(keyAccForFrame, out var accuracyMeters) && accuracyMeters > 0)
+                    // Obtain latitude for meters-per-pixel computation
+                    var lonlat = CanvasPixelsToLatLon(new Point(pos.X, pos.Y), latitude, longitude, zoom);
+                    double localLat = lonlat.Y;
+                    double mpp = MetersPerPixel(localLat, zoom);
+                    double radiusPx = accuracyMeters / Math.Max(1e-6, mpp);
+
+                    // 20% translucent fill based on vehicle color
+                    SolidColorBrush fillBrush;
+                    if (color is SolidColorBrush scb)
                     {
-                        // Obtain latitude for meters-per-pixel computation
-                        var lonlat = CanvasPixelsToLatLon(new Point(pos.X, pos.Y), latitude, longitude, zoom);
-                        double localLat = lonlat.Y;
-                        double mpp = MetersPerPixel(localLat, zoom);
-                        double radiusPx = accuracyMeters / Math.Max(1e-6, mpp);
-
-                        // 20% translucent fill based on vehicle color
-                        SolidColorBrush fillBrush;
-                        if (color is SolidColorBrush scb)
-                        {
-                            var c = scb.Color;
-                            fillBrush = new SolidColorBrush(Color.FromArgb((byte)Math.Round(0.20 * 255), c.R, c.G, c.B));
-                        }
-                        else
-                        {
-                            var c = Colors.Black;
-                            fillBrush = new SolidColorBrush(Color.FromArgb((byte)Math.Round(0.20 * 255), c.R, c.G, c.B));
-                        }
-                        fillBrush.Freeze();
-
-                        var accEllipse = new Ellipse
-                        {
-                            Width = radiusPx * 2,
-                            Height = radiusPx * 2,
-                            Fill = fillBrush,
-                            Stroke = null,
-                            IsHitTestVisible = false,
-                            Tag = $"replay_acc_{id}"
-                        };
-
-                        Canvas.SetLeft(accEllipse, pos.X - radiusPx);
-                        Canvas.SetTop(accEllipse, pos.Y - radiusPx);
-                        TileCanvas.Children.Add(accEllipse);
-                        Panel.SetZIndex(accEllipse, 995); // below vehicle but above tiles
+                        var c = scb.Color;
+                        fillBrush = new SolidColorBrush(Color.FromArgb((byte)Math.Round(0.20 * 255), c.R, c.G, c.B));
                     }
+                    else
+                    {
+                        var c = Colors.Black;
+                        fillBrush = new SolidColorBrush(Color.FromArgb((byte)Math.Round(0.20 * 255), c.R, c.G, c.B));
+                    }
+                    fillBrush.Freeze();
+
+                    var accEllipse = new Ellipse
+                    {
+                        Width = radiusPx * 2,
+                        Height = radiusPx * 2,
+                        Fill = fillBrush,
+                        Stroke = null,
+                        IsHitTestVisible = false,
+                        Tag = $"replay_acc_{id}"
+                    };
+
+                    Canvas.SetLeft(accEllipse, pos.X - radiusPx);
+                    Canvas.SetTop(accEllipse, pos.Y - radiusPx);
+                    TileCanvas.Children.Add(accEllipse);
+                    Panel.SetZIndex(accEllipse, 995); // below vehicle but above tiles
                 }
 
                 var ellipse = new Ellipse
@@ -6874,6 +6729,7 @@ namespace V2XController
                 _srvTimer.Stop();
         }
 
+        // UpdateUiEnabledState – zohledni stav nahrávání pro tlačítka
         // Keep classic replay slider enabled only when a replay is loaded
         private void UpdateUiEnabledState()
         {
@@ -6901,8 +6757,6 @@ namespace V2XController
             Tram1TB?.SetValue(IsEnabledProperty, _isConnected);
             Tram2TB?.SetValue(IsEnabledProperty, _isConnected);
             SpeedBox?.SetValue(IsEnabledProperty, _isConnected);
-            AccuracyCB?.SetValue(IsEnabledProperty, _isConnected);
-            FilterTram?.SetValue(IsEnabledProperty, _isConnected);
 
             // Manual recording buttons
             if (btnStartRecording != null)
@@ -9654,34 +9508,6 @@ namespace V2XController
             }
         }
 
-        private void AccuracyCB_Checked(object sender, RoutedEventArgs e)
-        {
-            // When checkbox changes we either remove all accuracy circles (unchecked)
-            // or trigger a redraw of replay visuals so circles appear immediately (checked).
-            Dispatcher.Invoke(() =>
-            {
-                bool isChecked = AccuracyCB?.IsChecked == true;
-
-                if (!isChecked)
-                {
-                    var accs = TileCanvas.Children.OfType<Ellipse>()
-                        .Where(el => el.Tag is string s &&
-                                     (s.StartsWith("live_acc_", StringComparison.OrdinalIgnoreCase) ||
-                                      s.StartsWith("replay_acc_", StringComparison.OrdinalIgnoreCase)))
-                        .ToList();
-                    foreach (var el in accs) TileCanvas.Children.Remove(el);
-                }
-                else
-                {
-                    if (_playbackLoaded)
-                    {
-                        RedrawPlaybackToTime(playbackElapsedTime);
-                    }
-
-                }
-            });
-        }
-
         private void RemoveReplayAccuracyEllipse(string id)
         {
             if (string.IsNullOrEmpty(id) || TileCanvas == null) return;
@@ -9690,162 +9516,6 @@ namespace V2XController
                 .Where(e => e.Tag is string s && s.Equals($"replay_acc_{id}", StringComparison.OrdinalIgnoreCase))
                 .ToList();
             foreach (var e in accEllipses) TileCanvas.Children.Remove(e);
-        }
-
-        private void FilterTram_SelectionChanged(object sender, SelectionChangedEventArgs e)
-        {
-            if (_suppressFilterTramSelectionChanged) return;
-            ApplyLiveFilter();
-        }
-
-        private void PopulateLiveTramBoxFromActiveVehicles()
-        {
-            try
-            {
-                if (FilterTram == null) return;
-
-                List<string> idsList;
-                lock (_knownLiveShortIds)
-                {
-                    // Start from known set (persistent) and union with currently active vehicles
-                    var union = new HashSet<string>(_knownLiveShortIds, StringComparer.Ordinal);
-                    if (activeVehicles != null)
-                    {
-                        foreach (var k in activeVehicles.Keys)
-                        {
-                            if (string.IsNullOrWhiteSpace(k)) continue;
-                            var s = k.Length > 4 ? k[^4..] : k;
-                            union.Add(s);
-                        }
-                    }
-                    idsList = union.ToList();
-                }
-
-                // Partition numeric vs non-numeric so we can sort numerically when possible
-                var numeric = new List<int>();
-                var numericMap = new Dictionary<int, string>();
-                var nonNumeric = new List<string>();
-
-                foreach (var s in idsList)
-                {
-                    if (int.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n))
-                    {
-                        if (!numericMap.ContainsKey(n))
-                            numericMap[n] = s.PadLeft(4, '0');
-                        numeric.Add(n);
-                    }
-                    else
-                    {
-                        nonNumeric.Add(s);
-                    }
-                }
-
-                numeric.Sort();
-                nonNumeric.Sort(StringComparer.Ordinal);
-
-                var sorted = new List<string> { "All" };
-                foreach (var n in numeric.Distinct()) sorted.Add(numericMap[n]);
-                foreach (var s in nonNumeric.Distinct()) sorted.Add(s);
-
-                void UpdateUi()
-                {
-                    try
-                    {
-                        _suppressFilterTramSelectionChanged = true;
-                        try
-                        {
-                            var prevSel = FilterTram.SelectedItem as string;
-                            FilterTram.Items.Clear();
-                            foreach (var it in sorted) FilterTram.Items.Add(it);
-
-                            if (!string.IsNullOrEmpty(prevSel) && FilterTram.Items.Contains(prevSel))
-                                FilterTram.SelectedItem = prevSel;
-                            else if (FilterTram.Items.Count > 0)
-                                FilterTram.SelectedIndex = 0;
-                        }
-                        finally
-                        {
-                            _suppressFilterTramSelectionChanged = false;
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"PopulateLiveTramBoxFromActiveVehicles UI update failed: {ex.Message}");
-                        _suppressFilterTramSelectionChanged = false;
-                    }
-                }
-
-                if (FilterTram.Dispatcher.CheckAccess())
-                    UpdateUi();
-                else
-                    FilterTram.Dispatcher.BeginInvoke((Action)UpdateUi);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"PopulateLiveTramBoxFromActiveVehicles failed: {ex.Message}");
-            }
-        }
-
-
-        private void ApplyLiveFilter()
-        {
-            var sel = FilterTram?.SelectedItem as string;
-            bool filtering = !string.IsNullOrEmpty(sel) && !string.Equals(sel, "All", StringComparison.OrdinalIgnoreCase);
-
-            // update TramTable view to reflect live-only selection
-            var view = CollectionViewSource.GetDefaultView(TramTable);
-            if (view != null)
-            {
-                if (!filtering)
-                    view.Filter = null;
-                else
-                    view.Filter = o =>
-                    {
-                        if (o is TramInfo t)
-                            return string.Equals(t.VehicleId, sel, StringComparison.Ordinal);
-                        return false;
-                    };
-                Dispatcher.Invoke(() => view.Refresh());
-            }
-
-            // If no filtering (All), nothing to remove. New CAMs will repopulate.
-            if (!filtering)
-            {
-                // refresh live combobox content from active vehicles
-                PopulateLiveTramBoxFromActiveVehicles();
-                return;
-            }
-
-            // Otherwise, remove all active non-matching tram visuals (preserve SRV)
-            var keysToRemove = new List<string>();
-            foreach (var kv in activeVehicles)
-            {
-                var id = kv.Key;
-                var mp = kv.Value;
-                if (mp == null) continue;
-
-                bool isSrv = string.Equals(mp.Ellipse?.Tag as string, "Srv", StringComparison.OrdinalIgnoreCase);
-                if (isSrv) continue;
-
-                var shortId = id.Length > 4 ? id[^4..] : id;
-                if (!string.Equals(shortId, sel, StringComparison.Ordinal))
-                    keysToRemove.Add(id);
-            }
-
-            // remove on UI thread
-            foreach (var id in keysToRemove)
-            {
-                Dispatcher.BeginInvoke(new Action(() =>
-                {
-                    if (activeVehicles.TryGetValue(id, out var vehicle))
-                    {
-                        RemoveVehicleCompletely(id, vehicle);
-                    }
-                }));
-            }
-
-            // After removal, ensure combobox shows only remaining active trams (plus All)
-            // (PopulateLiveTramBoxFromActiveVehicles will be called by RemoveVehicleCompletely end)
         }
     }
 }

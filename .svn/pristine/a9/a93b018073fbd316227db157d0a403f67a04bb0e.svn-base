@@ -87,23 +87,20 @@
             <Button x:Name="ReadButtonMain" Content="Read from MPC" HorizontalAlignment="Left" Height="35" Margin="342,809,0,0" VerticalAlignment="Top" Width="140" Click="ReadButtonMain_Click"/>
             <Button x:Name="OpenTerminal" Content="Open debug terminal" HorizontalAlignment="Left" Height="35" Margin="662,809,0,0" VerticalAlignment="Top" Width="140" Click="OpenTerminal_Click"/>
             <ComboBox x:Name="TramBox" HorizontalAlignment="Left" Height="25" Margin="494,249,0,0" VerticalAlignment="Top" Width="114"/>
-            <CheckBox x:Name="AccuracyCB" Content="Enable accuracy circle" HorizontalAlignment="Left" Height="25" Margin="592,469,0,0" VerticalAlignment="Top" Width="208" Checked="AccuracyCB_Checked"/>
-            <ComboBox x:Name="FilterTram" HorizontalContentAlignment="Center" HorizontalAlignment="Left" Height="25" Margin="576,535,0,0" VerticalAlignment="Top" Width="186"/>
-            <Label Content="Filter tram by its ID" FontWeight="Bold" HorizontalContentAlignment="Center" HorizontalAlignment="Left" Height="31" Margin="579,499,0,0" VerticalAlignment="Top" Width="183"/>
-
+            
             <!--tables-->
             <DataGrid x:Name="ActivationZonesDataGrid"
-HorizontalAlignment="Left"
-HeadersVisibility="Column"
-  Height="217"
-  Margin="30,590,0,0"
-  VerticalAlignment="Top"
-  Width="785"
-  ItemsSource="{Binding ActivationZonesCollection}"
-  AutoGenerateColumns="False"
-  CanUserAddRows="False"
-  IsReadOnly="False"
-  PreviewKeyDown="ActivationZonesDataGrid_PreviewKeyDown">
+  HorizontalAlignment="Left"
+  HeadersVisibility="Column"
+    Height="217"
+    Margin="30,590,0,0"
+    VerticalAlignment="Top"
+    Width="785"
+    ItemsSource="{Binding ActivationZonesCollection}"
+    AutoGenerateColumns="False"
+    CanUserAddRows="False"
+    IsReadOnly="False"
+    PreviewKeyDown="ActivationZonesDataGrid_PreviewKeyDown">
                 <DataGrid.Columns>
                     <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="75" CanUserResize="False"/>
                     <DataGridTextColumn Header="Latitude [°]" Binding="{Binding Latitude, StringFormat=F6}" Width="100" CanUserResize="False"/>
@@ -128,11 +125,11 @@ HeadersVisibility="Column"
                         </DataGridComboBoxColumn.ItemsSource>
                     </DataGridComboBoxColumn>
                     <DataGridTextColumn Header="Main zone"
-                      Binding="{Binding MainZone, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                      Width="Auto" />
+                        Binding="{Binding MainZone, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                        Width="Auto" />
                     <DataGridTextColumn Header="Sub-zone"
-                      Binding="{Binding SubZone, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                      Width="Auto" />
+                        Binding="{Binding SubZone, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                        Width="Auto" />
                 </DataGrid.Columns>
             </DataGrid>
 
@@ -143,6 +140,7 @@ HeadersVisibility="Column"
                     <DataGridTextColumn Header="Last CAM [s]" Binding="{Binding SecondsSinceLastCam}" IsReadOnly="True" Width="75" CanUserResize="False"/>
                 </DataGrid.Columns>
             </DataGrid>
+
         </Grid>
 
 

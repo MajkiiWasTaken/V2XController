@@ -3671,17 +3671,8 @@ namespace V2XController
                             }
                         }
                     }
-
-                    // Write parsed accuracy to terminal for live CAMs
-                    if (accuracyMeters > 0)
-                    {
-                        TerminalLog($"acc = {accuracyMeters:F1} m", Brushes.LightBlue);
-                    }
                 }
-                catch
-                {
-                    // ignore parse errors
-                }
+                catch { /* ignore parse errors */ }
 
                 if (!vehicleColorMap.TryGetValue(msg.VehicleID, out Brush tramColor))
                 {
