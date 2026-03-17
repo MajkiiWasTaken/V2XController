@@ -435,8 +435,6 @@ namespace V2XController
         private readonly Dictionary<string, double?> _lastLiveAccuracyById = new();
         private readonly Dictionary<string, TextBlock> _liveAccuracyTextById = new();
 
-        private ProtobufWindow _protobufWindow;
-
 
         //||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
         //Main window constructor
@@ -3590,24 +3588,6 @@ namespace V2XController
 
                         if (string.IsNullOrWhiteSpace(rawLine)) continue;
 
-                        if (IsProtobufMessage(rawLine))
-                        {
-                            Dispatcher.Invoke(() =>
-                            {
-                                if (ProtobufParser.TryDecodeProtobufFromHex(rawLine, out string decoded))
-                                {
-                                    TerminalLog($"PROTOBUF MESSAGE:", Brushes.Cyan);
-                                    TerminalLog(decoded, Brushes.LightCyan);
-                                }
-                                else
-                                {
-                                    TerminalLog($"PROTOBUF (raw): {rawLine}", Brushes.Gray);
-                                }
-                            });
-                            continue;
-                        }
-
-
                         // do not mix with classic replay or timeshift catch-up rendering
                         if (_isPlaybackSessionActive || _isTimeshiftPlaybackActive) continue;
 
@@ -3888,7 +3868,6 @@ namespace V2XController
                         point.Position = new Point(x, y);
                         point.LastUpdate = DateTime.Now;
                         UpdateVehicleCanvasPosition(point, new Point(x, y), tramColor, false, point.Label, msg.Speed);
-
 
                         // store last geo + heading for reprojection
                         _lastLatLon[msg.VehicleID] = (msg.Latitude, msg.Longitude);
@@ -9404,7 +9383,7 @@ namespace V2XController
                 _terminalWindow.Title = header;
 
                 // append a short header line to indicate focus / current port
-                var headerLine = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {header}";
+                var headerLine = $"[{DateTime.Now:HH:mm:ss}] {header}";
                 _terminalBuffer.Add((headerLine, Brushes.LightGray));
                 try { _terminalWindow.Append(headerLine, Brushes.LightGray); } catch { /* ignore UI append errors */ }
 
@@ -9416,7 +9395,7 @@ namespace V2XController
 
         private void TerminalLog(string text, Brush color)
         {
-            string line = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {text}";
+            string line = $"[{DateTime.Now:HH:mm:ss}] {text}";
 
             // buffer
             _terminalBuffer.Add((line, color));
@@ -10288,41 +10267,6 @@ namespace V2XController
                 currentDrawingMode = DrawingMode.Point;
                 UpdateHitTestForSelectableElements();
             });
-        }
-
-        private void OpenProtobuf_Click(object sender, RoutedEventArgs e)
-        {
-            if (_protobufWindow == null)
-            {
-                _protobufWindow = new ProtobufWindow { Owner = this };
-                _protobufWindow.Closed += (s, ev) => _protobufWindow = null;
-                _protobufWindow.Show();
-            }
-            else
-            {
-                if (_protobufWindow.WindowState == WindowState.Minimized)
-                    _protobufWindow.WindowState = WindowState.Normal;
-                _protobufWindow.Activate();
-            }
-        }
-        private bool IsProtobufMessage(string line)
-        {
-            // Protobuf zprávy jsou typicky binární data v hex formátu
-            // Můžete definovat vlastní prefix nebo detekční mechanismus
-            if (line.StartsWith("PB:", StringComparison.OrdinalIgnoreCase))
-                return true;
-
-            // Nebo detekujte čistý hex string (všechny znaky jsou 0-9, A-F)
-            var trimmed = line.Trim().Replace(" ", "");
-            if (trimmed.Length > 0 && trimmed.All(c =>
-                (c >= '0' && c <= '9') ||
-                (c >= 'A' && c <= 'F') ||
-                (c >= 'a' && c <= 'f')))
-            {
-                return trimmed.Length >= 4; // minimální délka pro validní protobuf
-            }
-
-            return false;
         }
     }
 }

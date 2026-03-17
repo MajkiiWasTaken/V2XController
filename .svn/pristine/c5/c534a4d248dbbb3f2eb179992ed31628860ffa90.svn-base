@@ -1,5 +1,4 @@
 ﻿using System.Globalization;
-using System.Windows.Media.Animation;
 
 namespace V2XController
 {
@@ -34,7 +33,7 @@ namespace V2XController
 
             var s = new ExportSettings
             {
-                IsTcpSelected = isTcp || isTunnel,
+                IsTcpSelected = isTcp,
                 // modem
                 ModemRaw = Normalize(win.ModemTextBox?.Text)
             };

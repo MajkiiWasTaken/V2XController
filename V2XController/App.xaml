@@ -4,6 +4,9 @@
              xmlns:local="clr-namespace:V2XController"
              StartupUri="MainWindow.xaml">
     <Application.Resources>
-         
+
+        <BooleanToVisibilityConverter x:Key="BoolToVisibilityConverter"/>
+
+        <local:InverseBooleanToVisibilityConverter x:Key="InverseBoolToVisibilityConverter"/>
     </Application.Resources>
 </Application>

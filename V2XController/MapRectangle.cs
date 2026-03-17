@@ -19,7 +19,7 @@ namespace V2XController
         public string Tooltip { get; set; } = "";
         public string LastTramId { get; set; } = "-";
 
-
+        /////////////////////////////////////////////////
         public void AddToCanvas(Canvas canvas)
         {
             var rect = new Rectangle
