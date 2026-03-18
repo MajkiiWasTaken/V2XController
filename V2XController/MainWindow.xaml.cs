@@ -733,11 +733,9 @@ namespace V2XController
 
 
         //CONVERT PIXELS TO LAT/LON
-        // Replace this method body
         public (double Latitude, double Longitude) ConvertCanvasXYToLatLon(double x, double y, int zoom)
         {
-            // Convert canvas pixel (relative to current tile grid) to lon/lat using current top-left tile anchor
-            var lonlat = CanvasPixelsToLatLon(new Point(x, y), latitude, longitude, zoom); // returns Point(lon, lat)
+            var lonlat = CanvasPixelsToLatLon(new Point(x, y), latitude, longitude, zoom);
             return (lonlat.Y, lonlat.X);
         }
 
@@ -1133,15 +1131,361 @@ namespace V2XController
             cameraX -= (int)dx;
             cameraY -= (int)dy;
 
+            // Keep _currentTopLeftTileX/Y in sync for compatibility
+            _currentTopLeftTileX = (int)Math.Floor((double)cameraX / TileSize);
+            _currentTopLeftTileY = (int)Math.Floor((double)cameraY / TileSize);
+
             lastMousePos = currentPos;
 
-            // Update stops positions IMMEDIATELY (before tile rendering)
-            UpdateStopsPositions();
+            // Update ALL overlays IMMEDIATELY during drag for smooth movement
+            UpdateAllOverlaysLive();
 
             // Then render tiles with new camera position
             RenderTilesProgressive();
 
             e.Handled = true;
+        }
+
+        private void UpdateAllOverlaysLive()
+        {
+            // 1. Update stops
+            UpdateStopsPositions();
+
+            // 2. Update activation zones (rectangles)
+            UpdateActivationZonesPositions();
+
+            // 3. Update switch zones
+            UpdateSwitchZonesPositions();
+
+            // 4. Update drawn trams
+            UpdateDrawnTramsPositions();
+
+            // 5. Update active vehicles (live CAMs)
+            UpdateActiveVehiclesPositions();
+
+            // 6. Update replay vehicles
+            UpdateReplayVehiclesPositions();
+
+            // 7. Update radius circle if visible
+            if (CircleCheckBox?.IsChecked == true)
+            {
+                DrawRadiusCircle();
+            }
+        }
+
+        private void UpdateActivationZonesPositions()
+        {
+            foreach (var zone in ActivationZonesCollection.Where(z => z != null && !IsSwitchZone(z)))
+            {
+                if (zone.Rectangle == null) continue;
+
+                // meters -> pixels at current zoom
+                double mppLocal = MetersPerPixel(zone.Latitude, zoom);
+                double widthPx = zone.Width / mppLocal;
+                double heightPx = zone.Height / mppLocal;
+
+                zone.Rectangle.Width = widthPx;
+                zone.Rectangle.Height = heightPx;
+
+                // Start point from stored Lat/Lon
+                var (sx, sy) = ConvertLatLonToCanvasXY(zone.Latitude, zone.Longitude);
+                zone.StartPoint = new Point(sx, sy);
+
+                UpdateRectanglePositionFromStartPoint(zone);
+            }
+        }
+
+        private void UpdateDrawnTramsPositions()
+        {
+            for (int idx = 0; idx < drawnTrams.Length; idx++)
+            {
+                var tram = drawnTrams[idx];
+                if (tram == null) continue;
+
+                // Reposition to last known geo
+                if (drawnTramLat[idx].HasValue && drawnTramLon[idx].HasValue)
+                {
+                    var (x, y) = ConvertLatLonToCanvasXY(drawnTramLat[idx]!.Value, drawnTramLon[idx]!.Value);
+
+                    // Update ellipse position
+                    if (tram.Ellipse != null)
+                    {
+                        Canvas.SetLeft(tram.Ellipse, x - 6);
+                        Canvas.SetTop(tram.Ellipse, y - 6);
+                    }
+
+                    // Update text position
+                    if (tram.Text != null)
+                    {
+                        Canvas.SetLeft(tram.Text, x + 8);
+                        Canvas.SetTop(tram.Text, y - 6);
+                    }
+
+                    // Update vehicle box - POINT IS THE TOP CENTER
+                    if (drawnTramTrailGeoPoints[idx].Count >= 2)
+                    {
+                        var (plat, plon) = drawnTramTrailGeoPoints[idx][^2];
+                        var (px, py) = ConvertLatLonToCanvasXY(plat, plon);
+                        var headingDeg = CalculateAzimuth(new Point(px, py), new Point(x, y));
+                        headingDeg = (headingDeg - 180 + 360) % 360; // Manual flip rule
+
+                        if (_vehicleBoxes.TryGetValue(drawnTramIds[idx], out var box))
+                        {
+                            UpdateVehicleBoxPosition(box, new Point(x, y), headingDeg);
+                        }
+                    }
+                }
+
+                // Update trail from geo points
+                if (drawnTramTrailGeoPoints[idx].Count > 0 && drawnTramTrails[idx] != null)
+                {
+                    var pl = drawnTramTrails[idx];
+                    pl.Points.Clear();
+
+                    for (int i = 0; i < drawnTramTrailGeoPoints[idx].Count; i++)
+                    {
+                        var (lat, lon) = drawnTramTrailGeoPoints[idx][i];
+                        var (tx, ty) = ConvertLatLonToCanvasXY(lat, lon);
+                        pl.Points.Add(new Point(tx, ty));
+                    }
+
+                    // Update trail dots
+                    if (tram.TrailDots != null)
+                    {
+                        int dotIndex = 0;
+                        for (int i = 0; i < drawnTramTrailGeoPoints[idx].Count - 1 && dotIndex < tram.TrailDots.Count; i++)
+                        {
+                            var (lat, lon) = drawnTramTrailGeoPoints[idx][i];
+                            var (tx, ty) = ConvertLatLonToCanvasXY(lat, lon);
+
+                            var dot = tram.TrailDots[dotIndex];
+                            Canvas.SetLeft(dot, tx - 2.5);
+                            Canvas.SetTop(dot, ty - 2.5);
+                            dotIndex++;
+                        }
+                    }
+                }
+            }
+        }
+
+        private void UpdateActiveVehiclesPositions()
+        {
+            foreach (var kvp in activeVehicles)
+            {
+                var pt = kvp.Value;
+                if (pt == null) continue;
+
+                // Get stored lat/lon if available
+                if (_lastLatLon.TryGetValue(pt.Label, out var geo))
+                {
+                    var (x, y) = ConvertLatLonToCanvasXY(geo.lat, geo.lon);
+
+                    // Update ellipse
+                    if (pt.Ellipse != null)
+                    {
+                        Canvas.SetLeft(pt.Ellipse, x - 6);
+                        Canvas.SetTop(pt.Ellipse, y - 6);
+                    }
+
+                    // Update text
+                    if (pt.Text != null)
+                    {
+                        Canvas.SetLeft(pt.Text, x + 8);
+                        Canvas.SetTop(pt.Text, y - 6);
+                    }
+
+                    // Update speed text
+                    if (pt.Speed != null)
+                    {
+                        Canvas.SetLeft(pt.Speed, x + 8);
+                        Canvas.SetTop(pt.Speed, y + 6);
+                    }
+
+                    // Update accuracy text (the "no acc" label)
+                    if (_liveAccuracyTextById.TryGetValue(pt.Label, out var accText))
+                    {
+                        Canvas.SetLeft(accText, x + 5);
+                        Canvas.SetTop(accText, y + 20);
+                    }
+
+                    // Update vehicle box
+                    if (_vehicleBoxes.TryGetValue(pt.Label, out var box) && _lastHeadingLive.TryGetValue(pt.Label, out var heading))
+                    {
+                        UpdateVehicleBoxPosition(box, new Point(x, y), heading);
+                    }
+
+                    // Update accuracy circle if visible
+                    if (AccuracyCB?.IsChecked == true && _lastLiveAccuracyById.TryGetValue(pt.Label, out var accValue) && accValue.HasValue && accValue.Value >= 4)
+                    {
+                        // Find accuracy circle by tag
+                        var accEllipse = TileCanvas.Children.OfType<Ellipse>()
+                            .FirstOrDefault(e => e.Tag is string s && s == $"live_acc_{pt.Label}");
+
+                        if (accEllipse != null)
+                        {
+                            // Recalculate radius in pixels
+                            double mpp = MetersPerPixel(geo.lat, zoom);
+                            double radiusPx = accValue.Value / Math.Max(1e-6, mpp);
+
+                            // Update size and position
+                            accEllipse.Width = radiusPx * 2;
+                            accEllipse.Height = radiusPx * 2;
+                            Canvas.SetLeft(accEllipse, x - radiusPx);
+                            Canvas.SetTop(accEllipse, y - radiusPx);
+                        }
+                    }
+                }
+
+                // Update trail polyline from geo points
+                if (pt.TrailGeoPoints != null && pt.TrailGeoPoints.Count > 0)
+                {
+                    // Find existing polyline
+                    var trailLine = TileCanvas.Children.OfType<Polyline>()
+                        .FirstOrDefault(pl => pl.Tag is string tag && tag == $"trail_{pt.Label}");
+
+                    if (trailLine != null)
+                    {
+                        // Recalculate all points from geo coordinates
+                        trailLine.Points.Clear();
+                        foreach (var (lat, lon) in pt.TrailGeoPoints)
+                        {
+                            var (tx, ty) = ConvertLatLonToCanvasXY(lat, lon);
+                            trailLine.Points.Add(new Point(tx, ty));
+                        }
+                    }
+
+                    // Update trail dots from geo points
+                    if (pt.TrailDots != null && pt.TrailDots.Count > 0)
+                    {
+                        // Should have dots for all trail points except the last (current position)
+                        int expectedDots = Math.Max(0, pt.TrailGeoPoints.Count - 1);
+
+                        for (int i = 0; i < expectedDots && i < pt.TrailDots.Count && i < pt.TrailGeoPoints.Count; i++)
+                        {
+                            var (lat, lon) = pt.TrailGeoPoints[i];
+                            var (tx, ty) = ConvertLatLonToCanvasXY(lat, lon);
+
+                            if (i < pt.TrailDots.Count)
+                            {
+                                var dot = pt.TrailDots[i];
+                                Canvas.SetLeft(dot, tx - 2.5);
+                                Canvas.SetTop(dot, ty - 2.5);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        private void UpdateReplayVehiclesPositions()
+        {
+            foreach (var kvp in _replayVehicles)
+            {
+                var vehicle = kvp.Value;
+                if (vehicle == null) continue;
+
+                string id = kvp.Key;
+
+                // Get current geo position from replay frames
+                if (_replayGeoFrames.TryGetValue(id, out var frames) && frames.Count > 0)
+                {
+                    // Find current frame based on replay time
+                    var currentFrame = frames.LastOrDefault();
+                    if (currentFrame != default)
+                    {
+                        var (x, y) = ConvertLatLonToCanvasXY(currentFrame.lat, currentFrame.lon);
+
+                        // Update ellipse
+                        if (vehicle.Ellipse != null)
+                        {
+                            Canvas.SetLeft(vehicle.Ellipse, x - 6);
+                            Canvas.SetTop(vehicle.Ellipse, y - 6);
+                        }
+
+                        // Update text
+                        if (vehicle.Text != null)
+                        {
+                            Canvas.SetLeft(vehicle.Text, x + 8);
+                            Canvas.SetTop(vehicle.Text, y - 6);
+                        }
+
+                        // Update replay box
+                        if (_replayBoxes.TryGetValue(id, out var box))
+                        {
+                            var key = $"{id}|{currentFrame.ts.Ticks}";
+                            if (_playbackHeadingByIdAndTs.TryGetValue(key, out var heading))
+                            {
+                                UpdateVehicleBoxPosition(box, new Point(x, y), heading);
+                            }
+                        }
+                    }
+                }
+
+                // Update trail
+                if (vehicle.TrailGeoPoints != null && vehicle.TrailGeoPoints.Count > 0)
+                {
+                    var trailLine = TileCanvas.Children.OfType<Polyline>()
+                        .FirstOrDefault(pl => pl.Tag is string tag && tag == $"replay_trail_{id}");
+
+                    if (trailLine != null)
+                    {
+                        trailLine.Points.Clear();
+                        foreach (var (lat, lon) in vehicle.TrailGeoPoints)
+                        {
+                            var (tx, ty) = ConvertLatLonToCanvasXY(lat, lon);
+                            trailLine.Points.Add(new Point(tx, ty));
+                        }
+                    }
+
+                    // Update trail dots
+                    if (vehicle.TrailDots != null)
+                    {
+                        for (int i = 0; i < vehicle.TrailDots.Count && i < vehicle.TrailGeoPoints.Count; i++)
+                        {
+                            var (lat, lon) = vehicle.TrailGeoPoints[i];
+                            var (tx, ty) = ConvertLatLonToCanvasXY(lat, lon);
+                            Canvas.SetLeft(vehicle.TrailDots[i], tx - 2.5);
+                            Canvas.SetTop(vehicle.TrailDots[i], ty - 2.5);
+                        }
+                    }
+                }
+            }
+        }
+
+        private void UpdateVehicleBoxPosition(Rectangle box, Point topCenter, double headingDeg)
+        {
+            if (box == null) return;
+
+            const double boxWidth = 15.0;  // Match UpdateOrCreateBox
+            const double boxHeight = 30.0; // Match UpdateOrCreateBox
+
+            // Position: top center of the rectangle exactly at the vehicle point
+            Canvas.SetLeft(box, topCenter.X - boxWidth / 2.0);
+            Canvas.SetTop(box, topCenter.Y); // NOT minus half height - top is at the point!
+
+            // Rotation around top center (CenterY=0), with +180° offset so "point is at top"
+            double angle = (headingDeg + 180.0) % 360.0;
+            box.RenderTransform = new RotateTransform(angle, boxWidth / 2.0, 0.0);
+        }
+
+        private void UpdateSwitchZonesPositions()
+        {
+            foreach (var zone in ActivationZonesCollection.Where(z => z != null && IsSwitchZone(z)))
+            {
+                if (zone.Rectangle == null) continue;
+
+                double mppLocal = MetersPerPixel(zone.Latitude, zoom);
+                double widthPx = zone.Width / mppLocal;
+                double heightPx = zone.Height / mppLocal;
+
+                zone.Rectangle.Width = widthPx;
+                zone.Rectangle.Height = heightPx;
+
+                var (sx, sy) = ConvertLatLonToCanvasXY(zone.Latitude, zone.Longitude);
+                zone.StartPoint = new Point(sx, sy);
+
+                UpdateRectanglePositionFromStartPoint(zone);
+            }
         }
 
         private void UpdateStopsPositions()
@@ -1274,7 +1618,7 @@ namespace V2XController
                 TileCanvas.Children.Remove(tile);
             }
 
-            // This prevents double updates and improves performance
+            // DON'T call UpdateOverlayPositions here - it's called in UpdateAllOverlaysLive
         }
 
         private async Task LoadAndPlaceTileAsync(int z, int x, int y, double canvasX, double canvasY)
@@ -4136,7 +4480,8 @@ namespace V2XController
                             LastUpdate = DateTime.Now,
                             VehicleColor = tramColor,
                             TrailDots = new List<Ellipse>(),
-                            MovementFrames = new List<MovementFrame>()
+                            MovementFrames = new List<MovementFrame>(),
+                            TrailGeoPoints = new List<(double lat, double lon)>()
                         };
 
                         activeVehicles[msg.VehicleID] = newPoint;
@@ -4266,7 +4611,8 @@ namespace V2XController
                             Label = srvV2xMsg.VehicleID,
                             Ellipse = ellipse,
                             Text = text,
-                            LastUpdate = DateTime.Now
+                            LastUpdate = DateTime.Now,
+                            TrailGeoPoints = new List<(double lat, double lon)>() 
                         };
 
                         activeVehicles[srvV2xMsg.VehicleID] = newPoint;
@@ -4312,7 +4658,6 @@ namespace V2XController
         }
 
         // updating points and vehicle trails on the map
-
         private void UpdateVehicleTrail(V2XMessage msg)
         {
             var isSrv = msg.MessageType == "SRV";
@@ -4341,18 +4686,20 @@ namespace V2XController
 
             if (!activeVehicles.TryGetValue(msg.VehicleID, out var vehicle))
             {
-                var ellipse = new Ellipse { Width = 12, Height = 12, Fill = tramColor };
+                var ellipse = new Ellipse { Width = 12, Height = 12, Fill = tramColor, IsHitTestVisible = false };
                 var text = new TextBlock
                 {
                     Text = isSrv ? msg.VehicleID : (msg.VehicleID?.Length > 4 ? msg.VehicleID[^4..] : msg.VehicleID),
                     FontWeight = FontWeights.Bold,
-                    Foreground = isSrv ? Brushes.Black : tramColor
+                    Foreground = isSrv ? Brushes.Black : tramColor,
+                    IsHitTestVisible = false
                 };
                 var speedtext = new TextBlock
                 {
                     Text = "",
                     FontWeight = FontWeights.Bold,
-                    Foreground = isSrv ? Brushes.Black : tramColor
+                    Foreground = isSrv ? Brushes.Black : tramColor,
+                    IsHitTestVisible = false
                 };
 
                 TileCanvas.Children.Add(ellipse);
@@ -4366,62 +4713,91 @@ namespace V2XController
                     Speed = speedtext,
                     Text = text,
                     MovementFrames = new List<MovementFrame>(),
-                    TrailDots = new List<Ellipse>()
+                    TrailDots = new List<Ellipse>(),
+                    TrailGeoPoints = new List<(double lat, double lon)>() // Initialize geo trail
                 };
                 activeVehicles[msg.VehicleID] = vehicle;
             }
 
+            // Add geo coordinates to trail FIRST (before converting to canvas)
+            vehicle.TrailGeoPoints ??= new List<(double lat, double lon)>();
+            vehicle.TrailGeoPoints.Add((msg.Latitude, msg.Longitude));
+
+            // Cap geo points to at most (_maxTrailLength + 1) points => _maxTrailLength segments
+            while (vehicle.TrailGeoPoints.Count > _maxTrailLength + 1)
+                vehicle.TrailGeoPoints.RemoveAt(0);
+
+            // Convert current position to canvas
             var (x, y) = ConvertLatLonToCanvasXY(msg.Latitude, msg.Longitude);
 
+            // Keep MovementFrames for compatibility (but we'll use TrailGeoPoints for rendering)
             var frame = new MovementFrame { Timestamp = msg.Timestamp.TimeOfDay, Position = new Point(x, y) };
             vehicle.MovementFrames ??= new List<MovementFrame>();
             vehicle.MovementFrames.Add(frame);
-
-            // Cap frames to at most (_maxTrailLength + 1) points => _maxTrailLength segments
             while (vehicle.MovementFrames.Count > _maxTrailLength + 1)
                 vehicle.MovementFrames.RemoveAt(0);
 
             vehicle.TrailDots ??= new List<Ellipse>();
 
-            // Create a new dot at the previous frame (if any and not SRV)
-            if (vehicle.MovementFrames.Count > 1 && !isSrv)
+            // Remove old trail dots completely and recreate from geo points
+            foreach (var dot in vehicle.TrailDots.ToList())
             {
-                var prevFrame = vehicle.MovementFrames[^2];
-                var trailDot = new Ellipse { Width = 5, Height = 5, Fill = Brushes.Black, IsHitTestVisible = false };
-                Canvas.SetLeft(trailDot, prevFrame.Position.X - 2.5);
-                Canvas.SetTop(trailDot, prevFrame.Position.Y - 2.5);
-                vehicle.TrailDots.Add(trailDot);
-                TileCanvas.Children.Add(trailDot);
-                Panel.SetZIndex(trailDot, 1001);
+                TileCanvas.Children.Remove(dot);
             }
+            vehicle.TrailDots.Clear();
 
-            // Cap dots to _maxTrailLength
-            while (vehicle.TrailDots.Count > _maxTrailLength)
+            // Create dots from geo points (skip the last point which is current position)
+            if (!isSrv && vehicle.TrailGeoPoints.Count > 1)
             {
-                TileCanvas.Children.Remove(vehicle.TrailDots[0]);
-                vehicle.TrailDots.RemoveAt(0);
+                for (int i = 0; i < vehicle.TrailGeoPoints.Count - 1; i++)
+                {
+                    var (lat, lon) = vehicle.TrailGeoPoints[i];
+                    var (dotX, dotY) = ConvertLatLonToCanvasXY(lat, lon);
+
+                    var trailDot = new Ellipse
+                    {
+                        Width = 5,
+                        Height = 5,
+                        Fill = Brushes.Black,
+                        IsHitTestVisible = false,
+                        Tag = $"trail_dot_{msg.VehicleID}_{i}" // Add tag for tracking
+                    };
+                    Canvas.SetLeft(trailDot, dotX - 2.5);
+                    Canvas.SetTop(trailDot, dotY - 2.5);
+                    vehicle.TrailDots.Add(trailDot);
+                    TileCanvas.Children.Add(trailDot);
+                    Panel.SetZIndex(trailDot, 1001);
+                }
             }
 
             UpdateVehicleCanvasPosition(vehicle, new Point(x, y), tramColor, isSrv, msg.VehicleID, msg.Speed);
 
             if (!isSrv)
             {
-                // Rebuild the tram trail polyline from capped frames
+                // Remove old trail polyline
                 var oldLines = TileCanvas.Children.OfType<Polyline>()
-                    .Where(l => l.Tag is string && (string)l.Tag == $"tram_trail_{msg.VehicleID}")
+                    .Where(l => l.Tag is string tag && tag == $"trail_{msg.VehicleID}")
                     .ToList();
                 foreach (var l in oldLines) TileCanvas.Children.Remove(l);
 
-                if (vehicle.MovementFrames.Count > 1)
+                // Create NEW polyline from geo points (not MovementFrames!)
+                if (vehicle.TrailGeoPoints.Count > 1)
                 {
                     var polyline = new Polyline
                     {
                         Stroke = tramColor,
                         StrokeThickness = 2,
-                        Tag = $"tram_trail_{msg.VehicleID}"
+                        Tag = $"trail_{msg.VehicleID}", // Changed tag to match UpdateActiveVehiclesPositions
+                        IsHitTestVisible = false
                     };
-                    foreach (var mf in vehicle.MovementFrames)
-                        polyline.Points.Add(mf.Position);
+
+                    // Convert all geo points to canvas coordinates
+                    foreach (var (lat, lon) in vehicle.TrailGeoPoints)
+                    {
+                        var (px, py) = ConvertLatLonToCanvasXY(lat, lon);
+                        polyline.Points.Add(new Point(px, py));
+                    }
+
                     TileCanvas.Children.Add(polyline);
                     Panel.SetZIndex(polyline, 999);
                 }
@@ -5619,12 +5995,18 @@ namespace V2XController
 
         private Point CanvasPixelsToLatLon(Point pixelPoint, double centerLat, double centerLon, int zoom)
         {
-            // Use the actual loaded top-left tile anchor
-            double tileX = _currentTopLeftTileX + (pixelPoint.X / TilePixelSize);
-            double tileY = _currentTopLeftTileY + (pixelPoint.Y / TilePixelSize);
+            // Convert canvas pixel to world pixel
+            double worldX = pixelPoint.X + cameraX;
+            double worldY = pixelPoint.Y + cameraY;
 
+            // Convert world pixel to tile coordinates (fractional)
+            double tileX = worldX / TileSize;
+            double tileY = worldY / TileSize;
+
+            // Convert tile coordinates to lat/lon
             double lon = TileXToLon(tileX, zoom);
             double lat = TileYToLat(tileY, zoom);
+
             return new Point(lon, lat);
         }
 
