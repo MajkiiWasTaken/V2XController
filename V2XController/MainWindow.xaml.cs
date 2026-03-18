@@ -238,15 +238,11 @@ namespace V2XController
         // u ostatních fieldů
         private double _manualCamSpeedKmh = 0.0;
 
-        // fields – přidej k ostatním timerům
         private DispatcherTimer _srvTimer;
 
         private bool _isConnected = false;
         private bool _playbackLoaded = false;
 
-
-
-        // pod stávajícími poli pro drawnTram*
         private double?[] drawnTramLat = new double?[2];
         private double?[] drawnTramLon = new double?[2];
         private List<(double lat, double lon)>[] drawnTramTrailGeoPoints = new List<(double lat, double lon)>[2]
@@ -360,10 +356,8 @@ namespace V2XController
         private bool _suspendSwitchZoneLiveSort;
         private ActivationZone _pendingNewSwitchZone;
 
-        // Add near other fields
         private bool _drawToSwitchZones;
 
-        // add near other fields
         private readonly HashSet<ActivationZone> _switchRows = new();
 
         // helper: current drawing/adding mode comes from radio buttons
@@ -426,6 +420,11 @@ namespace V2XController
         private double mapOffsetY = 0;
         private int baseTileX;
         private int baseTileY;
+
+        private int cameraX = 0;  // Camera position in world pixels
+        private int cameraY = 0;
+        private Point lastMousePos;
+        private bool isDragging = false;
 
         private readonly Dictionary<string, double> _playbackAccuracyByIdAndTs = new();
 
@@ -554,7 +553,34 @@ namespace V2XController
 
             //loading map tiles on the grid
             var (centerX, centerY) = LatLonToTileXY(latitude, longitude, zoom);
-            _ = LoadTilesSmoothAsync(centerX - TileCount / 2, centerY - TileCount / 2);
+            cameraX = (centerX - TileCount / 2) * TileSize;
+            cameraY = (centerY - TileCount / 2) * TileSize;
+
+            // Load map synchronously on startup (blocking to ensure it's visible immediately)
+            Loaded += async (s, e) =>
+            {
+                // Initialize camera and load tiles FIRST
+                await LoadTilesInitialAsync();
+
+                _ = EnsureLocalAreaAltitudeAsync(force: true);
+
+                Keyboard.Focus(this);
+                EnsureDefaultRadiusSelection();
+                DrawRadiusCircle();
+                UpdateUiEnabledState();
+
+                // Load OSM tram stops and draw them
+                try
+                {
+                    stops = await LoadStopsFromOSM();
+                    Console.WriteLine($"[STOPS] Loaded {stops.Count} tram stops from OSM.");
+                    DrawStopsOnCanvasSafe();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[STOPS] Failed to load stops: {ex.Message}");
+                }
+            };
 
 
             //Mouse wheel events for zooming
@@ -653,7 +679,6 @@ namespace V2XController
                 ComPortsComboBox.SelectedIndex = 0;
         }
 
-        // add inside class MainWindow (near other small helpers)
         private void EnsureDefaultRadiusSelection()
         {
             if (RadiusComboBox == null) return;
@@ -691,13 +716,19 @@ namespace V2XController
         //Position on the map
         public (double x, double y) ConvertLatLonToCanvasXY(double lat, double lon)
         {
-            // fractional tile coords
+            // Convert lat/lon to fractional tile coordinates
             double u = LonToTileX(lon, zoom);
             double v = LatToTileY(lat, zoom);
 
-            double x = (u - _currentTopLeftTileX) * TilePixelSize;
-            double y = (v - _currentTopLeftTileY) * TilePixelSize;
-            return (x, y);
+            // Convert tile coords to world pixels
+            double worldX = u * TileSize;
+            double worldY = v * TileSize;
+
+            // Subtract camera position to get canvas coordinates
+            double canvasX = worldX - cameraX;
+            double canvasY = worldY - cameraY;
+
+            return (canvasX, canvasY);
         }
 
 
@@ -723,95 +754,23 @@ namespace V2XController
                 _currentTopLeftTileX = startX;
                 _currentTopLeftTileY = startY;
 
+                // Initialize camera position based on tile coordinates
+                cameraX = startX * TileSize;
+                cameraY = startY * TileSize;
+
                 isDrawing = false;
                 currentRect = null;
                 _currentMapRectangle = null;
 
-                var order = GenerateSpiralOrder(TileCount);
-                var newImages = new List<Image>(TileCount * TileCount);
-                var tasks = new List<Task>();
+                // Use progressive rendering
+                RenderTilesProgressive();
 
-                for (int idx = 0; idx < order.Count; idx++)
-                {
-                    if (ct.IsCancellationRequested) break;
-
-                    var (offX, offY) = order[idx];
-                    int tileX = startX + (offX + TileCount / 2);
-                    int tileY = startY + (offY + TileCount / 2);
-
-                    // vizuální pozice se zohledněním offsetu
-                    double canvasX = (offX + TileCount / 2) * TilePixelSize + offsetX;
-                    double canvasY = (offY + TileCount / 2) * TilePixelSize + offsetY;
-
-                    var task = Task.Run(async () =>
-                    {
-                        try
-                        {
-                            await _tileSemaphore.WaitAsync(ct).ConfigureAwait(false);
-                            var bmp = await FetchTileAsync(zoom, tileX, tileY, ct).ConfigureAwait(false);
-
-                            await Dispatcher.InvokeAsync(() =>
-                            {
-                                if (ct.IsCancellationRequested) return;
-
-                                Image img = CreateTileImage(bmp);
-                                Canvas.SetLeft(img, canvasX);
-                                Canvas.SetTop(img, canvasY);
-                                TileCanvas.Children.Add(img);
-                                newImages.Add(img);
-                            });
-                        }
-                        catch (OperationCanceledException) { }
-                        catch (Exception ex)
-                        {
-                            Console.WriteLine($"Load tile {zoom}/{tileX}/{tileY} failed: {ex.Message}");
-                        }
-                        finally
-                        {
-                            _tileSemaphore.Release();
-                        }
-                    }, ct);
-
-                    tasks.Add(task);
-                }
-
-                await Task.WhenAll(tasks).ConfigureAwait(false);
+                await Task.Delay(100); // Allow tiles to load
 
                 if (!ct.IsCancellationRequested)
                 {
                     await Dispatcher.InvokeAsync(() =>
                     {
-                        var toRemove = TileCanvas.Children
-                            .OfType<Image>()
-                            .Where(img => !newImages.Contains(img))
-                            .ToList();
-
-                        foreach (var r in toRemove)
-                            TileCanvas.Children.Remove(r);
-
-                        // Overlayy zpět nahoru
-                        if (!TileCanvas.Children.Contains(connectionLine)) TileCanvas.Children.Add(connectionLine);
-
-                        foreach (var pt in points)
-                        {
-                            if (!TileCanvas.Children.Contains(pt.Ellipse)) TileCanvas.Children.Add(pt.Ellipse);
-                            if (!TileCanvas.Children.Contains(pt.Text)) TileCanvas.Children.Add(pt.Text);
-                        }
-
-                        foreach (var rect in mapRectangles)
-                        {
-                            if (!TileCanvas.Children.Contains(rect.Shape)) TileCanvas.Children.Add(rect.Shape);
-                            Panel.SetZIndex(rect.Shape, 100);
-                        }
-
-                        foreach (var pt in points)
-                        {
-                            Panel.SetZIndex(pt.Ellipse, 200);
-                            Panel.SetZIndex(pt.Text, 201);
-                        }
-
-                        Panel.SetZIndex(connectionLine, 150);
-
                         ReprojectAllZonesOnMapChange();
                         ReprojectDrawnTramsOnMapChange();
                         ReprojectActiveVehiclesOnMapChange();
@@ -1152,60 +1111,261 @@ namespace V2XController
         {
             if (e.ChangedButton == MouseButton.Middle)
             {
-                middleMousePanStart = e.GetPosition(this);
-                isMiddleMousePanning = true;
+                isDragging = true;
+                lastMousePos = e.GetPosition(TileCanvas);
                 TileCanvas.CaptureMouse();
                 e.Handled = true;
             }
         }
 
+
         // MouseMove - continuous pan and tile loading
         private void TileCanvas_MouseMove_MiddlePan(object sender, MouseEventArgs e)
         {
-            if (!isMiddleMousePanning) return;
+            if (!isDragging) return;
 
-            Point current = e.GetPosition(this);
-            Vector delta = current - middleMousePanStart;
+            Point currentPos = e.GetPosition(TileCanvas);
 
-            tileOffsetX += delta.X;
-            tileOffsetY += delta.Y;
+            double dx = currentPos.X - lastMousePos.X;
+            double dy = currentPos.Y - lastMousePos.Y;
 
-            // Posun všech dlaždic o aktuální delta
-            foreach (var img in TileCanvas.Children.OfType<Image>())
-            {
-                Canvas.SetLeft(img, Canvas.GetLeft(img) + delta.X);
-                Canvas.SetTop(img, Canvas.GetTop(img) + delta.Y);
-            }
+            // Update camera position (inverted because we're moving the world)
+            cameraX -= (int)dx;
+            cameraY -= (int)dy;
 
-            // Overlay body
-            MoveOverlays(delta.X, delta.Y);
+            lastMousePos = currentPos;
 
-            middleMousePanStart = current;
+            // Update stops positions IMMEDIATELY (before tile rendering)
+            UpdateStopsPositions();
 
-            // Pokud offset překročil velikost dlaždice, posuň top-left index a resetni offset
-            int shiftX = 0, shiftY = 0;
-
-            if (Math.Abs(tileOffsetX) >= TilePixelSize)
-            {
-                shiftX = (int)(tileOffsetX / TilePixelSize);
-                _currentTopLeftTileX -= shiftX;
-                tileOffsetX -= shiftX * TilePixelSize;
-            }
-
-            if (Math.Abs(tileOffsetY) >= TilePixelSize)
-            {
-                shiftY = (int)(tileOffsetY / TilePixelSize);
-                _currentTopLeftTileY -= shiftY;
-                tileOffsetY -= shiftY * TilePixelSize;
-            }
-
-            // Načíst nové dlaždice jen pokud posun o celou dlaždici
-            if (shiftX != 0 || shiftY != 0)
-            {
-                _ = LoadTilesSmoothAsync(_currentTopLeftTileX, _currentTopLeftTileY);
-            }
+            // Then render tiles with new camera position
+            RenderTilesProgressive();
 
             e.Handled = true;
+        }
+
+        private void UpdateStopsPositions()
+        {
+            if (stops == null || stops.Count == 0 || TileCanvas == null) return;
+
+            // Find all existing stop visuals
+            var stopMarkers = TileCanvas.Children.OfType<Ellipse>()
+                .Where(el => Equals(el.Tag, "Stop"))
+                .ToList();
+
+            var stopLabels = TileCanvas.Children.OfType<TextBlock>()
+                .Where(el => Equals(el.Tag, "Stop"))
+                .ToList();
+
+            // If we don't have the right number of stops, redraw everything
+            if (stopMarkers.Count != stops.Count || stopLabels.Count != stops.Count)
+            {
+                DrawStopsOnCanvasSafe();
+                return;
+            }
+
+            // Update positions using the camera-aware conversion
+            for (int i = 0; i < stops.Count; i++)
+            {
+                var stop = stops[i];
+                var (x, y) = ConvertLatLonToCanvasXY(stop.Latitude, stop.Longitude);
+
+                // Update marker position
+                if (i < stopMarkers.Count)
+                {
+                    Canvas.SetLeft(stopMarkers[i], x - 4);
+                    Canvas.SetTop(stopMarkers[i], y - 4);
+                }
+
+                // Update label position
+                if (i < stopLabels.Count)
+                {
+                    Canvas.SetLeft(stopLabels[i], x + 6);
+                    Canvas.SetTop(stopLabels[i], y - 6);
+                }
+            }
+        }
+
+
+        private void RenderTilesProgressive()
+        {
+            if (TileCanvas.ActualWidth == 0 || TileCanvas.ActualHeight == 0) return;
+
+            int tileSize = TileSize;
+
+            // Calculate how many tiles we need to cover the canvas + buffer
+            int columns = (int)Math.Ceiling(TileCanvas.ActualWidth / tileSize) + 2;
+            int rows = (int)Math.Ceiling(TileCanvas.ActualHeight / tileSize) + 2;
+
+            // Calculate starting tile indices
+            int startTileX = (int)Math.Floor((double)cameraX / tileSize);
+            int startTileY = (int)Math.Floor((double)cameraY / tileSize);
+
+            // Calculate local offset within the tile
+            int localOffsetX = Mod(cameraX, tileSize);
+            int localOffsetY = Mod(cameraY, tileSize);
+
+            double drawOffsetX = -localOffsetX;
+            double drawOffsetY = -localOffsetY;
+
+            // Keep track of which tiles we're rendering
+            var currentTiles = new HashSet<(int z, int x, int y)>();
+            var tilesToUpdate = new List<(Image img, double x, double y)>();
+
+            // First pass: Update existing tiles and mark what we need
+            for (int row = 0; row < rows; row++)
+            {
+                for (int col = 0; col < columns; col++)
+                {
+                    int tileX = startTileX + col;
+                    int tileY = startTileY + row;
+
+                    tileX = WrapTileX(tileX, zoom);
+                    tileY = ClampTileY(tileY, zoom);
+
+                    var tileKey = (zoom, tileX, tileY);
+                    currentTiles.Add(tileKey);
+
+                    double x = drawOffsetX + col * tileSize;
+                    double y = drawOffsetY + row * tileSize;
+
+                    // Check if this tile already exists
+                    var existingTile = TileCanvas.Children
+                        .OfType<Image>()
+                        .FirstOrDefault(img =>
+                        {
+                            var tag = img.Tag as (int z, int x, int y)?;
+                            return tag.HasValue && tag.Value == tileKey;
+                        });
+
+                    if (existingTile != null)
+                    {
+                        // Update position immediately
+                        tilesToUpdate.Add((existingTile, x, y));
+                    }
+                    else
+                    {
+                        // Load new tile asynchronously (don't await)
+                        _ = LoadAndPlaceTileAsync(zoom, tileX, tileY, x, y);
+                    }
+                }
+            }
+
+            // Update all existing tile positions at once (faster)
+            foreach (var (img, x, y) in tilesToUpdate)
+            {
+                Canvas.SetLeft(img, x);
+                Canvas.SetTop(img, y);
+            }
+
+            // Remove tiles that are no longer visible (immediate cleanup)
+            var tilesToRemove = TileCanvas.Children
+                .OfType<Image>()
+                .Where(img =>
+                {
+                    var tag = img.Tag as (int z, int x, int y)?;
+                    if (!tag.HasValue) return false;
+                    return !currentTiles.Contains(tag.Value);
+                })
+                .ToList();
+
+            foreach (var tile in tilesToRemove)
+            {
+                TileCanvas.Children.Remove(tile);
+            }
+
+            // This prevents double updates and improves performance
+        }
+
+        private async Task LoadAndPlaceTileAsync(int z, int x, int y, double canvasX, double canvasY)
+        {
+            try
+            {
+                await _tileSemaphore.WaitAsync();
+
+                // Check if tile already exists (race condition check)
+                var existing = TileCanvas.Children
+                    .OfType<Image>()
+                    .FirstOrDefault(img =>
+                    {
+                        var tag = img.Tag as (int z, int x, int y)?;
+                        return tag.HasValue && tag.Value == (z, x, y);
+                    });
+
+                if (existing != null)
+                {
+                    // Tile already loaded, just update position
+                    await Dispatcher.InvokeAsync(() =>
+                    {
+                        Canvas.SetLeft(existing, canvasX);
+                        Canvas.SetTop(existing, canvasY);
+                    });
+                    return;
+                }
+
+                var bmp = await FetchTileAsync(z, x, y, CancellationToken.None);
+
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    // Double-check tile is still needed
+                    int currentStartTileX = (int)Math.Floor((double)cameraX / TileSize);
+                    int currentStartTileY = (int)Math.Floor((double)cameraY / TileSize);
+                    int columns = (int)Math.Ceiling(TileCanvas.ActualWidth / TileSize) + 2;
+                    int rows = (int)Math.Ceiling(TileCanvas.ActualHeight / TileSize) + 2;
+
+                    bool inRange = x >= currentStartTileX && x < currentStartTileX + columns &&
+                                  y >= currentStartTileY && y < currentStartTileY + rows;
+
+                    if (!inRange)
+                    {
+                        return; // Tile no longer needed
+                    }
+
+                    // Check one more time if someone else added it
+                    var doubleCheck = TileCanvas.Children
+                        .OfType<Image>()
+                        .FirstOrDefault(img =>
+                        {
+                            var tag = img.Tag as (int z, int x, int y)?;
+                            return tag.HasValue && tag.Value == (z, x, y);
+                        });
+
+                    if (doubleCheck != null)
+                    {
+                        Canvas.SetLeft(doubleCheck, canvasX);
+                        Canvas.SetTop(doubleCheck, canvasY);
+                        return;
+                    }
+
+                    Image img = CreateTileImage(bmp);
+                    img.Tag = (z, x, y); // Tag for tracking
+                    Canvas.SetLeft(img, canvasX);
+                    Canvas.SetTop(img, canvasY);
+                    Panel.SetZIndex(img, 0); // Tiles at bottom
+
+                    // Insert at beginning to keep under overlays
+                    TileCanvas.Children.Insert(0, img);
+                });
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Failed to load tile {z}/{x}/{y}: {ex.Message}");
+            }
+            finally
+            {
+                _tileSemaphore.Release();
+            }
+        }
+
+        private void UpdateOverlayPositions()
+        {
+            // Stops are updated separately in MouseMove for better performance
+            // UpdateStopsPositions();
+
+            // Update other overlays
+            ReprojectAllZonesOnMapChange();
+            ReprojectActiveVehiclesOnMapChange();
+            ReprojectReplayOnMapChange();
         }
 
         //moving overlays
@@ -1280,23 +1440,30 @@ namespace V2XController
         {
             if (e.ChangedButton != MouseButton.Middle) return;
 
-            isMiddleMousePanning = false;
+            isDragging = false;
             TileCanvas.ReleaseMouseCapture();
 
-            // Logický střed mapy podle aktuálních dlaždic
-            var canvasCenter = new Point(CanvasSize / 2.0, CanvasSize / 2.0);
-            var lonlat = CanvasPixelsToLatLon(canvasCenter, latitude, longitude, zoom);
-            SetMapCenter(lat: lonlat.Y, lon: lonlat.X, updateTextBoxes: true);
+            // Update logical map center based on camera position
+            int centerWorldX = cameraX + (int)(TileCanvas.ActualWidth / 2);
+            int centerWorldY = cameraY + (int)(TileCanvas.ActualHeight / 2);
 
-            // Načti aktuální dlaždice
-            var (centerX, centerY) = LatLonToTileXY(latitude, longitude, zoom);
-            await LoadTilesSmoothAsync(centerX - TileCount / 2, centerY - TileCount / 2);
+            // Convert world pixels back to tile coordinates
+            int centerTileX = (int)Math.Floor((double)centerWorldX / TileSize);
+            int centerTileY = (int)Math.Floor((double)centerWorldY / TileSize);
 
-            // Reproject overlaye
+            // Convert tile coordinates to lat/lon
+            double lon = TileXToLon(centerTileX + 0.5, zoom);
+            double lat = TileYToLat(centerTileY + 0.5, zoom);
+
+            SetMapCenter(lat: lat, lon: lon, updateTextBoxes: true);
+
+            // Reproject overlays
             ReprojectAllZonesOnMapChange();
             ReprojectActiveVehiclesOnMapChange();
             ReprojectReplayOnMapChange();
             await BringAllOverlaysToFrontSafeAsync();
+
+            e.Handled = true;
         }
 
 
@@ -1333,7 +1500,17 @@ namespace V2XController
             }
         }
 
+        private async Task LoadTilesInitialAsync()
+        {
+            var (centerX, centerY) = LatLonToTileXY(latitude, longitude, zoom);
+            _currentTopLeftTileX = centerX - TileCount / 2;
+            _currentTopLeftTileY = centerY - TileCount / 2;
+            cameraX = _currentTopLeftTileX * TileSize;
+            cameraY = _currentTopLeftTileY * TileSize;
 
+            RenderTilesProgressive();
+            await Task.Delay(200); // Give tiles time to load
+        }
 
         private async Task HandleTileShiftAsync()
         {
@@ -5506,7 +5683,7 @@ namespace V2XController
         {
             if (TileCanvas == null) return;
 
-            TileCanvas.Dispatcher.Invoke(() =>
+            Dispatcher.Invoke(() =>
             {
                 if (stops == null || stops.Count == 0)
                     return;
@@ -6739,7 +6916,6 @@ namespace V2XController
                 drawnTramIds[1] = "0000001111";
         }
 
-        // Úprava výběru přehrávacího souboru – přidej .camrec
         private void btnPlaybackFile_Click(object sender, RoutedEventArgs e)
         {
             var dlg = new Microsoft.Win32.OpenFileDialog
@@ -6889,7 +7065,6 @@ namespace V2XController
 
 
 
-        // Add this helper anywhere in the class (e.g., near other small helpers)
         private void UpdateTimerLabel()
         {
             try
@@ -7534,7 +7709,6 @@ namespace V2XController
         }
 
 
-        // Add helper to fully clear playback trams from canvas and state
         private void ClearPlaybackTramsFromCanvas()
         {
             // existing drawnTrams cleanup (kept)
@@ -7610,7 +7784,6 @@ namespace V2XController
             _playbackAccuracyByIdAndTs.Clear();
         }
 
-        // Add helper to stop playback and reset timeline + visuals
         // Stop completely (button Stop replay or programmatic stop)
         private void StopPlaybackAndReset()
         {
@@ -10324,6 +10497,17 @@ namespace V2XController
 
             return false;
         }
+
+        private int Mod(int a, int b)
+        {
+            int r = a % b;
+            if (r < 0)
+            {
+                r += b;
+            }
+            return r;
+        }
+
     }
 }
 
