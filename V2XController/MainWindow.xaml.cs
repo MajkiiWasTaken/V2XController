@@ -1270,10 +1270,26 @@ namespace V2XController
 
         private void UpdateActiveVehiclesPositions()
         {
+            var now = DateTime.Now;
+
             foreach (var kvp in activeVehicles)
             {
                 var pt = kvp.Value;
                 if (pt == null) continue;
+
+                // Skip vehicles that are being cleaned up (older than 25 seconds - give 5s grace before removal)
+                if ((now - pt.LastUpdate).TotalSeconds > 25)
+                {
+                    // Hide trail for inactive vehicles
+                    var trailLine = TileCanvas.Children.OfType<Polyline>()
+                        .FirstOrDefault(pl => pl.Tag is string tag && tag == $"trail_{pt.Label}");
+                    if (trailLine != null)
+                    {
+                        trailLine.Visibility = Visibility.Collapsed;
+                    }
+
+                    // Still update position but don't show trail
+                }
 
                 // Get stored lat/lon if available
                 if (_lastLatLon.TryGetValue(pt.Label, out var geo))
@@ -1336,8 +1352,9 @@ namespace V2XController
                     }
                 }
 
-                // Update trail polyline from geo points
-                if (pt.TrailGeoPoints != null && pt.TrailGeoPoints.Count > 0)
+                // Update trail polyline from geo points - ONLY for active vehicles
+                bool isActive = (now - pt.LastUpdate).TotalSeconds <= 25;
+                if (isActive && pt.TrailGeoPoints != null && pt.TrailGeoPoints.Count > 0)
                 {
                     // Find existing polyline
                     var trailLine = TileCanvas.Children.OfType<Polyline>()
@@ -1345,6 +1362,8 @@ namespace V2XController
 
                     if (trailLine != null)
                     {
+                        trailLine.Visibility = Visibility.Visible;
+
                         // Recalculate all points from geo coordinates
                         trailLine.Points.Clear();
                         foreach (var (lat, lon) in pt.TrailGeoPoints)
@@ -3090,7 +3109,7 @@ namespace V2XController
 
             var toRemoveFromTable = TramTable
                 .Where(t => (now - t.LastMessageTimestamp)?.TotalSeconds > TableRowTimeout.TotalSeconds)
-                .ToList(); ;
+                .ToList();
 
             foreach (var item in toRemoveFromTable)
             {
@@ -3102,21 +3121,14 @@ namespace V2XController
                 var fullId = activeVehicles.Keys.FirstOrDefault(k => k.EndsWith(item.VehicleId));
                 if (fullId != null && activeVehicles.TryGetValue(fullId, out var vehicle))
                 {
-                    // if not already cleaning up, start gradual trail removal (2s per segment)
-                    if (!vehicleTrailCleanupTokens.ContainsKey(fullId))
-                    {
-                        var cts = new CancellationTokenSource();
-                        vehicleTrailCleanupTokens[fullId] = cts;
-                        _ = RemoveTrailGradually(fullId, vehicle, cts.Token);
-                    }
-
-                    // Do NOT remove the table row here; it will be removed in RemoveVehicleCompletely
+                    // Remove immediately after 30 seconds (no gradual cleanup)
+                    RemoveVehicleCompletely(fullId, vehicle);
+                    TramTable.Remove(item);
                     continue;
                 }
 
-                // No visual exists anymore – allow a small grace (2s) before removing the row
-                if (item.SecondsSinceLastCam > TableRowTimeout.TotalSeconds + 2)
-                    TramTable.Remove(item);
+                // No visual exists anymore – remove the row
+                TramTable.Remove(item);
             }
 
             for (int i = 0; i < drawnTrams.Length; i++)
@@ -3135,27 +3147,17 @@ namespace V2XController
                 }
                 else
                 {
-                    // existing non-recorded cleanup ...
-                    if ((now - tram.LastUpdate).TotalSeconds > 10 && drawnTramTrails[i] != null && drawnTramTrails[i].Points.Count > 0)
-                    {
-                        string tramKey = $"drawn_{i}_trail";
-                        if (!vehicleTrailCleanupTokens.ContainsKey(tramKey))
-                        {
-                            var cts = new CancellationTokenSource();
-                            vehicleTrailCleanupTokens[tramKey] = cts;
-                            _ = RemoveDrawnTramTrailGradually(i, tram, cts.Token);
-                        }
-                    }
-
-                    if ((now - tram.LastUpdate).TotalSeconds > 23)
+                    // Remove after 30 seconds
+                    if ((now - tram.LastUpdate).TotalSeconds > 30)
                     {
                         RemoveDrawnTramCompletely(i, tram);
                     }
                 }
             }
 
+            // Remove live CAM vehicles after 30 seconds
             var toRemove = activeVehicles
-                .Where(kvp => (now - kvp.Value.LastUpdate).TotalSeconds > 10)
+                .Where(kvp => (now - kvp.Value.LastUpdate).TotalSeconds > 30)
                 .Select(kvp => kvp.Key)
                 .ToList();
 
@@ -3164,112 +3166,86 @@ namespace V2XController
                 if (!activeVehicles.TryGetValue(vehicleId, out var vehicle))
                     continue;
 
+                // Skip SRV (RSU) - they can stay longer
                 if (vehicle.Ellipse?.Tag?.ToString() == "Srv")
                     continue;
 
-                bool isTram = vehicle.Ellipse?.Tag?.ToString() == "Tram";
-                if (!isTram)
-                {
-                    RemoveVehicleCompletely(vehicleId, vehicle);
-                    continue;
-                }
-
-                double speed = -1;
-                if (vehicle.Speed != null && double.TryParse(vehicle.Speed.Text.Replace("km/h", "").Trim(), out double parsedSpeed))
-                    speed = parsedSpeed;
-
-                if (vehicleTrailCleanupTokens.ContainsKey(vehicleId))
-                    continue;
-
-                if (speed == 0 || speed < 0)
-                {
-                    var cts = new CancellationTokenSource();
-                    vehicleTrailCleanupTokens[vehicleId] = cts;
-                    _ = RemoveTrailGradually(vehicleId, vehicle, cts.Token);
-                }
-                else
-                {
-                    RemoveVehicleCompletely(vehicleId, vehicle);
-                }
+                // Remove completely (including trail)
+                RemoveVehicleCompletely(vehicleId, vehicle);
             }
         }
 
 
         private void RemoveVehicleCompletely(string vehicleId, MapPoint vehicle)
         {
-            Dispatcher.Invoke(() =>
-            {
+            if (vehicle == null) return;
+
+            // Remove ellipse
+            if (vehicle.Ellipse != null && TileCanvas.Children.Contains(vehicle.Ellipse))
                 TileCanvas.Children.Remove(vehicle.Ellipse);
+
+            // Remove text
+            if (vehicle.Text != null && TileCanvas.Children.Contains(vehicle.Text))
                 TileCanvas.Children.Remove(vehicle.Text);
-                if (vehicle.Speed != null)
-                    TileCanvas.Children.Remove(vehicle.Speed);
 
-                var linesToRemove = TileCanvas.Children.OfType<Polyline>()
-                    .Where(pl => pl.Tag != null && string.Equals(pl.Tag.ToString(), $"tram_trail_{vehicleId}", StringComparison.OrdinalIgnoreCase))
-                    .ToList();
+            // Remove speed text
+            if (vehicle.Speed != null && TileCanvas.Children.Contains(vehicle.Speed))
+                TileCanvas.Children.Remove(vehicle.Speed);
 
-                foreach (var line in linesToRemove)
-                    TileCanvas.Children.Remove(line);
+            // Remove accuracy text
+            if (_liveAccuracyTextById.TryGetValue(vehicleId, out var accText))
+            {
+                if (TileCanvas.Children.Contains(accText))
+                    TileCanvas.Children.Remove(accText);
+                _liveAccuracyTextById.Remove(vehicleId);
+            }
 
-                if (vehicle.TrailDots != null)
+            // Remove trail polyline
+            var trailLines = TileCanvas.Children.OfType<Polyline>()
+                .Where(pl => pl.Tag is string tag && tag == $"trail_{vehicleId}")
+                .ToList();
+            foreach (var line in trailLines)
+                TileCanvas.Children.Remove(line);
+
+            // Remove trail dots
+            if (vehicle.TrailDots != null)
+            {
+                foreach (var dot in vehicle.TrailDots.ToList())
                 {
-                    foreach (var dot in vehicle.TrailDots)
+                    if (TileCanvas.Children.Contains(dot))
                         TileCanvas.Children.Remove(dot);
-                    vehicle.TrailDots.Clear();
                 }
+                vehicle.TrailDots.Clear();
+            }
 
-                // Remove any live accuracy ellipse for this vehicle
-                var accToRemove = TileCanvas.Children.OfType<Ellipse>()
-                    .Where(e => e.Tag is string s && s.Equals($"live_acc_{vehicleId}", StringComparison.OrdinalIgnoreCase))
-                    .ToList();
-                foreach (var e in accToRemove)
-                    TileCanvas.Children.Remove(e);
+            // Remove vehicle box
+            if (_vehicleBoxes.TryGetValue(vehicleId, out var box))
+            {
+                if (TileCanvas.Children.Contains(box))
+                    TileCanvas.Children.Remove(box);
+                _vehicleBoxes.Remove(vehicleId);
+            }
 
-                activeVehicles.Remove(vehicleId);
+            // Remove accuracy circle
+            var accCircles = TileCanvas.Children.OfType<Ellipse>()
+                .Where(e => e.Tag is string s && s == $"live_acc_{vehicleId}")
+                .ToList();
+            foreach (var circle in accCircles)
+                TileCanvas.Children.Remove(circle);
 
-                if (vehicleTrailCleanupTokens.TryGetValue(vehicleId, out var cts))
-                {
-                    cts.Cancel();
-                    cts.Dispose();
-                    vehicleTrailCleanupTokens.Remove(vehicleId);
-                }
+            // Remove from dictionaries
+            activeVehicles.Remove(vehicleId);
+            _lastLatLon.Remove(vehicleId);
+            _lastHeadingLive.Remove(vehicleId);
+            _lastLiveAccuracyById.Remove(vehicleId);
 
-                if (_vehicleBoxes.TryGetValue(vehicleId, out var vRect))
-                {
-                    TileCanvas.Children.Remove(vRect);
-                    _vehicleBoxes.Remove(vehicleId);
-                }
-
-                if (_liveAccuracyTextById.TryGetValue(vehicleId, out var accTb))
-                {
-                    if (accTb != null && TileCanvas.Children.Contains(accTb))
-                        TileCanvas.Children.Remove(accTb);
-                    _liveAccuracyTextById.Remove(vehicleId);
-                }
-
-                _lastLiveAccuracyById.Remove(vehicleId);
-
-                try
-                {
-                    var shortId = vehicleId.Length > 4 ? vehicleId[^4..] : vehicleId;
-                    lock (_knownLiveShortIds)
-                    {
-                        if (_knownLiveShortIds.Contains(shortId))
-                            _knownLiveShortIds.Remove(shortId);
-                    }
-                }
-                catch { }
-
-                // refresh live list after removal (dispatcher-safe)
-                if (FilterTram != null)
-                    FilterTram.Dispatcher.BeginInvoke(new Action(PopulateLiveTramBoxFromActiveVehicles));
-
-                var tramInfo = TramTable.FirstOrDefault(t => t.VehicleId == (vehicleId.Length > 4 ? vehicleId[^4..] : vehicleId));
-                if (tramInfo != null)
-                    TramTable.Remove(tramInfo);
-
-                PopulateLiveTramBoxFromActiveVehicles();
-            });
+            // Remove any cleanup tokens
+            if (vehicleTrailCleanupTokens.TryGetValue(vehicleId, out var cts))
+            {
+                cts.Cancel();
+                cts.Dispose();
+                vehicleTrailCleanupTokens.Remove(vehicleId);
+            }
         }
 
         private void RemoveDrawnTramCompletely(int idx, MapPoint tram)
