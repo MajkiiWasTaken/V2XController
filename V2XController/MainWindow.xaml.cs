@@ -2443,6 +2443,7 @@ namespace V2XController
 
                     // single table for both types
                     activationZones[rect] = zone;
+                    zone.UpdateName();
                     ActivationZonesCollection.Add(zone);
 
                     zone.PropertyChanged += ActivationZone_PropertyChanged;
@@ -8507,6 +8508,7 @@ namespace V2XController
             if (e.EditAction != DataGridEditAction.Commit) return;
             if (e.Row?.Item is not ActivationZone zone) return;
 
+
             string? path = null;
             if (e.Column is DataGridTextColumn textCol && textCol.Binding is System.Windows.Data.Binding bTxt && bTxt.Path != null)
                 path = bTxt.Path.Path;
@@ -8518,6 +8520,8 @@ namespace V2XController
                 Dispatcher.BeginInvoke(new Action(() => ApplyZoneColor(zone)), DispatcherPriority.Background);
                 Dispatcher.BeginInvoke(new Action(() => EmphasizeZoneWithOwnColor(zone, TimeSpan.FromMilliseconds(400))), DispatcherPriority.Background);
             }
+
+
 
             if (path is null) return;
 
@@ -8588,6 +8592,22 @@ namespace V2XController
                     }
                 }
                 EmphasizeZoneWithOwnColor(zone, TimeSpan.FromMilliseconds(400));
+            }
+
+            if (e.EditAction != DataGridEditAction.Commit) return;
+
+            zone = e.Row.Item as ActivationZone;
+            if (zone == null) return;
+
+            // Check if edited column is MainZone or SubZone
+            var columnHeader = e.Column.Header?.ToString();
+            if (columnHeader == "Main" || columnHeader == "Sub")
+            {
+                // Schedule name update after value is committed
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    zone.UpdateName();
+                }), DispatcherPriority.DataBind);
             }
         }
 

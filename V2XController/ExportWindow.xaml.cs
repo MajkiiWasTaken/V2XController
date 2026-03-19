@@ -15,7 +15,10 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Threading;
+using System.ComponentModel;
+using System.Runtime.CompilerServices;
 
 namespace V2XController
 {
@@ -33,7 +36,8 @@ namespace V2XController
         private const int MAX_REGS_PER_REQUEST = 50;
 
         // Writable V2X map starts at 0x0300 + 44 (0x032C)
-        private const ushort MPC_WRITE_OFFSET = 44;  // decimal offset into 0x0300 block
+        private const ushort MPCv3WLC_WRITE_OFFSET = 44;
+        private const ushort MPCv3RTV_WRITE_OFFSET = 176;
         private const int MPC_ZONE_STRIDE = 10;      // registers per zone "slot" (X/Y=2+2, len=1, width=1, az=1 with gaps)
 
         // add near other helpers inside ExportWindow
@@ -52,7 +56,6 @@ namespace V2XController
         //public Button Start { get; private set; }  // Reference to the export button
         //public Button ReadButton { get; private set; }  // Reference to the read button
 
-        // Add near other helpers inside ExportWindow
         private static ushort Off1(ushort zeroBased) => (ushort)(zeroBased + 1);
 
         private static bool ApproximatelyZero(double v, double eps = 1e-8) => Math.Abs(v) <= eps;
@@ -77,6 +80,41 @@ namespace V2XController
 
         public bool IsTunnelSelected { get; set; }
 
+        private double _progressValue;
+        public double ProgressValue
+        {
+            get => _progressValue;
+            set { _progressValue = value; OnPropertyChanged(); }
+        }
+
+        private double _progressMaximum = 100;
+        public double ProgressMaximum
+        {
+            get => _progressMaximum;
+            set { _progressMaximum = value; OnPropertyChanged(); }
+        }
+
+        private string _progressText = "";
+        public string ProgressText
+        {
+            get => _progressText;
+            set { _progressText = value; OnPropertyChanged(); }
+        }
+
+        private Visibility _progressTextVisibility = Visibility.Collapsed;
+        public Visibility ProgressTextVisibility
+        {
+            get => _progressTextVisibility;
+            set { _progressTextVisibility = value; OnPropertyChanged(); }
+        }
+
+        public event PropertyChangedEventHandler? PropertyChanged;
+
+        protected virtual void OnPropertyChanged([CallerMemberName] string? propertyName = null)
+        {
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+        }
+
         public ExportWindow()
         {
             InitializeComponent();
@@ -98,22 +136,74 @@ namespace V2XController
             if (ReadButton != null)
                 ReadButton.IsEnabled = isReadMode;
 
-            // Update the title to match the mode
             Title = isReadMode ? "Read Activation Zones" : "Export Activation Zones";
         }
 
-        private void ShowBusy(string message)
+        private void ShowBusy(string message, bool showProgress = false, int maxProgress = 100)
         {
             try
             {
                 BusyText.Text = string.IsNullOrWhiteSpace(message) ? "Working..." : message;
                 BusyOverlay.Visibility = Visibility.Visible;
 
-                // Optional: disable common buttons while busy
+                if (showProgress)
+                {
+                    BusyProgressBar.IsIndeterminate = false;
+                    ProgressMaximum = maxProgress;
+                    ProgressValue = 0;
+                    ProgressTextVisibility = Visibility.Visible;
+                    ProgressText = "0%";
+                }
+                else
+                {
+                    BusyProgressBar.IsIndeterminate = true;
+                    ProgressTextVisibility = Visibility.Collapsed;
+                }
+
                 foreach (var b in new[] { Start, ReadButton, SaveButton, NewButton, RenameButton, DeleteButton, Exit, ReinitMPC })
                     if (b != null) b.IsEnabled = false;
 
                 Mouse.OverrideCursor = Cursors.Wait;
+            }
+            catch { /* ignore */ }
+        }
+
+        private void UpdateProgress(int current, int total, string statusMessage = "")
+        {
+            try
+            {
+                Dispatcher.Invoke(() =>
+                {
+                    double oldValue = ProgressValue;
+                    double newValue = current;
+
+                    ProgressMaximum = total;
+
+                    // Animace pokroku pouze pokud se hodnota změnila
+                    if (Math.Abs(oldValue - newValue) > 0.01)
+                    {
+                        var animation = new System.Windows.Media.Animation.DoubleAnimation
+                        {
+                            From = oldValue,
+                            To = newValue,
+                            Duration = new Duration(TimeSpan.FromMilliseconds(250)),
+                            EasingFunction = new System.Windows.Media.Animation.QuadraticEase
+                            {
+                                EasingMode = System.Windows.Media.Animation.EasingMode.EaseInOut
+                            }
+                        };
+
+                        // Aplikovat animaci na ProgressBar
+                        BusyProgressBar.BeginAnimation(System.Windows.Controls.Primitives.RangeBase.ValueProperty, animation);
+                    }
+
+                    ProgressValue = newValue;
+
+                    double percentage = total > 0 ? (current * 100.0 / total) : 0;
+                    ProgressText = string.IsNullOrWhiteSpace(statusMessage)
+                        ? $"{percentage:F0}% ({current}/{total})"
+                        : $"{percentage:F0}% - {statusMessage}";
+                }, DispatcherPriority.Send);
             }
             catch { /* ignore */ }
         }
@@ -123,6 +213,9 @@ namespace V2XController
             try
             {
                 BusyOverlay.Visibility = Visibility.Collapsed;
+                BusyProgressBar.IsIndeterminate = false;
+                ProgressValue = 0;
+                ProgressTextVisibility = Visibility.Collapsed;
 
                 foreach (var b in new[] { Start, ReadButton, SaveButton, NewButton, RenameButton, DeleteButton, Exit, ReinitMPC })
                     if (b != null) b.IsEnabled = true;
@@ -234,7 +327,6 @@ namespace V2XController
         }
 
 
-        // Replace the whole Start_Click with this version
         private async void Start_Click(object sender, RoutedEventArgs e)
         {
             Settings = ExportSettings.FromWindow(this);
@@ -249,103 +341,50 @@ namespace V2XController
                 "Serial tunnel",
                 StringComparison.OrdinalIgnoreCase);
 
-            string remoteHost = "";
-            int remotePort = 0;
-            bool tunnelIndicatorSet = false;
+            bool isTcp = Settings.IsTcpSelected || usingTunnel;
 
             if (usingTunnel)
             {
-                remoteHost = TunnelRemoteHostTextBox?.Text?.Trim() ?? "";
+                var remoteHost = TunnelRemoteHostTextBox?.Text?.Trim() ?? "";
                 if (string.IsNullOrWhiteSpace(remoteHost))
                 {
                     MessageBox.Show("Remote host is required for the tunnel.", "Export", MessageBoxButton.OK, MessageBoxImage.Warning);
                     return;
                 }
-                if (!int.TryParse(TunnelRemotePortTextBox?.Text?.Trim(), out remotePort) || remotePort <= 0 || remotePort > 65535)
+                if (!int.TryParse(TunnelRemotePortTextBox?.Text?.Trim(), out var remotePort) || remotePort <= 0 || remotePort > 65535)
                 {
                     MessageBox.Show("Remote port is invalid (1-65535).", "Export", MessageBoxButton.OK, MessageBoxImage.Warning);
                     return;
                 }
 
-                // Start a quick availability check and show indicator while we do it.
-                try
-                {
-                    UpdateTunnelIndicator(true);
-                    tunnelIndicatorSet = true;
-                    TunnelRemoteHostTextBox.IsEnabled = false;
-                    TunnelRemotePortTextBox.IsEnabled = false;
-
-                    var ok = await EnsureRemoteEndpointAvailableAsync(remoteHost, remotePort, timeoutMs: 3000).ConfigureAwait(false);
-                    await Dispatcher.InvokeAsync(() =>
-                    {
-                        if (!ok)
-                        {
-                            UpdateTunnelIndicator(false);
-                            TunnelRemoteHostTextBox.IsEnabled = true;
-                            TunnelRemotePortTextBox.IsEnabled = true;
-                            MessageBox.Show($"Cannot reach remote endpoint {remoteHost}:{remotePort}.", "Tunnel", MessageBoxButton.OK, MessageBoxImage.Warning);
-                        }
-                    });
-
-                    if (!ok) return;
-
-                    // Override settings to use TCP -> remoteHost:remotePort
-                    Settings.IsTcpSelected = true;
-                    Settings.TcpHost = remoteHost;
-                    Settings.TcpPort = remotePort;
-                }
-                catch (Exception ex)
-                {
-                    await Dispatcher.InvokeAsync(() =>
-                    {
-                        UpdateTunnelIndicator(false);
-                        TunnelRemoteHostTextBox.IsEnabled = true;
-                        TunnelRemotePortTextBox.IsEnabled = true;
-                        MessageBox.Show($"Failed to start tunnel connection check: {ex.Message}", "Tunnel", MessageBoxButton.OK, MessageBoxImage.Error);
-                    });
-                    return;
-                }
+                Settings.IsTcpSelected = true;
+                Settings.TcpHost = remoteHost;
+                Settings.TcpPort = remotePort;
             }
 
             if (!TryValidateSettings(Settings, out var validationError))
             {
                 MessageBox.Show(validationError, "Export - validation", MessageBoxButton.OK, MessageBoxImage.Warning);
-                if (tunnelIndicatorSet)
-                {
-                    UpdateTunnelIndicator(false);
-                    TunnelRemoteHostTextBox.IsEnabled = true;
-                    TunnelRemotePortTextBox.IsEnabled = true;
-                }
                 return;
             }
 
             if (Owner is not MainWindow mw)
             {
-                MessageBox.Show("Cannot access activation zones.", "Export", MessageBoxButton.OK, MessageBoxImage.Error);
-                if (tunnelIndicatorSet)
-                {
-                    UpdateTunnelIndicator(false);
-                    TunnelRemoteHostTextBox.IsEnabled = true;
-                    TunnelRemotePortTextBox.IsEnabled = true;
-                }
+                MessageBox.Show("No main window owner.", "Export", MessageBoxButton.OK, MessageBoxImage.Error);
                 return;
             }
 
-            var all = mw.ActivationZonesCollection?.ToList() ?? new List<ActivationZone>();
-            var zonesAct = all.Where(z => !IsSwitchRow(z)).Where(HasValidGeoAndSize).OrderBy(z => z.MainZone).ThenBy(z => z.SubZone).ToList();
-            var zonesSwitch = all.Where(IsSwitchRow).Where(HasValidGeoAndSize).OrderBy(z => z.MainZone).ThenBy(z => z.SubZone).ToList();
+            var doAct = true;
+            var doSw = false;
+            var zonesAct = mw.ActivationZonesCollection.Where(z => !z.IsSwitchZone).ToList();
+            var zonesSw = mw.ActivationZonesCollection.Where(z => z.IsSwitchZone).ToList();
 
-            bool exportSwitchesOnly = mw.IsSwitchModeSelected;
-            bool doAct = !exportSwitchesOnly;
-            bool doSw = exportSwitchesOnly;
-
-            if ((doAct && zonesAct.Count == 0) && (doSw && zonesSwitch.Count == 0))
+            if (zonesAct.Count == 0 && zonesSw.Count == 0)
             {
-                MessageBox.Show(exportSwitchesOnly ? "No switch zones to export." : "No activation zones to export.", "Export", MessageBoxButton.OK, MessageBoxImage.Information);
+                MessageBox.Show("No activation zones or switch zones to export.", "Export", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
             }
 
-            // Preflight stays on UI thread (fast)
             if (doAct && zonesAct.Count > 0)
             {
                 var report = BuildZonesDebugReport(zonesAct, 8, "Activation zones (preview)");
@@ -361,23 +400,18 @@ namespace V2XController
                         return;
                 }
             }
-            if (doSw && zonesSwitch.Count > 0)
-            {
-                var reportSw = BuildZonesDebugReport(zonesSwitch, 8, "Switch zones (preview)");
-                System.Diagnostics.Debug.WriteLine(reportSw);
-            }
 
-            // From here we show busy and guarantee it is hidden before any dialog
-            ShowBusy(doSw ? "Exporting switch zones..." : "Exporting activation zones...");
-            await Task.Delay(50); // let overlay render
-
-
+            // Spočítat celkový počet registrů pro progress
+            int totalRegisters = zonesAct.Count * 10; // 10 registrů na zónu
+            ShowBusy(doSw ? "Exporting switch zones..." : "Exporting activation zones...", showProgress: true, maxProgress: totalRegisters);
+            await Task.Delay(50);
 
             try
             {
                 byte unitId = (byte)Math.Clamp(Settings.ModemDec ?? 1, 1, 247);
 
-                if (Settings!.IsTcpSelected || usingTunnel)
+                // === MODBUS TCP ===
+                if (isTcp)
                 {
                     var host = Settings.TcpHost?.Trim();
                     var port = Settings.TcpPort ?? 502;
@@ -391,13 +425,12 @@ namespace V2XController
                     string displayEndpoint = $"{hostOnly}:{port}";
                     var cfg = ResolveProtocolCfg();
 
-                    // Quick probes (UI thread, but short)
+                    // Probes
+                    UpdateProgress(0, totalRegisters, "Connecting...");
                     if (!TryModbusTcpPing(hostOnly, port, unitId, cfg.ConnectionTimeout, Math.Max(cfg.ReceiveTimeout, 3000), out var pingDiag))
                     {
-                        // Try raw RTU-over-TCP probe (serial tunnel)
                         if (TryProbeRtuOverTcp(hostOnly, port, unitId, Math.Max(cfg.ConnectionTimeout, 3000), out var rtuDiag) && string.IsNullOrWhiteSpace(rtuDiag) == false)
                         {
-                            // Found RTU-over-TCP behavior
                             await ShowMessageAfterBusyAsync(
                                 $"Remote {displayEndpoint} responds as raw serial (no MBAP). This is a serial tunnel.\n\n" +
                                 "Current code expects Modbus/TCP (MBAP). Either run a Modbus/TCP gateway, or enable Tunnel fallback in the app (not enabled by default).",
@@ -408,198 +441,80 @@ namespace V2XController
                         await ShowMessageAfterBusyAsync($"No Modbus reply from {displayEndpoint} (UnitId {unitId}).\nDiag: {pingDiag}", "Export", MessageBoxButton.OK, MessageBoxImage.Warning);
                         return;
                     }
-                    if (!TryProbeBaseTcp(hostOnly, port, unitId, (ushort)(MPC_BASE_ADDR + MPC_WRITE_OFFSET), cfg.ConnectionTimeout, Math.Max(cfg.ReceiveTimeout, 3000), out _, out var baseProbeDiag))
-                    {
-                        if (!doSw) // allow switches-only to continue even if MPC map probe fails
-                        {
-                            await ShowMessageAfterBusyAsync($"No Modbus reply from {displayEndpoint} (UnitId {unitId}).\nDiag: {baseProbeDiag}", "Export", MessageBoxButton.OK, MessageBoxImage.Warning);
-                            return;
-                        }
-                    }
-                    if (!TryFindResponsiveUnitId(hostOnly, port, unitId, cfg.ConnectionTimeout, Math.Max(cfg.ReceiveTimeout, 3000), out var unitForWrite, out var uidProbeDiag))
-                    {
-                        await ShowMessageAfterBusyAsync($"No Modbus reply from {displayEndpoint}.\nTried UnitIds: {unitId}, 1, 255, 0\nDiag: {uidProbeDiag}", "Export", MessageBoxButton.OK, MessageBoxImage.Warning);
-                        return;
-                    }
 
-                    bool isRtv = false;
-                    if (TryReadFirmwareTcp(hostOnly, port, unitForWrite, usingTunnel, out var fw, out _, out _))
-                        isRtv = IsRtvFirmware(fw);
-
-                    if (doSw && !isRtv && zonesSwitch.Count > 0)
-                    {
-                        // Hide busy before asking
-                        await Dispatcher.InvokeAsync(HideBusy);
-                        var force = MessageBox.Show(
-                            "Switch zones selected, but the device does not report RTV firmware.\n\nAttempt writing RTV switches to RTV offsets anyway?",
-                            "Export switches", MessageBoxButton.YesNo, MessageBoxImage.Question);
-                        if (force != MessageBoxResult.Yes)
-                        {
-                            // No re-show of busy; we're exiting
-                            return;
-                        }
-                        ShowBusy("Exporting switch zones...");
-                        await Task.Delay(50);
-                        isRtv = true;
-                    }
-
-                    // Heavy writes moved to background to avoid UI freeze
+                    // === ZÁPIS AKTIVAČNÍCH ZÓN (TCP) ===
                     if (doAct && zonesAct.Count > 0)
                     {
+                        UpdateProgress(0, totalRegisters, "Writing zones...");
+
+                        var progress = new Progress<(int current, int total, string message)>(p =>
+                        {
+                            UpdateProgress(p.current, p.total, p.message);
+                        });
+
                         var actRes = await Task.Run(() =>
-                        {
-                            var ok = WriteMpcByExactRegistersOnly(
-                                hostOnly, port, unitForWrite, zonesAct,
-
+                            WriteMpcZonesBatchedWithProgress(
+                                hostOnly, port, unitId, zonesAct, isTcp: true, null,
                                 connectTimeoutMs: Math.Max(cfg.ConnectionTimeout, 3000),
                                 sendTimeoutMs: Math.Max(cfg.SendTimeout, 2000),
                                 receiveTimeoutMs: Math.Max(cfg.ReceiveTimeout, 6000),
-                                usingTunnel,
-                                out ModbusStateCode st, out string? err);
-                            return (ok, st, err);
-                        });
+                                progress,
+                                out ModbusStateCode st, out string? err));
 
-                        if (!actRes.ok)
+                        if (!actRes)
                         {
-                            var extra = string.IsNullOrWhiteSpace(actRes.err) ? "" : $" - {actRes.err}";
-                            await ShowMessageAfterBusyAsync($"Export (activation zones) failed (state={actRes.st}){extra}.\nTarget={displayEndpoint}, UnitId={unitForWrite}",
+                            await ShowMessageAfterBusyAsync($"Export (activation zones) failed.\nTarget={displayEndpoint}, UnitId={unitId}",
                                 "Export", MessageBoxButton.OK, MessageBoxImage.Error);
                             return;
                         }
-
-                        // Header write kept as-is (no-op safe)
-                        WriteActivationZoneCountTcp(
-                            hostOnly, port, unitForWrite, zonesAct.Count,
-                            connectTimeoutMs: Math.Max(cfg.ConnectionTimeout, 3000),
-                            sendTimeoutMs: Math.Max(cfg.SendTimeout, 2000),
-                            receiveTimeoutMs: Math.Max(cfg.ReceiveTimeout, 6000),
-                            out _, out _);
                     }
 
-                    int switchesWritten = 0;
-                    if (doSw && isRtv && zonesSwitch.Count > 0)
-                    {
-                        var swRes = await Task.Run(() =>
-                        {
-                            var ok = WriteRtvSwitchesByExactRegistersOnly(
-                                hostOnly, port, unitForWrite, zonesSwitch, usingTunnel,
-                                connectTimeoutMs: Math.Max(cfg.ConnectionTimeout, 3000),
-                                sendTimeoutMs: Math.Max(cfg.SendTimeout, 2000),
-                                receiveTimeoutMs: Math.Max(cfg.ReceiveTimeout, 6000),
-
-                                out ModbusStateCode st, out string? err);
-                            return (ok, st, err);
-                        });
-
-                        if (!swRes.ok)
-                        {
-                            var extra = string.IsNullOrWhiteSpace(swRes.err) ? "" : $" - {swRes.err}";
-                            await ShowMessageAfterBusyAsync($"Export (RTV switches) failed (state={swRes.st}){extra}.\nTarget={displayEndpoint}, UnitId={unitForWrite}",
-                                "Export", MessageBoxButton.OK, MessageBoxImage.Error);
-                            return;
-                        }
-                        switchesWritten = zonesSwitch.Count;
-                    }
-
-                    // Success message after Busy hides
                     await ShowMessageAfterBusyAsync(
-                        doSw
-                            ? $"Exported {switchesWritten} switch zone(s) to {displayEndpoint} (UnitId {unitForWrite})."
-                            : $"Exported {zonesAct.Count} activation zone(s) to {displayEndpoint} (UnitId {unitForWrite}).",
+                        doSw ? $"Exported switch zones to {displayEndpoint} (UnitId {unitId})." :
+                               $"Exported {zonesAct.Count} activation zone(s) to {displayEndpoint} (UnitId {unitId}).",
                         "Export", MessageBoxButton.OK, MessageBoxImage.Information);
                 }
+                // === SERIAL PORT (RS485) ===
                 else
                 {
-                    // RS485 (RTU) — these methods are already async and non-blocking on UI
                     byte slave = (byte)Math.Clamp(Settings.ModemDec ?? 1, 1, 247);
 
-                    bool isRtv = false;
-                    {
-                        var (okFw, stFw, dataFw, _) = await ReadHoldingRegistersRtuAsync(Settings, slave, 0x0000, 0x0020, timeoutMs: 2000);
-                        if (okFw && stFw == ModbusStateCode.Success && dataFw != null)
-                            isRtv = IsRtvFirmware(DecodeAsciiFromRegs(dataFw));
-                    }
-
-                    if (doSw && !isRtv && zonesSwitch.Count > 0)
-                    {
-                        await Dispatcher.InvokeAsync(HideBusy);
-                        var force = MessageBox.Show(
-                            "Switch zones selected, but the device does not report RTV firmware.\n\nAttempt writing RTV switches to RTV offsets anyway?",
-                            "Export switches", MessageBoxButton.YesNo, MessageBoxImage.Question);
-                        if (force != MessageBoxResult.Yes) return;
-
-                        ShowBusy("Exporting switch zones...");
-                        await Task.Delay(50);
-                        isRtv = true;
-                    }
-
+                    // === ZÁPIS AKTIVAČNÍCH ZÓN (RS485) ===
                     if (doAct && zonesAct.Count > 0)
                     {
-                        var (ok, st, err) = await WriteMpcZonesByExactRegistersRtuAsync(Settings, slave, zonesAct, timeoutMs: 3000);
+                        var progress = new Progress<(int current, int total, string message)>(p =>
+                        {
+                            UpdateProgress(p.current, p.total, p.message);
+                        });
+
+                        var (ok, st, err) = await WriteMpcZonesBatchedAsyncWithProgress(Settings, slave, zonesAct, timeoutMs: 3000, progress);
                         if (!ok || st != ModbusStateCode.Success)
                         {
                             var extra = string.IsNullOrWhiteSpace(err) ? "" : $" ({err})";
                             await ShowMessageAfterBusyAsync($"Export activation zones over RS485 failed (state={st}){extra}.", "Export", MessageBoxButton.OK, MessageBoxImage.Error);
                             return;
                         }
-
-                        // Header is intentionally disabled; keep behavior consistent.
-                        await WriteActivationZoneCountRtuAsync(Settings, slave, zonesAct.Count, timeoutMs: 2000);
-                    }
-
-                    int switchesWritten = 0;
-                    if (doSw && isRtv && zonesSwitch.Count > 0)
-                    {
-                        var (okSw, stSw, errSw) = await WriteRtvSwitchesRtuAsync(Settings, slave, zonesSwitch, timeoutMs: 3000);
-                        if (!okSw || stSw != ModbusStateCode.Success)
-                        {
-                            var extra = string.IsNullOrWhiteSpace(errSw) ? "" : $" ({errSw})";
-                            await ShowMessageAfterBusyAsync($"Export RTV switches over RS485 failed (state={stSw}){extra}.", "Export", MessageBoxButton.OK, MessageBoxImage.Error);
-                            return;
-                        }
-                        switchesWritten = zonesSwitch.Count;
                     }
 
                     await ShowMessageAfterBusyAsync(
-                        doSw
-                            ? $"Exported {switchesWritten} switch zone(s) over RS485 on {Settings.SerialPortName} (slave {slave})."
-                            : $"Exported {zonesAct.Count} activation zone(s) over RS485 on {Settings.SerialPortName} (slave {slave}).",
+                        doSw ? $"Exported switch zones over RS485 on {Settings.SerialPortName} (slave {slave})." :
+                               $"Exported {zonesAct.Count} activation zone(s) over RS485 on {Settings.SerialPortName} (slave {slave}).",
                         "Export", MessageBoxButton.OK, MessageBoxImage.Information);
                 }
-            }
-            catch (ArgumentOutOfRangeException aoorex) when (aoorex.StackTrace?.Contains("ModbusNewLib.Modbus.GetEndPointIp") == true)
-            {
-                // Keep fallback simple: activation only; switches skipped in this rare path
-                await ShowMessageAfterBusyAsync("TCP fallback path doesn’t support switches. Please retry.", "Export", MessageBoxButton.OK, MessageBoxImage.Error);
-                return;
             }
             catch (Exception ex)
             {
                 bool tcpLike = Settings!.IsTcpSelected || usingTunnel;
-
-                var target = tcpLike
-                    ? $"{Settings.TcpHost}:{Settings.TcpPort ?? 502}"
-                    : (Settings.SerialPortName ?? "-");
-
+                var target = tcpLike ? $"{Settings.TcpHost}:{Settings.TcpPort ?? 502}" : (Settings.SerialPortName ?? "-");
                 byte uid = (byte)Math.Clamp(Settings.ModemDec ?? 1, 1, 247);
 
-                var path = SaveExportError(
-                    ex,
-                    tcpLike ? (usingTunnel ? "Tunnel" : "TCP") : "RTU",
-                    target,
-                    uid,
-                    MPC_BASE_ADDR,
-                    0,
-                    null);
-
+                var path = SaveExportError(ex, tcpLike ? (usingTunnel ? "Tunnel" : "TCP") : "RTU", target, uid, MPC_BASE_ADDR, 0, null);
                 await ShowMessageAfterBusyAsync($"Export error. Details were copied to clipboard and saved:\n{path}", "Export", MessageBoxButton.OK, MessageBoxImage.Error);
                 return;
             }
             finally
             {
-                // Ensure overlay is not left visible in any path
                 HideBusy();
-
                 if (usingTunnel)
                 {
                     try
@@ -608,8 +523,561 @@ namespace V2XController
                         TunnelRemoteHostTextBox.IsEnabled = true;
                         TunnelRemotePortTextBox.IsEnabled = true;
                     }
-                    catch { /* best effort */ }
+                    catch { }
                 }
+            }
+        }
+
+        private static bool WriteMpcZonesBatchedWithProgress(
+            string host, int port, byte unitId,
+            IReadOnlyList<ActivationZone> zones,
+            bool isTcp, ExportSettings? settingsForRtu,
+            int connectTimeoutMs, int sendTimeoutMs, int receiveTimeoutMs,
+            IProgress<(int, int, string)>? progress,
+            out ModbusStateCode state, out string? error)
+        {
+            state = ModbusStateCode.Success;
+            error = null;
+
+            const ushort UNLOCK_REGISTER = 0x103F;
+            const ushort UNLOCK_VALUE = 4562;
+            const int MAX_REGS_PER_CHUNK = 50;
+
+            try
+            {
+                System.Diagnostics.Debug.WriteLine($"=== Writing MPC zones via {(isTcp ? "TCP" : "RS485")} (BATCHED) ===");
+
+                progress?.Report((0, zones.Count * 10, "Unlocking device..."));
+
+                // UNLOCK PŘED ZÁPISEM
+                if (isTcp)
+                {
+                    System.Diagnostics.Debug.WriteLine($"Unlocking at 0x{UNLOCK_REGISTER:X4}...");
+                    if (!TryWriteUnlockTcp(host, port, unitId, UNLOCK_REGISTER, UNLOCK_VALUE,
+                        connectTimeoutMs, sendTimeoutMs, receiveTimeoutMs, out state, out error))
+                    {
+                        error = $"Failed to unlock: {error}";
+                        System.Diagnostics.Debug.WriteLine($"   FAILED: {error}");
+                        return false;
+                    }
+                    System.Diagnostics.Debug.WriteLine($"   OK");
+                    System.Threading.Thread.Sleep(800);
+                }
+
+                const ushort BASE_ADDR = MPC_BASE_ADDR;       // 0x0300
+                const ushort WRITE_OFFSET = MPCv3RTV_WRITE_OFFSET; // 44
+                const int ZONE_STRIDE = MPC_ZONE_STRIDE;      // 10
+                ushort FIRST_ZONE_BASE = (ushort)(BASE_ADDR + WRITE_OFFSET);
+
+                // Sestavit všechny registry
+                var allRegisters = new List<(ushort addr, ushort value)>();
+
+                for (int idx = 0; idx < zones.Count; idx++)
+                {
+                    var z = zones[idx];
+                    int mainZone = z.MainZone + 1;
+                    int subZone = z.SubZone + 1;
+                    int zoneIndex = ((mainZone - 1) * 5) + (subZone - 1);
+                    ushort zoneBase = (ushort)(FIRST_ZONE_BASE + (zoneIndex * ZONE_STRIDE));
+
+                    var (latLo, latHi) = FloatToWordsWS((float)z.Latitude);
+                    var (lonLo, lonHi) = FloatToWordsWS((float)z.Longitude);
+                    var (heightLo, heightHi) = FloatToWordsWS((float)z.Height);
+                    var (widthLo, widthHi) = FloatToWordsWS((float)z.Width);
+                    var (azLo, azHi) = FloatToWordsWS((float)z.Azimuth);
+
+                    // OPRAVA: Zapsat VŠECH 10 registrů pro každou zónu
+                    allRegisters.Add((zoneBase, lonLo));
+                    allRegisters.Add(((ushort)(zoneBase + 1), lonHi));
+                    allRegisters.Add(((ushort)(zoneBase + 2), latLo));
+                    allRegisters.Add(((ushort)(zoneBase + 3), latHi));
+                    allRegisters.Add(((ushort)(zoneBase + 4), heightLo));
+                    allRegisters.Add(((ushort)(zoneBase + 5), heightHi));
+                    allRegisters.Add(((ushort)(zoneBase + 6), widthLo));
+                    allRegisters.Add(((ushort)(zoneBase + 7), widthHi));
+                    allRegisters.Add(((ushort)(zoneBase + 8), azLo));
+                    allRegisters.Add(((ushort)(zoneBase + 9), azHi));
+
+                    System.Diagnostics.Debug.WriteLine($"Zone {mainZone}-{subZone}: base=0x{zoneBase:X4}, 10 regs");
+                }
+
+                System.Diagnostics.Debug.WriteLine($"Total registers to write: {allRegisters.Count}");
+
+                // Připojení pro TCP
+                ModbusTcpIp? modbusTcp = null;
+                if (isTcp)
+                {
+                    var protocolParams = BuildProtocolParams(false);
+                    protocolParams.ConnectionTimeout = connectTimeoutMs;
+                    protocolParams.SendTimeout = sendTimeoutMs;
+                    protocolParams.ReceiveTimeout = receiveTimeoutMs;
+                    modbusTcp = new ModbusTcpIp($"{host}:{port}", protocolParams);
+                }
+
+                try
+                {
+                    // Rozdělit do dávek po 50
+                    int offset = 0;
+                    while (offset < allRegisters.Count)
+                    {
+                        // Re-unlock před každou dávkou
+                        if (isTcp)
+                        {
+                            modbusTcp!.WriteToHoldingRegister(unitId, UNLOCK_REGISTER - 1, UNLOCK_VALUE, out _, "Re-unlock");
+                            System.Threading.Thread.Sleep(250);
+                        }
+
+                        // Zjistit velikost dávky
+                        int chunkSize = Math.Min(MAX_REGS_PER_CHUNK, allRegisters.Count - offset);
+                        ushort startAddr = allRegisters[offset].addr;
+                        int actualChunkSize = 1;
+
+                        for (int i = 1; i < chunkSize; i++)
+                        {
+                            if (allRegisters[offset + i].addr != startAddr + i)
+                                break;
+                            actualChunkSize++;
+                        }
+
+                        var chunkData = new ushort[actualChunkSize];
+                        for (int i = 0; i < actualChunkSize; i++)
+                        {
+                            chunkData[i] = allRegisters[offset + i].value;
+                        }
+
+                        System.Diagnostics.Debug.WriteLine($"Writing {(isTcp ? "TCP" : "RS485")} batch: {actualChunkSize} regs from 0x{startAddr:X4}");
+
+                        // Report progress
+                        progress?.Report((offset, allRegisters.Count, $"Writing registers {offset}/{allRegisters.Count}..."));
+
+                        // Zápis
+                        if (isTcp)
+                        {
+                            if (!modbusTcp!.WriteDataToHoldingRegisters(unitId, Off1(startAddr), (ushort)actualChunkSize, chunkData, out state, $"Batch {offset}"))
+                            {
+                                error = $"TCP write failed at 0x{startAddr:X4}";
+                                return false;
+                            }
+                        }
+
+                        System.Diagnostics.Debug.WriteLine($"   OK");
+                        offset += actualChunkSize;
+                        System.Threading.Thread.Sleep(150);
+                    }
+
+                    // Lock
+                    progress?.Report((allRegisters.Count, allRegisters.Count, "Locking device..."));
+                    if (isTcp)
+                    {
+                        modbusTcp!.WriteToHoldingRegister(unitId, UNLOCK_REGISTER - 1, 0, out _, "Lock");
+                    }
+
+                    System.Diagnostics.Debug.WriteLine("\n=== ALL ZONES WRITTEN (BATCHED) ===");
+                    return true;
+                }
+                finally
+                {
+                    modbusTcp?.Dispose();
+                }
+            }
+            catch (Exception ex)
+            {
+                state = ModbusStateCode.UndefinedError;
+                error = ex.Message;
+                return false;
+            }
+        }
+
+        private static async Task<(bool ok, ModbusStateCode state, string? error)> WriteMpcZonesBatchedAsync(
+    ExportSettings s, byte unitId, IReadOnlyList<ActivationZone> zones, int timeoutMs)
+        {
+            const ushort UNLOCK_REGISTER = 0x103F;
+            const ushort UNLOCK_VALUE = 4562;
+            const int MAX_REGS_PER_CHUNK = 50;
+
+            try
+            {
+                System.Diagnostics.Debug.WriteLine("=== Writing MPC zones via RS485 (BATCHED) ===");
+
+                // Odemknout
+                var (uok, ust, uerr) = await WriteHoldingRegistersRtuAsync(s, unitId, UNLOCK_REGISTER, new[] { UNLOCK_VALUE }, timeoutMs);
+                if (!uok || ust != ModbusStateCode.Success)
+                    return (false, ust, $"Unlock failed: {uerr}");
+                await Task.Delay(800);
+
+                const ushort BASE_ADDR = MPC_BASE_ADDR;
+                const ushort WRITE_OFFSET = MPCv3RTV_WRITE_OFFSET;
+                const int ZONE_STRIDE = MPC_ZONE_STRIDE;
+                ushort FIRST_ZONE_BASE = (ushort)(BASE_ADDR + WRITE_OFFSET);
+
+                // Sestavit všechny registry
+                var allRegisters = new List<(ushort addr, ushort value)>();
+
+                for (int idx = 0; idx < zones.Count; idx++)
+                {
+                    var z = zones[idx];
+                    int mainZone = z.MainZone + 1;
+                    int subZone = z.SubZone + 1;
+                    int zoneIndex = ((mainZone - 1) * 5) + (subZone - 1);
+                    ushort zoneBase = (ushort)(FIRST_ZONE_BASE + (zoneIndex * ZONE_STRIDE));
+
+                    float lonF = (float)z.Longitude;
+                    float latF = (float)z.Latitude;
+                    float heightF = (float)z.Height;
+                    float widthF = (float)z.Width;
+                    float azF = (float)z.Azimuth;
+
+                    var (lonLo, lonHi) = FloatToWordsWS(lonF);
+                    var (latLo, latHi) = FloatToWordsWS(latF);
+                    var (heightLo, heightHi) = FloatToWordsWS(heightF);
+                    var (widthLo, widthHi) = FloatToWordsWS(widthF);
+                    var (azLo, azHi) = FloatToWordsWS(azF);
+
+                    allRegisters.Add((zoneBase, lonLo));
+                    allRegisters.Add(((ushort)(zoneBase + 1), lonHi));
+                    allRegisters.Add(((ushort)(zoneBase + 2), latLo));
+                    allRegisters.Add(((ushort)(zoneBase + 3), latHi));
+                    allRegisters.Add(((ushort)(zoneBase + 4), heightLo));
+                    allRegisters.Add(((ushort)(zoneBase + 5), heightHi));
+                    allRegisters.Add(((ushort)(zoneBase + 6), widthLo));
+                    allRegisters.Add(((ushort)(zoneBase + 7), widthHi));
+                    allRegisters.Add(((ushort)(zoneBase + 8), azLo));
+                    allRegisters.Add(((ushort)(zoneBase + 9), azHi));
+                }
+
+                System.Diagnostics.Debug.WriteLine($"Total registers to write: {allRegisters.Count}");
+
+                // Rozdělit do dávek po 50
+                int offset = 0;
+                while (offset < allRegisters.Count)
+                {
+                    // Re-unlock
+                    var (ruOk, ruSt, ruErr) = await WriteHoldingRegistersRtuAsync(s, unitId, UNLOCK_REGISTER, new[] { UNLOCK_VALUE }, timeoutMs);
+                    if (!ruOk || ruSt != ModbusStateCode.Success)
+                        return (false, ruSt, $"Re-unlock failed: {ruErr}");
+                    await Task.Delay(250);
+
+                    // Zjistit velikost dávky
+                    int chunkSize = Math.Min(MAX_REGS_PER_CHUNK, allRegisters.Count - offset);
+                    ushort startAddr = allRegisters[offset].addr;
+                    int actualChunkSize = 1;
+
+                    for (int i = 1; i < chunkSize; i++)
+                    {
+                        if (allRegisters[offset + i].addr != startAddr + i)
+                            break;
+                        actualChunkSize++;
+                    }
+
+                    var chunkData = new ushort[actualChunkSize];
+                    for (int i = 0; i < actualChunkSize; i++)
+                    {
+                        chunkData[i] = allRegisters[offset + i].value;
+                    }
+
+                    System.Diagnostics.Debug.WriteLine($"Writing RS485 batch: {actualChunkSize} regs from 0x{startAddr:X4}");
+
+                    // Zápis
+                    var (wok, wst, werr) = await WriteHoldingRegistersRtuAsync(s, unitId, startAddr, chunkData, timeoutMs);
+                    if (!wok || wst != ModbusStateCode.Success)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"   FAILED: {werr}");
+                        return (false, wst, $"Batch write failed: {werr}");
+                    }
+
+                    System.Diagnostics.Debug.WriteLine($"   OK");
+                    offset += actualChunkSize;
+                    await Task.Delay(150);
+                }
+
+                // Lock
+                await WriteHoldingRegistersRtuAsync(s, unitId, UNLOCK_REGISTER, new[] { (ushort)0 }, timeoutMs);
+
+                System.Diagnostics.Debug.WriteLine("\n=== ALL ZONES WRITTEN (BATCHED RS485) ===");
+                return (true, ModbusStateCode.Success, null);
+            }
+            catch (Exception ex)
+            {
+                return (false, ModbusStateCode.UndefinedError, ex.Message);
+            }
+        }
+
+        private static async Task<(bool ok, ModbusStateCode state, string? error)> WriteMpcZonesBatchedAsyncWithProgress(
+            ExportSettings s, byte unitId, IReadOnlyList<ActivationZone> zones, int timeoutMs, IProgress<(int, int, string)>? progress)
+        {
+            const ushort UNLOCK_REGISTER = 0x103F;
+            const ushort UNLOCK_VALUE = 4562;
+            const int MAX_REGS_PER_CHUNK = 50;
+
+            try
+            {
+                System.Diagnostics.Debug.WriteLine("=== Writing MPC zones via RS485 (BATCHED) ===");
+
+                progress?.Report((0, zones.Count * 10, "Unlocking device..."));
+
+                // Odemknout
+                var (uok, ust, uerr) = await WriteHoldingRegistersRtuAsync(s, unitId, UNLOCK_REGISTER, new[] { UNLOCK_VALUE }, timeoutMs);
+                if (!uok || ust != ModbusStateCode.Success)
+                    return (false, ust, $"Unlock failed: {uerr}");
+                await Task.Delay(800);
+
+                const ushort BASE_ADDR = MPC_BASE_ADDR;
+                const ushort WRITE_OFFSET = MPCv3RTV_WRITE_OFFSET;
+                const int ZONE_STRIDE = MPC_ZONE_STRIDE;
+                ushort FIRST_ZONE_BASE = (ushort)(BASE_ADDR + WRITE_OFFSET);
+
+                // Sestavit všechny registry
+                var allRegisters = new List<(ushort addr, ushort value)>();
+
+                for (int idx = 0; idx < zones.Count; idx++)
+                {
+                    var z = zones[idx];
+                    int mainZone = z.MainZone + 1;
+                    int subZone = z.SubZone + 1;
+                    int zoneIndex = ((mainZone - 1) * 5) + (subZone - 1);
+                    ushort zoneBase = (ushort)(FIRST_ZONE_BASE + (zoneIndex * ZONE_STRIDE));
+
+                    float lonF = (float)z.Longitude;
+                    float latF = (float)z.Latitude;
+                    float heightF = (float)z.Height;
+                    float widthF = (float)z.Width;
+                    float azF = (float)z.Azimuth;
+
+                    var (lonLo, lonHi) = FloatToWordsWS(lonF);
+                    var (latLo, latHi) = FloatToWordsWS(latF);
+                    var (heightLo, heightHi) = FloatToWordsWS(heightF);
+                    var (widthLo, widthHi) = FloatToWordsWS(widthF);
+                    var (azLo, azHi) = FloatToWordsWS(azF);
+
+                    allRegisters.Add((zoneBase, lonLo));
+                    allRegisters.Add(((ushort)(zoneBase + 1), lonHi));
+                    allRegisters.Add(((ushort)(zoneBase + 2), latLo));
+                    allRegisters.Add(((ushort)(zoneBase + 3), latHi));
+                    allRegisters.Add(((ushort)(zoneBase + 4), heightLo));
+                    allRegisters.Add(((ushort)(zoneBase + 5), heightHi));
+                    allRegisters.Add(((ushort)(zoneBase + 6), widthLo));
+                    allRegisters.Add(((ushort)(zoneBase + 7), widthHi));
+                    allRegisters.Add(((ushort)(zoneBase + 8), azLo));
+                    allRegisters.Add(((ushort)(zoneBase + 9), azHi));
+                }
+
+                System.Diagnostics.Debug.WriteLine($"Total registers to write: {allRegisters.Count}");
+
+                // Rozdělit do dávek po 50
+                int offset = 0;
+                while (offset < allRegisters.Count)
+                {
+                    // Re-unlock
+                    var (ruOk, ruSt, ruErr) = await WriteHoldingRegistersRtuAsync(s, unitId, UNLOCK_REGISTER, new[] { UNLOCK_VALUE }, timeoutMs);
+                    if (!ruOk || ruSt != ModbusStateCode.Success)
+                        return (false, ruSt, $"Re-unlock failed: {ruErr}");
+                    await Task.Delay(250);
+
+                    // Zjistit velikost dávky
+                    int chunkSize = Math.Min(MAX_REGS_PER_CHUNK, allRegisters.Count - offset);
+                    ushort startAddr = allRegisters[offset].addr;
+                    int actualChunkSize = 1;
+
+                    for (int i = 1; i < chunkSize; i++)
+                    {
+                        if (allRegisters[offset + i].addr != startAddr + i)
+                            break;
+                        actualChunkSize++;
+                    }
+
+                    var chunkData = new ushort[actualChunkSize];
+                    for (int i = 0; i < actualChunkSize; i++)
+                    {
+                        chunkData[i] = allRegisters[offset + i].value;
+                    }
+
+                    System.Diagnostics.Debug.WriteLine($"Writing RS485 batch: {actualChunkSize} regs from 0x{startAddr:X4}");
+
+                    // Report progress
+                    progress?.Report((offset, allRegisters.Count, $"Writing registers {offset}/{allRegisters.Count}..."));
+
+                    // Zápis
+                    var (wok, wst, werr) = await WriteHoldingRegistersRtuAsync(s, unitId, startAddr, chunkData, timeoutMs);
+                    if (!wok || wst != ModbusStateCode.Success)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"   FAILED: {werr}");
+                        return (false, wst, $"Batch write failed: {werr}");
+                    }
+
+                    System.Diagnostics.Debug.WriteLine($"   OK");
+                    offset += actualChunkSize;
+                    await Task.Delay(150);
+                }
+
+                // Lock
+                progress?.Report((allRegisters.Count, allRegisters.Count, "Locking device..."));
+                await WriteHoldingRegistersRtuAsync(s, unitId, UNLOCK_REGISTER, new[] { (ushort)0 }, timeoutMs);
+
+                System.Diagnostics.Debug.WriteLine("\n=== ALL ZONES WRITTEN (BATCHED RS485) ===");
+                return (true, ModbusStateCode.Success, null);
+            }
+            catch (Exception ex)
+            {
+                return (false, ModbusStateCode.UndefinedError, ex.Message);
+            }
+        }
+
+        private static bool WriteMpcZonesBatched(
+        string host, int port, byte unitId,
+        IReadOnlyList<ActivationZone> zones,
+        bool isTcp, ExportSettings? settingsForRtu,
+        int connectTimeoutMs, int sendTimeoutMs, int receiveTimeoutMs,
+        out ModbusStateCode state, out string? error)
+        {
+            state = ModbusStateCode.Success;
+            error = null;
+
+            const ushort UNLOCK_REGISTER = 0x103F;
+            const ushort UNLOCK_VALUE = 4562;
+            const int MAX_REGS_PER_CHUNK = 50;
+
+            try
+            {
+                System.Diagnostics.Debug.WriteLine($"=== Writing MPC zones via {(isTcp ? "TCP" : "RS485")} (BATCHED) ===");
+
+                // UNLOCK PŘED ZÁPISEM
+                if (isTcp)
+                {
+                    System.Diagnostics.Debug.WriteLine($"Unlocking at 0x{UNLOCK_REGISTER:X4}...");
+                    if (!TryWriteUnlockTcp(host, port, unitId, UNLOCK_REGISTER, UNLOCK_VALUE,
+                        connectTimeoutMs, sendTimeoutMs, receiveTimeoutMs, out state, out error))
+                    {
+                        error = $"Failed to unlock: {error}";
+                        System.Diagnostics.Debug.WriteLine($"   FAILED: {error}");
+                        return false;
+                    }
+                    System.Diagnostics.Debug.WriteLine($"   OK");
+                    System.Threading.Thread.Sleep(800);
+                }
+
+                const ushort BASE_ADDR = MPC_BASE_ADDR;       // 0x0300
+                const ushort WRITE_OFFSET = MPCv3RTV_WRITE_OFFSET; // 44
+                const int ZONE_STRIDE = MPC_ZONE_STRIDE;      // 10
+                ushort FIRST_ZONE_BASE = (ushort)(BASE_ADDR + WRITE_OFFSET);
+
+                // Sestavit všechny registry
+                var allRegisters = new List<(ushort addr, ushort value)>();
+
+                for (int idx = 0; idx < zones.Count; idx++)
+                {
+                    var z = zones[idx];
+                    int mainZone = z.MainZone + 1;
+                    int subZone = z.SubZone + 1;
+                    int zoneIndex = ((mainZone - 1) * 5) + (subZone - 1);
+                    ushort zoneBase = (ushort)(FIRST_ZONE_BASE + (zoneIndex * ZONE_STRIDE));
+
+                    var (latLo, latHi) = FloatToWordsWS((float)z.Latitude);
+                    var (lonLo, lonHi) = FloatToWordsWS((float)z.Longitude);
+                    var (heightLo, heightHi) = FloatToWordsWS((float)z.Height);
+                    var (widthLo, widthHi) = FloatToWordsWS((float)z.Width);
+                    var (azLo, azHi) = FloatToWordsWS((float)z.Azimuth);
+
+                    // OPRAVA: Zapsat VŠECH 10 registrů pro každou zónu
+                    allRegisters.Add((zoneBase, lonLo));
+                    allRegisters.Add(((ushort)(zoneBase + 1), lonHi));
+                    allRegisters.Add(((ushort)(zoneBase + 2), latLo));
+                    allRegisters.Add(((ushort)(zoneBase + 3), latHi));
+                    allRegisters.Add(((ushort)(zoneBase + 4), heightLo));
+                    allRegisters.Add(((ushort)(zoneBase + 5), heightHi));
+                    allRegisters.Add(((ushort)(zoneBase + 6), widthLo));
+                    allRegisters.Add(((ushort)(zoneBase + 7), widthHi));
+                    allRegisters.Add(((ushort)(zoneBase + 8), azLo));
+                    allRegisters.Add(((ushort)(zoneBase + 9), azHi));
+
+                    System.Diagnostics.Debug.WriteLine($"Zone {mainZone}-{subZone}: base=0x{zoneBase:X4}, 10 regs");
+                }
+
+                System.Diagnostics.Debug.WriteLine($"Total registers to write: {allRegisters.Count}");
+
+                // Připojení pro TCP
+                ModbusTcpIp? modbusTcp = null;
+                if (isTcp)
+                {
+                    var protocolParams = BuildProtocolParams(false);
+                    protocolParams.ConnectionTimeout = connectTimeoutMs;
+                    protocolParams.SendTimeout = sendTimeoutMs;
+                    protocolParams.ReceiveTimeout = receiveTimeoutMs;
+                    modbusTcp = new ModbusTcpIp($"{host}:{port}", protocolParams);
+                }
+
+                try
+                {
+                    // Rozdělit do dávek po 50
+                    int offset = 0;
+                    while (offset < allRegisters.Count)
+                    {
+                        // Re-unlock před každou dávkou
+                        if (isTcp)
+                        {
+                            modbusTcp!.WriteToHoldingRegister(unitId, UNLOCK_REGISTER - 1, UNLOCK_VALUE, out _, "Re-unlock");
+                            System.Threading.Thread.Sleep(250);
+                        }
+
+                        // Zjistit velikost dávky
+                        int chunkSize = Math.Min(MAX_REGS_PER_CHUNK, allRegisters.Count - offset);
+                        ushort startAddr = allRegisters[offset].addr;
+                        int actualChunkSize = 1;
+
+                        for (int i = 1; i < chunkSize; i++)
+                        {
+                            if (allRegisters[offset + i].addr != startAddr + i)
+                                break;
+                            actualChunkSize++;
+                        }
+
+                        var chunkData = new ushort[actualChunkSize];
+                        for (int i = 0; i < actualChunkSize; i++)
+                        {
+                            chunkData[i] = allRegisters[offset + i].value;
+                        }
+
+                        System.Diagnostics.Debug.WriteLine($"Writing batch: {actualChunkSize} regs from 0x{startAddr:X4}");
+
+                        // Zápis
+                        if (isTcp)
+                        {
+                            // OPRAVA: Použít přímou adresu bez Off1()
+                            if (!modbusTcp!.WriteDataToHoldingRegisters(unitId, startAddr, (ushort)actualChunkSize,
+                                chunkData, out state, null))
+                            {
+                                error = $"Batch write failed at 0x{startAddr:X4}, state={state}";
+                                System.Diagnostics.Debug.WriteLine($"   FAILED: {error}");
+                                return false;
+                            }
+                        }
+
+                        System.Diagnostics.Debug.WriteLine($"   OK");
+                        offset += actualChunkSize;
+                        System.Threading.Thread.Sleep(100);
+                    }
+                }
+                finally
+                {
+                    modbusTcp?.Dispose();
+                }
+
+                // Lock zpět
+                if (isTcp)
+                {
+                    System.Diagnostics.Debug.WriteLine($"Locking back...");
+                    TryWriteUnlockTcp(host, port, unitId, UNLOCK_REGISTER, 0,
+                        connectTimeoutMs, sendTimeoutMs, receiveTimeoutMs, out _, out _);
+                }
+
+                System.Diagnostics.Debug.WriteLine("\n=== ALL ZONES WRITTEN (BATCHED) ===");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                state = ModbusStateCode.UndefinedError;
+                error = ex.Message;
+                System.Diagnostics.Debug.WriteLine($"EXCEPTION: {ex}");
+                return false;
             }
         }
 
@@ -697,7 +1165,7 @@ namespace V2XController
                 System.Threading.Thread.Sleep(250);
 
                 const ushort BASE_ADDR = MPC_BASE_ADDR;       // 0x0300
-                const ushort WRITE_OFFSET = MPC_WRITE_OFFSET; // 44 -> 0x032C
+                const ushort WRITE_OFFSET = MPCv3RTV_WRITE_OFFSET; // 44 -> 0x032C
                 const int ZONE_STRIDE = MPC_ZONE_STRIDE;      // 10
                 ushort FIRST_ZONE_BASE = (ushort)(BASE_ADDR + WRITE_OFFSET);
 
@@ -1617,65 +2085,9 @@ namespace V2XController
         }
 
         private static async Task<(bool ok, ModbusStateCode state, string? error)> WriteHoldingRegistersRtuChunkedAsync(
-    ExportSettings s, byte slave, ushort startAddr, ushort[] regs, int timeoutMs)
+        ExportSettings s, byte slave, ushort startAddr, ushort[] regs, int timeoutMs)
         {
-            try
-            {
-                var parity = ParseParity(s.SerialParity);
-                var stop = ParseStopBits(s.SerialStopBits);
-                int dataBits = s.SerialDataBits ?? ((parity == Parity.Even || parity == Parity.Odd) ? 7 : 8);
-
-                using var sp = new SerialPort(
-                    s.SerialPortName!,
-                    s.SerialBaudrate ?? 19200,
-                    parity,
-                    dataBits,
-                    stop)
-                {
-                    Handshake = Handshake.None,
-                    ReadTimeout = Math.Max(timeoutMs, 3000),
-                    WriteTimeout = Math.Max(timeoutMs, 3000)
-                };
-                sp.Open();
-
-                int offset = 0;
-                while (offset < regs.Length)
-                {
-                    int count = Math.Min(MAX_REGS_PER_REQUEST, regs.Length - offset);
-                    var slice = new ushort[count];
-                    Array.Copy(regs, offset, slice, 0, count);
-
-                    ushort addr = (ushort)(startAddr + offset);
-                    string req = BuildAsciiWriteMultiple(slave, addr, slice);
-                    var tx = Encoding.ASCII.GetBytes(req);
-                    await sp.BaseStream.WriteAsync(tx, 0, tx.Length, CancellationToken.None).ConfigureAwait(false);
-                    await sp.BaseStream.FlushAsync().ConfigureAwait(false);
-
-                    string respAscii = await ReadAsciiFrameAsync(sp, Math.Max(timeoutMs, 3500)).ConfigureAwait(false);
-                    var parsed = ParseAsciiResponse(respAscii);
-                    if (!parsed.ok) return (false, ModbusStateCode.CRC, parsed.error);
-                    if (parsed.slave != slave || parsed.func != 0x10) return (false, ModbusStateCode.WrongResponse, "Wrong slave/func");
-                    if (parsed.payload.Length != 4) return (false, ModbusStateCode.IllegalResponseLength, "Bad echo len");
-
-                    ushort echoAddr = (ushort)((parsed.payload[0] << 8) | parsed.payload[1]);
-                    ushort echoQty = (ushort)((parsed.payload[2] << 8) | parsed.payload[3]);
-                    if (echoAddr != addr || echoQty != (ushort)count)
-                        return (false, ModbusStateCode.WrongResponse, "Echo mismatch");
-
-                    offset += count;
-                    await Task.Delay(100).ConfigureAwait(false);
-                }
-
-                return (true, ModbusStateCode.Success, null);
-            }
-            catch (TimeoutException)
-            {
-                return (false, ModbusStateCode.Timeout, "ASCII timeout");
-            }
-            catch (Exception ex)
-            {
-                return (false, ModbusStateCode.UndefinedError, ex.Message);
-            }
+            return await WriteHoldingRegistersRtuAsync(s, slave, startAddr, regs, timeoutMs);
         }
 
         private static string SaveExportError(Exception ex, string transport, string target, byte unitId, ushort baseAddr, int regsLen, ModbusStateCode? state = null)
@@ -2826,23 +3238,23 @@ namespace V2XController
             }
         }
 
-        // 1) WriteMpcByExactRegistersOnly (TCP) – apply Off1 on all addresses and keep WS word order
         private static bool WriteMpcByExactRegistersOnly(
-            string host, int port, byte unitId,
-            IReadOnlyList<ActivationZone> zones,
-            int connectTimeoutMs, int sendTimeoutMs, int receiveTimeoutMs,
-            bool asSerialTcp,
-            out ModbusStateCode state, out string? error)
+        string host, int port, byte unitId,
+        IReadOnlyList<ActivationZone> zones,
+        int connectTimeoutMs, int sendTimeoutMs, int receiveTimeoutMs,
+        bool asSerialTcp,
+        out ModbusStateCode state, out string? error)
         {
             state = ModbusStateCode.Success;
             error = null;
 
-            const int interWriteDelayMs = 400;
             const ushort UNLOCK_REGISTER = 0x103F;
             const ushort UNLOCK_VALUE = 4562;
+            const int MAX_REGS_PER_CHUNK = 50; // Dávka 50 registrů najednou
 
             try
             {
+                // Odemknout zařízení
                 if (!TryWriteUnlockTcp(host, port, unitId, UNLOCK_REGISTER, UNLOCK_VALUE,
                     connectTimeoutMs, sendTimeoutMs, receiveTimeoutMs, out state, out error))
                 {
@@ -2860,9 +3272,12 @@ namespace V2XController
                 using var modbus = new ModbusTcpIp($"{host}:{port}", protocolParams);
 
                 const ushort BASE_ADDR = MPC_BASE_ADDR;       // 0x0300
-                const ushort WRITE_OFFSET = MPC_WRITE_OFFSET; // 44 -> 0x032C
+                const ushort WRITE_OFFSET = MPCv3RTV_WRITE_OFFSET; // 44 -> 0x032C
                 const int ZONE_STRIDE = MPC_ZONE_STRIDE;      // 10
                 ushort FIRST_ZONE_BASE = (ushort)(BASE_ADDR + WRITE_OFFSET);
+
+                // Sestavit všechny registry do jednoho velkého pole
+                var allRegisters = new List<(ushort addr, ushort value)>();
 
                 for (int idx = 0; idx < zones.Count; idx++)
                 {
@@ -2871,60 +3286,85 @@ namespace V2XController
                     int subZone = z.SubZone + 1;
                     int zoneIndex = ((mainZone - 1) * 5) + (subZone - 1);
                     ushort zoneBase = (ushort)(FIRST_ZONE_BASE + (zoneIndex * ZONE_STRIDE));
-                    string zoneName = $"{mainZone}-{subZone}";
 
-                    // word-swapped LO then HI (WS)
-                    var (latLo, latHi) = FloatToWordsWS((float)z.Latitude);  // [0..1]
-                    var (lonLo, lonHi) = FloatToWordsWS((float)z.Longitude); // [2..3]
-
+                    var (latLo, latHi) = FloatToWordsWS((float)z.Latitude);
+                    var (lonLo, lonHi) = FloatToWordsWS((float)z.Longitude);
                     ushort lengthCm = ToUInt16(z.Height * 100.0);
                     ushort widthCm = ToUInt16(z.Width * 100.0);
                     ushort az = (ushort)Math.Clamp(z.Azimuth, 0, 359);
 
-                    static bool W(ModbusTcpIp mb, byte uid, int delayMs, ushort addr, ushort val, string label, out ModbusStateCode st)
-                    {
-                        bool ok = mb.WriteToHoldingRegister(uid, Off1(addr), val, out st, label);
-                        if (ok && delayMs > 0) System.Threading.Thread.Sleep(delayMs);
-                        return ok;
-                    }
+                    // Přidat registry zóny do seznamu
+                    allRegisters.Add((zoneBase, latLo));
+                    allRegisters.Add(((ushort)(zoneBase + 1), latHi));
+                    allRegisters.Add(((ushort)(zoneBase + 2), lonLo));
+                    allRegisters.Add(((ushort)(zoneBase + 3), lonHi));
+                    allRegisters.Add(((ushort)(zoneBase + 4), lengthCm));
+                    allRegisters.Add(((ushort)(zoneBase + 6), widthCm));
+                    allRegisters.Add(((ushort)(zoneBase + 8), az));
+                }
 
-                    // Re-unlock per zone
-                    modbus.WriteToHoldingRegister(unitId, Off1(UNLOCK_REGISTER), UNLOCK_VALUE, out _, $"Re-unlock {zoneName}");
+                // Rozdělit do dávek po 50 registrech a zapsat
+                for (int i = 0; i < allRegisters.Count; i += MAX_REGS_PER_CHUNK)
+                {
+                    // Odemknout před každou dávkou
+                    modbus.WriteToHoldingRegister(unitId, Off1(UNLOCK_REGISTER), UNLOCK_VALUE, out _, "Re-unlock batch");
                     System.Threading.Thread.Sleep(250);
 
-                    // Lat [0-1] (WS)
-                    if (!W(modbus, unitId, interWriteDelayMs, zoneBase, latLo, $"V2X {zoneName} Lat-lo", out state)) { error = "Lat-lo"; return false; }
-                    if (!W(modbus, unitId, interWriteDelayMs, (ushort)(zoneBase + 1), latHi, $"V2X {zoneName} Lat-hi", out state)) { error = "Lat-hi"; return false; }
+                    int chunkSize = Math.Min(MAX_REGS_PER_CHUNK, allRegisters.Count - i);
+                    var chunk = allRegisters.Skip(i).Take(chunkSize).ToList();
 
-                    // Lon [2-3] (WS)
-                    if (!W(modbus, unitId, interWriteDelayMs, (ushort)(zoneBase + 2), lonLo, $"V2X {zoneName} Lon-lo", out state)) { error = "Lon-lo"; return false; }
-                    if (!W(modbus, unitId, interWriteDelayMs, (ushort)(zoneBase + 3), lonHi, $"V2X {zoneName} Lon-hi", out state)) { error = "Lon-hi"; return false; }
+                    // Najít počáteční adresu a vytvořit souvislé pole hodnot
+                    ushort startAddr = chunk[0].addr;
+                    var values = new ushort[chunkSize];
 
-                    // Length [4] (cm)
-                    if (!W(modbus, unitId, interWriteDelayMs, (ushort)(zoneBase + 4), lengthCm, $"V2X {zoneName} Len", out state)) { error = "Len"; return false; }
+                    for (int j = 0; j < chunkSize; j++)
+                    {
+                        values[j] = chunk[j].value;
+                    }
 
-                    // Width [6] (cm)
-                    if (!W(modbus, unitId, interWriteDelayMs, (ushort)(zoneBase + 6), widthCm, $"V2X {zoneName} Width", out state)) { error = "Width"; return false; }
+                    // Zapsat dávku najednou
+                    if (!modbus.WriteDataToHoldingRegisters(unitId, Off1(startAddr), (ushort)chunkSize,
+                        values, out state, $"Batch write {i}/{allRegisters.Count}"))
+                    {
+                        error = $"Failed to write batch at 0x{startAddr:X4}";
+                        return false;
+                    }
 
-                    // Azimuth [8] (deg)
-                    if (!W(modbus, unitId, interWriteDelayMs, (ushort)(zoneBase + 8), az, $"V2X {zoneName} Az", out state)) { error = "Az"; return false; }
+                    System.Threading.Thread.Sleep(150); // Krátká pauza mezi dávkami
+                }
 
-                    // Verify readback (Off1 on base)
-                    var rd = modbus.ReadDataFrom16bitRegisters(unitId, Off1(zoneBase), 10, RegType16b.HoldingRegister, out var stV, $"Verify {zoneName}");
-                    if (stV != ModbusStateCode.Success || rd == null || rd.Length < 10) { state = stV; error = "Verify read failed"; return false; }
+                // Ověřit zápis - čtení po zónách pro kontrolu
+                for (int idx = 0; idx < zones.Count; idx++)
+                {
+                    var z = zones[idx];
+                    int mainZone = z.MainZone + 1;
+                    int subZone = z.SubZone + 1;
+                    int zoneIndex = ((mainZone - 1) * 5) + (subZone - 1);
+                    ushort zoneBase = (ushort)(FIRST_ZONE_BASE + (zoneIndex * ZONE_STRIDE));
+
+                    var rd = modbus.ReadDataFrom16bitRegisters(unitId, Off1(zoneBase), 10, RegType16b.HoldingRegister,
+                        out var stV, $"Verify {mainZone}-{subZone}");
+
+                    if (stV != ModbusStateCode.Success || rd == null || rd.Length < 10)
+                    {
+                        state = stV;
+                        error = "Verify read failed";
+                        return false;
+                    }
 
                     float rbLat = WordsToFloatWS(rd[0], rd[1]);
                     float rbLon = WordsToFloatWS(rd[2], rd[3]);
-                    bool coordsOk = Math.Abs(rbLon - (float)z.Longitude) <= 1e-5f && Math.Abs(rbLat - (float)z.Latitude) <= 1e-5f;
-                    bool dimsOk = rd[4] == lengthCm && rd[6] == widthCm && rd[8] == az;
+                    bool coordsOk = Math.Abs(rbLon - (float)z.Longitude) <= 1e-5f &&
+                                   Math.Abs(rbLat - (float)z.Latitude) <= 1e-5f;
 
-                    if (!coordsOk || !dimsOk)
+                    if (!coordsOk)
                     {
-                        error = $"Verify mismatch {zoneName}: lat={rbLat}, lon={rbLon}, len={rd[4]}, wid={rd[6]}, az={rd[8]}";
+                        error = $"Verify mismatch {mainZone}-{subZone}";
                         return false;
                     }
                 }
 
+                // Uzamknout zařízení
                 TryWriteUnlockTcp(host, port, unitId, UNLOCK_REGISTER, 0,
                     connectTimeoutMs, sendTimeoutMs, receiveTimeoutMs, out _, out _);
 
@@ -2938,199 +3378,146 @@ namespace V2XController
             }
         }
 
-        // CHANGE: make handler async and call RTU reader for Serial branch
         private async void ReadButton_Click(object sender, RoutedEventArgs e)
         {
             Settings = ExportSettings.FromWindow(this);
             if (Settings == null)
             {
-                MessageBox.Show("Missing export settings.", "Read Registers", MessageBoxButton.OK, MessageBoxImage.Warning);
+                MessageBox.Show("Missing export settings.", "Export", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
 
-            // Zjištění typu spojení
-            string conn = (ConnectionComboBox.SelectedItem as ComboBoxItem)?.Content?.ToString()?.Trim()?.ToLower() ?? "";
-            bool isTunnel = conn == "serial tunnel";
-            bool isTcp = conn == "modbus tcp";
-            bool isRtu = conn == "serial port";
+            bool usingTunnel = string.Equals(
+                (ConnectionComboBox.SelectedItem as ComboBoxItem)?.Content?.ToString()?.Trim(),
+                "Serial tunnel",
+                StringComparison.OrdinalIgnoreCase);
 
-            // --- 1) VALIDACE ---
-            string? validationError;
-            if (!TryValidateSettings(Settings, out validationError))
+            bool isTcp = Settings.IsTcpSelected || usingTunnel;
+
+            string remoteHost = "";
+            int remotePort = 0;
+
+            if (usingTunnel)
             {
-                MessageBox.Show(validationError, "Read Registers - validation", MessageBoxButton.OK,
-                    MessageBoxImage.Warning);
+                remoteHost = TunnelRemoteHostTextBox?.Text?.Trim() ?? "";
+                if (string.IsNullOrWhiteSpace(remoteHost))
+                {
+                    MessageBox.Show("Remote host is required for the tunnel.", "Export", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+                if (!int.TryParse(TunnelRemotePortTextBox?.Text?.Trim(), out remotePort) || remotePort <= 0 || remotePort > 65535)
+                {
+                    MessageBox.Show("Remote port is invalid (1-65535).", "Export", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+
+                Settings.IsTcpSelected = true;
+                Settings.TcpHost = remoteHost;
+                Settings.TcpPort = remotePort;
+            }
+
+            if (!TryValidateSettings(Settings, out var validationError))
+            {
+                MessageBox.Show(validationError, "Export - validation", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
 
-            // --- 2) RTU-over-TCP TUNNEL: validace vstupu ---
-            string tunnelHost = "";
-            int tunnelPort = 0;
-            if (isTunnel)
-            {
-                tunnelHost = TunnelRemoteHostTextBox?.Text?.Trim() ?? "";
-                if (string.IsNullOrWhiteSpace(tunnelHost))
-                {
-                    MessageBox.Show("Remote host is required for Serial Tunnel.", "Tunnel",
-                        MessageBoxButton.OK, MessageBoxImage.Warning);
-                    return;
-                }
+            // Předpokládáme max 35 zón (7 hlavních x 5 sub-zón), každá 10 registrů = 350 registrů
+            const int estimatedTotalRegisters = 350;
+            ShowBusy("Reading activation zones...", showProgress: true, maxProgress: estimatedTotalRegisters);
 
-                if (!int.TryParse(TunnelRemotePortTextBox?.Text?.Trim(), out tunnelPort) ||
-                    tunnelPort < 1 || tunnelPort > 65535)
-                {
-                    MessageBox.Show("Invalid tunnel port (1–65535).", "Tunnel",
-                        MessageBoxButton.OK, MessageBoxImage.Warning);
-                    return;
-                }
-
-                // kontrola dostupnosti endpointu
-                UpdateTunnelIndicator(true);
-                var ok = await EnsureRemoteEndpointAvailableAsync(tunnelHost, tunnelPort, 2500);
-                if (!ok)
-                {
-                    UpdateTunnelIndicator(false);
-                    MessageBox.Show($"Cannot reach {tunnelHost}:{tunnelPort}.", "Tunnel",
-                        MessageBoxButton.OK, MessageBoxImage.Warning);
-                    return;
-                }
-            }
-
-            // --- 3) Vytažení slave ID ---
-            byte unitId = 1;
-            if (Settings.ModemDec.HasValue)
-            {
-                int v = Settings.ModemDec.Value;
-                if (v < 1 || v > 247)
-                {
-                    MessageBox.Show("Modem/slave address must be 1–247.", "Read Registers",
-                        MessageBoxButton.OK, MessageBoxImage.Warning);
-                    return;
-                }
-                unitId = (byte)v;
-            }
-
-            // --- 4) Busy overlay ---
-            ShowBusy("Reading registers...");
-            await Task.Delay(30);
-
-            List<ActivationZone>? zones = null;
+            await Task.Delay(50);
 
             try
             {
-                // ================================
-                //        SERIAL TUNNEL (RTU/TCP)
-                // ================================
-                if (isTunnel)
+                byte unitId = (byte)Math.Clamp(Settings.ModemDec ?? 1, 1, 247);
+                List<ActivationZone> zones;
+                string? error;
+
+                var progress = new Progress<(int current, int total, string message)>(p =>
                 {
-                    var result = await ReadZonesFromModbusRtuOverTcpWorkerAsync(tunnelHost, tunnelPort, unitId);
-
-                    if (!result.ok)
-                    {
-                        await ShowMessageAfterBusyAsync(result.error ?? "Unknown tunnel error",
-                            "Tunnel", MessageBoxButton.OK, MessageBoxImage.Error);
-
-                        UpdateTunnelIndicator(false);
-                        return;
-                    }
-
-                    zones = result.zones;
-                    UpdateTunnelIndicator(false);
-                }
-
-                // ================================
-                //            TCP/IP (MBAP)
-                // ================================
-                else if (isTcp)
-                {
-                    string host = Settings.TcpHost?.Trim() ?? "";
-                    int port = Settings.TcpPort ?? 502;
-
-                    if (string.IsNullOrEmpty(host))
-                    {
-                        await ShowMessageAfterBusyAsync("Modbus TCP host is required.",
-                            "Read Registers", MessageBoxButton.OK, MessageBoxImage.Warning);
-                        return;
-                    }
-
-                    var result = ReadZonesFromModbusTcpWorker(host, port, unitId, asSerialTcp: false);
-
-                    if (!result.ok)
-                    {
-                        await ShowMessageAfterBusyAsync(result.error ?? "Unknown Modbus/TCP error",
-                            "Read Registers", MessageBoxButton.OK, MessageBoxImage.Error);
-                        return;
-                    }
-
-                    zones = result.zones;
-                }
-
-                // ========================================
-                //        SERIAL PORT (RTU → COM port)
-                // ========================================
-                else if (isRtu)
-                {
-                    var result = await ReadZonesFromModbusRtuWorkerAsync(unitId);
-
-                    if (!result.ok)
-                    {
-                        await ShowMessageAfterBusyAsync(result.error ?? "Unknown RTU error",
-                            "Read Registers", MessageBoxButton.OK, MessageBoxImage.Error);
-                        return;
-                    }
-
-                    zones = result.zones;
-                }
-
-                // --- 5) Zpracování výsledku ---
-                if (zones == null || zones.Count == 0)
-                {
-                    await ShowMessageAfterBusyAsync("No valid zones found on the device.",
-                        "Read Registers", MessageBoxButton.OK, MessageBoxImage.Warning);
-                    return;
-                }
-
-                if (Owner is not MainWindow mw)
-                {
-                    await ShowMessageAfterBusyAsync("Cannot update map (MainWindow missing).",
-                        "Read Registers", MessageBoxButton.OK, MessageBoxImage.Error);
-                    return;
-                }
-
-                mw.ActivationZonesCollection.Clear();
-                foreach (var z in zones)
-                    mw.ActivationZonesCollection.Add(z);
-
-                await Dispatcher.InvokeAsync(async () =>
-                {
-                    mw.ReprojectActivationZonesOnMapChange();
-                    await mw.BringAllOverlaysToFrontSafeAsync();
+                    // DŮLEŽITÉ: Musí být async invoke, aby neblokoval
+                    Dispatcher.InvokeAsync(() => UpdateProgress(p.current, p.total, p.message), DispatcherPriority.Background);
                 });
 
-                await ShowMessageAfterBusyAsync(
-                    $"Successfully read {zones.Count} zone(s).",
-                    "Read Registers", MessageBoxButton.OK, MessageBoxImage.Information);
+                if (isTcp)
+                {
+                    var host = Settings.TcpHost?.Trim();
+                    var port = Settings.TcpPort ?? 502;
+                    if (string.IsNullOrWhiteSpace(host))
+                    {
+                        await ShowMessageAfterBusyAsync("Modbus TCP host is required.", "Read", MessageBoxButton.OK, MessageBoxImage.Warning);
+                        return;
+                    }
+
+                    string hostOnly = host.Split(new[] { ':', ';', ',' }, 2, StringSplitOptions.RemoveEmptyEntries)[0].Trim();
+
+                    // Spustit v background thread
+                    var result = await Task.Run(() => ReadZonesFromModbusTcpWorkerWithProgress(hostOnly, port, unitId, false, progress));
+
+                    if (!result.ok)
+                    {
+                        await ShowMessageAfterBusyAsync($"Failed to read zones via TCP: {result.error}", "Read", MessageBoxButton.OK, MessageBoxImage.Error);
+                        return;
+                    }
+
+                    zones = result.zones;
+                }
+                else
+                {
+                    // RS485 - už je async
+                    var (ok, readZones, err) = await ReadZonesFromModbusRtuWorkerAsyncWithProgress(unitId, progress);
+                    if (!ok)
+                    {
+                        await ShowMessageAfterBusyAsync($"Failed to read zones via RS485: {err}", "Read", MessageBoxButton.OK, MessageBoxImage.Error);
+                        return;
+                    }
+                    zones = readZones;
+                }
+
+                if (Owner is MainWindow mw)
+                {
+                    await Dispatcher.InvokeAsync(() =>
+                    {
+                        mw.ActivationZonesCollection.Clear();
+                        foreach (var z in zones)
+                        {
+                            mw.ActivationZonesCollection.Add(z);
+                        }
+                    });
+
+                    await ShowMessageAfterBusyAsync(
+                        $"Successfully read {zones.Count} zone(s) from {(isTcp ? "TCP" : "RS485")}.",
+                        "Read", MessageBoxButton.OK, MessageBoxImage.Information);
+                }
+            }
+            catch (Exception ex)
+            {
+                await ShowMessageAfterBusyAsync($"Read error: {ex.Message}", "Read", MessageBoxButton.OK, MessageBoxImage.Error);
             }
             finally
             {
                 HideBusy();
-                if (isTunnel) UpdateTunnelIndicator(false);
             }
         }
 
-
-        // 2) ReadZonesFromModbusTcpWorker – apply Off1 on base for FC03 reads, use robust zone decode
-        private static (bool ok, List<ActivationZone> zones, bool isRtv, string? error) ReadZonesFromModbusTcpWorker(string host, int port, byte unitId, bool asSerialTcp = false)
+        private static (bool ok, List<ActivationZone> zones, bool isRtv, string? error)
+            ReadZonesFromModbusTcpWorkerWithProgress(string host, int port, byte unitId, bool asSerialTcp, IProgress<(int, int, string)>? progress)
         {
             try
             {
+                System.Diagnostics.Debug.WriteLine("=== Reading MPC zones via TCP (BATCHED) ===");
+
+                progress?.Report((0, 100, "Connecting..."));
+
                 var protocolParams = BuildProtocolParams(asSerialTcp);
 
                 if (!TryWriteUnlockTcp(host, port, unitId, 0x103F, 4562,
                     connectTimeoutMs: 3000, sendTimeoutMs: 2000, receiveTimeoutMs: 5000,
                     out var unlockState, out var unlockErr))
                 {
-                    return (false, new List<ActivationZone>(), false, $"Failed to unlock device: {unlockState}{(string.IsNullOrWhiteSpace(unlockErr) ? "" : $" ({unlockErr})")}");
+                    return (false, new List<ActivationZone>(), false,
+                        $"Failed to unlock device: {unlockState}{(string.IsNullOrWhiteSpace(unlockErr) ? "" : $" ({unlockErr})")}");
                 }
                 System.Threading.Thread.Sleep(800);
 
@@ -3142,149 +3529,642 @@ namespace V2XController
 
                 var zones = new List<ActivationZone>();
 
-                const ushort BASE_ADDR = MPC_BASE_ADDR;       // 0x0300
-                const ushort WRITE_OFFSET = MPC_WRITE_OFFSET; // 44
-                const int ZONE_STRIDE = MPC_ZONE_STRIDE;      // 10
-                ushort FIRST_ZONE_BASE = (ushort)(BASE_ADDR + WRITE_OFFSET); // 0x032C
+                const ushort FIRST_REGISTER = 176;
+                const ushort LAST_REGISTER = 524;
+                const int TOTAL_REGISTERS = LAST_REGISTER - FIRST_REGISTER + 1;
+                const int CHUNK_SIZE = 50;
 
-                for (int mainZone = 1; mainZone <= 4; mainZone++)
+                System.Diagnostics.Debug.WriteLine($"Registers: {FIRST_REGISTER}-{LAST_REGISTER} (total {TOTAL_REGISTERS})");
+
+                var allData = new ushort[TOTAL_REGISTERS];
+                int registersRead = 0;
+
+                // Čtení registrů - 0% až 95%
+                for (int offset = 0; offset < TOTAL_REGISTERS; offset += CHUNK_SIZE)
                 {
-                    for (int subZone = 1; subZone <= 5; subZone++)
+                    int toRead = Math.Min(CHUNK_SIZE, TOTAL_REGISTERS - offset);
+                    ushort readAddr = (ushort)(MPC_BASE_ADDR + FIRST_REGISTER + offset);
+
+                    System.Diagnostics.Debug.WriteLine($"Reading TCP chunk: {toRead} regs from 0x{readAddr:X4} (offset {offset})...");
+
+                    // Progress: 0-95% pro čtení registrů
+                    int progressPercent = (int)((offset * 95.0) / TOTAL_REGISTERS);
+                    progress?.Report((progressPercent, 100, $"Reading {offset}/{TOTAL_REGISTERS} registers..."));
+
+                    var data = modbus.ReadDataFrom16bitRegisters(
+                        unitId, readAddr, (ushort)toRead, RegType16b.HoldingRegister,
+                        out var state, $"Read batch offset {offset}");
+
+                    if (state != ModbusStateCode.Success || data == null)
                     {
-                        if ((mainZone > 1 || subZone > 1) && subZone == 1)
-                        {
-                            modbus.WriteToHoldingRegister(unitId, Off1(0x103F), 4562, out _, "Re-unlock for zone");
-                            System.Threading.Thread.Sleep(300);
-                        }
-
-                        int zoneIndex = ((mainZone - 1) * 5) + (subZone - 1);
-                        ushort zoneBase = (ushort)(FIRST_ZONE_BASE + (zoneIndex * ZONE_STRIDE));
-
-                        // apply Off1 on base for FC03 read
-                        var data = modbus.ReadDataFrom16bitRegisters(
-                            unitId, Off1(zoneBase), 10, RegType16b.HoldingRegister, out var zoneState,
-                            $"Read zone {mainZone}-{subZone}");
-
-                        if (zoneState != ModbusStateCode.Success || data == null || data.Length < 10) continue;
-                        if (data.All(v => v == 0)) continue;
-
-                        if (TryDecodeZoneRegs(data, out var latitude, out var longitude, out var width, out var height, out var azimuth))
-                        {
-                            zones.Add(new ActivationZone
-                            {
-                                Name = $"Zone {mainZone}-{subZone}",
-                                MainZone = mainZone - 1,
-                                SubZone = subZone - 1,
-                                Latitude = latitude,
-                                Longitude = longitude,
-                                Width = width,
-                                Height = height,
-                                Azimuth = azimuth
-                            });
-                        }
+                        System.Diagnostics.Debug.WriteLine($"   FAILED: {state}");
+                        return (false, new List<ActivationZone>(), false,
+                            $"Failed to read batch at offset {offset}: {state}");
                     }
+
+                    Array.Copy(data, 0, allData, offset, data.Length);
+                    registersRead += data.Length;
+                    System.Diagnostics.Debug.WriteLine($"   OK - {data.Length} regs (total: {registersRead}/{TOTAL_REGISTERS})");
+
+                    System.Threading.Thread.Sleep(30);
+                }
+
+                // Zpracování zón - 95% až 100%
+                progress?.Report((95, 100, "Processing zones..."));
+
+                System.Diagnostics.Debug.WriteLine($"\n=== Read complete: {registersRead} registers ===");
+
+                const int ZONE_STRIDE = 10;
+                int maxZones = TOTAL_REGISTERS / ZONE_STRIDE;
+
+                for (int zoneIdx = 0; zoneIdx < maxZones; zoneIdx++)
+                {
+                    int baseIdx = zoneIdx * ZONE_STRIDE;
+                    if (baseIdx + 9 >= allData.Length) break;
+
+                    ushort lonLo = allData[baseIdx + 0];
+                    ushort lonHi = allData[baseIdx + 1];
+                    ushort latLo = allData[baseIdx + 2];
+                    ushort latHi = allData[baseIdx + 3];
+                    ushort heightLo = allData[baseIdx + 4];
+                    ushort heightHi = allData[baseIdx + 5];
+                    ushort widthLo = allData[baseIdx + 6];
+                    ushort widthHi = allData[baseIdx + 7];
+                    ushort azLo = allData[baseIdx + 8];
+                    ushort azHi = allData[baseIdx + 9];
+
+                    if (lonLo == 0 && lonHi == 0 && latLo == 0 && latHi == 0)
+                        continue;
+
+                    float lonF = WordsToFloatWS(lonLo, lonHi);
+                    float latF = WordsToFloatWS(latLo, latHi);
+                    float heightF = WordsToFloatWS(heightLo, heightHi);
+                    float widthF = WordsToFloatWS(widthLo, widthHi);
+                    float azF = WordsToFloatWS(azLo, azHi);
+
+                    if (!IsValidZoneData(lonF, latF, heightF, widthF, azF))
+                        continue;
+
+                    int mainZone = zoneIdx / 5;
+                    int subZone = zoneIdx % 5;
+
+                    var zone = new ActivationZone
+                    {
+                        MainZone = mainZone,
+                        SubZone = subZone,
+                        Latitude = latF,
+                        Longitude = lonF,
+                        Height = heightF,
+                        Width = widthF,
+                        Azimuth = (int)Math.Round(azF),
+                        Name = $"Zone {mainZone + 1}"
+                    };
+
+                    zone.UpdateName();
+                    zones.Add(zone);
+
+                    // Progress během zpracování: 95-98%
+                    if (zoneIdx % 5 == 0)
+                    {
+                        int processProgress = 95 + (int)((zoneIdx * 3.0) / maxZones);
+                        progress?.Report((processProgress, 100, $"Processing zone {zoneIdx}/{maxZones}..."));
+                    }
+                }
+
+                progress?.Report((98, 100, "Reading switch zones..."));
+
+                if (isRtv)
+                {
+                    var rtvSwitches = ReadRtvSwitchZonesTcp(modbus, unitId);
+                    var validSwitches = rtvSwitches.Where(z => IsValidZoneData(
+                        (float)z.Longitude, (float)z.Latitude,
+                        (float)z.Height, (float)z.Width, (float)z.Azimuth)).ToList();
+
+                    zones.AddRange(validSwitches);
+                }
+
+                progress?.Report((99, 100, "Locking device..."));
+
+                TryWriteUnlockTcp(host, port, unitId, 0x103F, 0,
+                    connectTimeoutMs: 3000, sendTimeoutMs: 2000, receiveTimeoutMs: 5000,
+                    out _, out _);
+
+                System.Diagnostics.Debug.WriteLine($"\n=== TCP READ COMPLETE: {zones.Count} valid zones ===");
+
+                // Final progress: 100%
+                progress?.Report((100, 100, "Complete"));
+
+                // Malá pauza, aby uživatel viděl 100%
+                System.Threading.Thread.Sleep(200);
+
+                return (true, zones, isRtv, null);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"EXCEPTION: {ex}");
+                return (false, new List<ActivationZone>(), false, ex.Message);
+            }
+        }
+
+        private async Task<(bool ok, List<ActivationZone> zones, string? error)> ReadZonesFromModbusRtuWorkerAsyncWithProgress(
+            byte unitId, IProgress<(int, int, string)>? progress)
+        {
+            var s = Settings;
+            if (s == null) return (false, null!, "Settings missing");
+
+            const int timeoutMs = 5000;
+            const ushort FIRST_REGISTER = 176;
+            const ushort LAST_REGISTER = 524;
+            const int TOTAL_REGISTERS = LAST_REGISTER - FIRST_REGISTER + 1;
+            const int CHUNK_SIZE = 50;
+
+            try
+            {
+                System.Diagnostics.Debug.WriteLine($"=== Reading MPC zones via Modbus ASCII (BATCHED) ===");
+                System.Diagnostics.Debug.WriteLine($"Registers: {FIRST_REGISTER}-{LAST_REGISTER} (total {TOTAL_REGISTERS})");
+
+                var allData = new ushort[TOTAL_REGISTERS];
+                int readCount = 0;
+
+                // Čtení registrů - 0% až 95%
+                for (int offset = 0; offset < TOTAL_REGISTERS; offset += CHUNK_SIZE)
+                {
+                    int remaining = TOTAL_REGISTERS - offset;
+                    int toRead = Math.Min(CHUNK_SIZE, remaining);
+                    ushort addr = (ushort)(MPC_BASE_ADDR + FIRST_REGISTER + offset);
+
+                    System.Diagnostics.Debug.WriteLine($"Reading chunk: {toRead} regs from 0x{addr:X4} (offset {offset})...");
+
+                    // Progress: 0-95% pro čtení
+                    int progressPercent = (int)((offset * 95.0) / TOTAL_REGISTERS);
+                    progress?.Report((progressPercent, 100, $"Reading {offset}/{TOTAL_REGISTERS} registers..."));
+
+                    var (rok, rst, rdata, rerr) = await ReadHoldingRegistersRtuAsync(s, unitId, addr, (ushort)toRead, timeoutMs);
+
+                    if (!rok || rst != ModbusStateCode.Success || rdata == null)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"   FAILED: {rerr}");
+                        return (false, null!, $"Failed at offset {FIRST_REGISTER + offset}: {rerr}");
+                    }
+
+                    Array.Copy(rdata, 0, allData, offset, rdata.Length);
+                    readCount += rdata.Length;
+
+                    System.Diagnostics.Debug.WriteLine($"   OK - {rdata.Length} regs (total: {readCount}/{TOTAL_REGISTERS})");
+                    await Task.Delay(100);
+                }
+
+                // Zpracování zón - 95% až 100%
+                progress?.Report((95, 100, "Processing zones..."));
+
+                System.Diagnostics.Debug.WriteLine($"\n=== Read complete: {readCount} registers ===");
+
+                var zones = new List<ActivationZone>();
+                const int ZONE_STRIDE = 10;
+                int maxZones = TOTAL_REGISTERS / ZONE_STRIDE;
+
+                System.Diagnostics.Debug.WriteLine($"Scanning up to {maxZones} zone slots...\n");
+
+                for (int zoneIdx = 0; zoneIdx < maxZones; zoneIdx++)
+                {
+                    int baseIdx = zoneIdx * ZONE_STRIDE;
+                    if (baseIdx + 9 >= allData.Length) break;
+
+                    ushort lonLo = allData[baseIdx + 0];
+                    ushort lonHi = allData[baseIdx + 1];
+                    ushort latLo = allData[baseIdx + 2];
+                    ushort latHi = allData[baseIdx + 3];
+                    ushort heightLo = allData[baseIdx + 4];
+                    ushort heightHi = allData[baseIdx + 5];
+                    ushort widthLo = allData[baseIdx + 6];
+                    ushort widthHi = allData[baseIdx + 7];
+                    ushort azLo = allData[baseIdx + 8];
+                    ushort azHi = allData[baseIdx + 9];
+
+                    if (lonLo == 0 && lonHi == 0 && latLo == 0 && latHi == 0)
+                        continue;
+
+                    float lonF = WordsToFloatWS(lonLo, lonHi);
+                    float latF = WordsToFloatWS(latLo, latHi);
+                    float heightF = WordsToFloatWS(heightLo, heightHi);
+                    float widthF = WordsToFloatWS(widthLo, widthHi);
+                    float azF = WordsToFloatWS(azLo, azHi);
+
+                    // VALIDACE: Filtrovat invalidní data
+                    if (!IsValidZoneData(lonF, latF, heightF, widthF, azF))
+                    {
+                        System.Diagnostics.Debug.WriteLine($"Zone slot {zoneIdx}: ✗ Invalid data - skipped");
+                        continue;
+                    }
+
+                    int mainZone = zoneIdx / 5;
+                    int subZone = zoneIdx % 5;
+
+                    var zone = new ActivationZone
+                    {
+                        MainZone = mainZone,
+                        SubZone = subZone,
+                        Latitude = latF,
+                        Longitude = lonF,
+                        Height = heightF,
+                        Width = widthF,
+                        Azimuth = (int)Math.Round(azF),
+                        Name = $"Zone {mainZone + 1}"
+                    };
+
+                    zone.UpdateName();
+                    zones.Add(zone);
+                    System.Diagnostics.Debug.WriteLine($"  ✓ Added Zone {mainZone + 1}-{subZone + 1}: Lon={lonF:F6}, Lat={latF:F6}");
+
+                    // Progress během zpracování: 95-100%
+                    if (zoneIdx % 3 == 0)
+                    {
+                        int processProgress = 95 + (int)((zoneIdx * 5.0) / maxZones);
+                        progress?.Report((processProgress, 100, $"Processing zone {zoneIdx}/{maxZones}..."));
+                    }
+                }
+
+                progress?.Report((100, 100, "Complete"));
+                await Task.Delay(200); // Krátká pauza, aby uživatel viděl 100%
+
+                System.Diagnostics.Debug.WriteLine($"\n=== RS485 READ COMPLETE: {zones.Count} valid zones ===");
+                return (true, zones, null);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"EXCEPTION: {ex}");
+                return (false, null!, ex.Message);
+            }
+        }
+
+
+        private static (bool ok, List<ActivationZone> zones, bool isRtv, string? error)
+    ReadZonesFromModbusTcpWorker(string host, int port, byte unitId, bool asSerialTcp = false)
+        {
+            try
+            {
+                System.Diagnostics.Debug.WriteLine("=== Reading MPC zones via TCP (BATCHED) ===");
+
+                var protocolParams = BuildProtocolParams(asSerialTcp);
+
+                if (!TryWriteUnlockTcp(host, port, unitId, 0x103F, 4562,
+                    connectTimeoutMs: 3000, sendTimeoutMs: 2000, receiveTimeoutMs: 5000,
+                    out var unlockState, out var unlockErr))
+                {
+                    return (false, new List<ActivationZone>(), false,
+                        $"Failed to unlock device: {unlockState}{(string.IsNullOrWhiteSpace(unlockErr) ? "" : $" ({unlockErr})")}");
+                }
+                System.Threading.Thread.Sleep(800);
+
+                using var modbus = new ModbusTcpIp($"{host}:{port}", protocolParams);
+
+                bool isRtv = false;
+                if (TryReadFirmwareTcp(host, port, unitId, asSerialTcp, out var fw, out _, out _))
+                    isRtv = IsRtvFirmware(fw);
+
+                var zones = new List<ActivationZone>();
+
+                const ushort FIRST_REGISTER = 176;
+                const ushort LAST_REGISTER = 524;
+                const int TOTAL_REGISTERS = LAST_REGISTER - FIRST_REGISTER + 1;
+                const int CHUNK_SIZE = 50;
+
+                System.Diagnostics.Debug.WriteLine($"Registers: {FIRST_REGISTER}-{LAST_REGISTER} (total {TOTAL_REGISTERS})");
+
+                var allData = new ushort[TOTAL_REGISTERS];
+                int registersRead = 0;
+
+                for (int offset = 0; offset < TOTAL_REGISTERS; offset += CHUNK_SIZE)
+                {
+                    int toRead = Math.Min(CHUNK_SIZE, TOTAL_REGISTERS - offset);
+                    ushort readAddr = (ushort)(MPC_BASE_ADDR + FIRST_REGISTER + offset);
+
+                    System.Diagnostics.Debug.WriteLine($"Reading TCP chunk: {toRead} regs from 0x{readAddr:X4} (offset {offset})...");
+
+                    var data = modbus.ReadDataFrom16bitRegisters(
+                        unitId, readAddr, (ushort)toRead, RegType16b.HoldingRegister,
+                        out var state, $"Read batch offset {offset}");
+
+                    if (state != ModbusStateCode.Success || data == null)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"   FAILED: {state}");
+                        return (false, new List<ActivationZone>(), false,
+                            $"Failed to read batch at offset {offset}: {state}");
+                    }
+
+                    Array.Copy(data, 0, allData, offset, data.Length);
+                    registersRead += data.Length;
+                    System.Diagnostics.Debug.WriteLine($"   OK - {data.Length} regs (total: {registersRead}/{TOTAL_REGISTERS})");
+
+                    // OPRAVA: Kratší pauza, aby byl loading rychlejší, ale UI stále responzivní
+                    System.Threading.Thread.Sleep(50); // Změněno z 100ms na 50ms
+                }
+
+                System.Diagnostics.Debug.WriteLine($"\n=== Read complete: {registersRead} registers ===");
+
+                const int ZONE_STRIDE = 10;
+                int maxZones = TOTAL_REGISTERS / ZONE_STRIDE;
+
+                for (int zoneIdx = 0; zoneIdx < maxZones; zoneIdx++)
+                {
+                    int baseIdx = zoneIdx * ZONE_STRIDE;
+                    if (baseIdx + 9 >= allData.Length) break;
+
+                    ushort lonLo = allData[baseIdx + 0];
+                    ushort lonHi = allData[baseIdx + 1];
+                    ushort latLo = allData[baseIdx + 2];
+                    ushort latHi = allData[baseIdx + 3];
+                    ushort heightLo = allData[baseIdx + 4];
+                    ushort heightHi = allData[baseIdx + 5];
+                    ushort widthLo = allData[baseIdx + 6];
+                    ushort widthHi = allData[baseIdx + 7];
+                    ushort azLo = allData[baseIdx + 8];
+                    ushort azHi = allData[baseIdx + 9];
+
+                    if (lonLo == 0 && lonHi == 0 && latLo == 0 && latHi == 0)
+                        continue;
+
+                    float lonF = WordsToFloatWS(lonLo, lonHi);
+                    float latF = WordsToFloatWS(latLo, latHi);
+                    float heightF = WordsToFloatWS(heightLo, heightHi);
+                    float widthF = WordsToFloatWS(widthLo, widthHi);
+                    float azF = WordsToFloatWS(azLo, azHi);
+
+                    if (!IsValidZoneData(lonF, latF, heightF, widthF, azF))
+                        continue;
+
+                    int mainZone = zoneIdx / 5;
+                    int subZone = zoneIdx % 5;
+
+                    var zone = new ActivationZone
+                    {
+                        MainZone = mainZone,
+                        SubZone = subZone,
+                        Latitude = latF,
+                        Longitude = lonF,
+                        Height = heightF,
+                        Width = widthF,
+                        Azimuth = (int)Math.Round(azF),
+                        Name = $"Zone {mainZone + 1}"
+                    };
+
+                    zone.UpdateName();
+                    zones.Add(zone);
                 }
 
                 if (isRtv)
                 {
                     var rtvSwitches = ReadRtvSwitchZonesTcp(modbus, unitId);
-                    zones.AddRange(rtvSwitches);
+                    var validSwitches = rtvSwitches.Where(z => IsValidZoneData(
+                        (float)z.Longitude, (float)z.Latitude,
+                        (float)z.Height, (float)z.Width, (float)z.Azimuth)).ToList();
+
+                    zones.AddRange(validSwitches);
                 }
 
                 TryWriteUnlockTcp(host, port, unitId, 0x103F, 0,
                     connectTimeoutMs: 3000, sendTimeoutMs: 2000, receiveTimeoutMs: 5000,
                     out _, out _);
 
+                System.Diagnostics.Debug.WriteLine($"\n=== TCP READ COMPLETE: {zones.Count} valid zones ===");
                 return (true, zones, isRtv, null);
             }
             catch (Exception ex)
             {
+                System.Diagnostics.Debug.WriteLine($"EXCEPTION: {ex}");
                 return (false, new List<ActivationZone>(), false, ex.Message);
             }
         }
 
+        private static bool IsValidZoneData(float lon, float lat, float height, float width, float azimuth)
+        {
+            // Kontrola souřadnic
+            if (!double.IsFinite(lon) || !double.IsFinite(lat))
+                return false;
+
+            // Lat/Lon musí být v rozumném rozsahu
+            if (lon < 5.0f || lon > 25.0f || lat < 40.0f || lat > 60.0f)
+                return false;
+
+            // Rozměry musí být platné
+            if (height <= 0 || height > 500 || width <= 0 || width > 500)
+                return false;
+
+            // Azimuth musí být v rozsahu 0-359
+            if (azimuth < 0 || azimuth >= 360)
+                return false;
+
+            // Dodatečná kontrola: filtrovat "téměř nulové" hodnoty
+            if (Math.Abs(lon) < 1.0 || Math.Abs(lat) < 1.0)
+                return false;
+
+            return true;
+        }
+
         private async Task<(bool ok, List<ActivationZone> zones, string? error)> ReadZonesFromModbusRtuWorkerAsync(byte unitId)
         {
-            var s = Settings ?? ExportSettings.FromWindow(this);
-            if (s == null) return (false, new List<ActivationZone>(), "Missing serial settings.");
+            var s = Settings;
+            if (s == null) return (false, null!, "Settings missing");
 
-            var (probeOk, _, tuned) = await RtuAdaptiveProbeAsync(s, unitId, 1200);
-            if (!probeOk) return (false, new List<ActivationZone>(), "ASCII framing probe failed.");
-            s = tuned!;
+            const int timeoutMs = 5000;
+            const ushort FIRST_REGISTER = 176;
+            const ushort LAST_REGISTER = 524;
+            const int TOTAL_REGISTERS = LAST_REGISTER - FIRST_REGISTER + 1;
+            const int CHUNK_SIZE = 50;
 
             try
             {
-                const ushort UNLOCK_REGISTER = 0x103F;
-                const ushort UNLOCK_VALUE = 4562;
+                System.Diagnostics.Debug.WriteLine($"=== Reading MPC zones via Modbus ASCII (BATCHED) ===");
+                System.Diagnostics.Debug.WriteLine($"Registers: {FIRST_REGISTER}-{LAST_REGISTER} (total {TOTAL_REGISTERS})");
 
-                // Unlock (ASCII, Off1 applied inside WriteHoldingRegistersRtuAsync)
+                var allData = new ushort[TOTAL_REGISTERS];
+                int readCount = 0;
+
+                for (int offset = 0; offset < TOTAL_REGISTERS; offset += CHUNK_SIZE)
                 {
-                    var (uok, ust, uerr) = await UnlockRtuAsync(s, unitId, 2000, settleMs: 400);
-                    if (!uok || ust != ModbusStateCode.Success)
-                        return (false, new List<ActivationZone>(), $"Failed to unlock (RS485): {ust}{(string.IsNullOrWhiteSpace(uerr) ? "" : $" ({uerr})")}");
+                    int remaining = TOTAL_REGISTERS - offset;
+                    int toRead = Math.Min(CHUNK_SIZE, remaining);
+                    ushort addr = (ushort)(MPC_BASE_ADDR + FIRST_REGISTER + offset);
+
+                    System.Diagnostics.Debug.WriteLine($"Reading chunk: {toRead} regs from 0x{addr:X4} (offset {offset})...");
+
+                    var (rok, rst, rdata, rerr) = await ReadHoldingRegistersRtuAsync(s, unitId, addr, (ushort)toRead, timeoutMs);
+
+                    if (!rok || rst != ModbusStateCode.Success || rdata == null)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"   FAILED: {rerr}");
+                        return (false, null!, $"Failed at offset {FIRST_REGISTER + offset}: {rerr}");
+                    }
+
+                    Array.Copy(rdata, 0, allData, offset, rdata.Length);
+                    readCount += rdata.Length;
+
+                    System.Diagnostics.Debug.WriteLine($"   OK - {rdata.Length} regs (total: {readCount}/{TOTAL_REGISTERS})");
+                    await Task.Delay(100);
                 }
 
-                // Probe firmware (optional)
-                bool isRtv = false;
-                {
-                    var (okFw, stFw, dataFw, _) = await ReadHoldingRegistersRtuAsync(s, unitId, 0x0000, 0x0020, timeoutMs: 2000);
-                    if (okFw && stFw == ModbusStateCode.Success && dataFw != null)
-                        isRtv = IsRtvFirmware(DecodeAsciiFromRegs(dataFw));
-                }
+                System.Diagnostics.Debug.WriteLine($"\n=== Read complete: {readCount} registers ===");
 
                 var zones = new List<ActivationZone>();
-                const ushort BASE_ADDR = MPC_BASE_ADDR;       // 0x0300
-                const ushort WRITE_OFFSET = MPC_WRITE_OFFSET; // 44 -> 0x032C
-                const int ZONE_STRIDE = MPC_ZONE_STRIDE;      // 10
-                ushort FIRST_ZONE_BASE = (ushort)(BASE_ADDR + WRITE_OFFSET); // 0x032C
-                ushort usedBase = FIRST_ZONE_BASE;
+                const int ZONE_STRIDE = 10;
+                int maxZones = TOTAL_REGISTERS / ZONE_STRIDE;
 
-                for (int mainZone = 1; mainZone <= 4; mainZone++)
+                System.Diagnostics.Debug.WriteLine($"Scanning up to {maxZones} zone slots...\n");
+
+                for (int zoneIdx = 0; zoneIdx < maxZones; zoneIdx++)
                 {
-                    for (int subZone = 1; subZone <= 5; subZone++)
+                    int baseIdx = zoneIdx * ZONE_STRIDE;
+                    if (baseIdx + 9 >= allData.Length) break;
+
+                    ushort lonLo = allData[baseIdx + 0];
+                    ushort lonHi = allData[baseIdx + 1];
+                    ushort latLo = allData[baseIdx + 2];
+                    ushort latHi = allData[baseIdx + 3];
+                    ushort heightLo = allData[baseIdx + 4];
+                    ushort heightHi = allData[baseIdx + 5];
+                    ushort widthLo = allData[baseIdx + 6];
+                    ushort widthHi = allData[baseIdx + 7];
+                    ushort azLo = allData[baseIdx + 8];
+                    ushort azHi = allData[baseIdx + 9];
+
+                    if (lonLo == 0 && lonHi == 0 && latLo == 0 && latHi == 0)
+                        continue;
+
+                    float lonF = WordsToFloatWS(lonLo, lonHi);
+                    float latF = WordsToFloatWS(latLo, latHi);
+                    float heightF = WordsToFloatWS(heightLo, heightHi);
+                    float widthF = WordsToFloatWS(widthLo, widthHi);
+                    float azF = WordsToFloatWS(azLo, azHi);
+
+                    // VALIDACE: Filtrovat invalidní data
+                    if (!IsValidZoneData(lonF, latF, heightF, widthF, azF))
                     {
-                        if ((mainZone > 1 || subZone > 1) && subZone == 1)
-                        {
-                            {
-                                var (ruOk, ruSt, ruErr) = await UnlockRtuAsync(s, unitId, 1800, settleMs: 250);
-                                if (!ruOk || ruSt != ModbusStateCode.Success) continue;
-                            }
-                        }
-
-                        int zoneIndex = ((mainZone - 1) * 5) + (subZone - 1);
-                        ushort zoneBase = (ushort)(usedBase + (zoneIndex * ZONE_STRIDE));
-
-                        var (ok, st, data, _) = await ReadHoldingRegistersRtuAsync(s, unitId, zoneBase, 10, timeoutMs: 2000);
-                        if (!ok || st != ModbusStateCode.Success || data == null || data.Length < 10)
-                            continue;
-
-                        if (data.All(v => v == 0)) continue;
-
-                        if (!TryDecodeZoneRegs(data, out var lat, out var lon, out var width, out var height, out var az))
-                            continue;
-
-                        zones.Add(new ActivationZone
-                        {
-                            Name = $"Zone {mainZone}-{subZone}",
-                            MainZone = mainZone - 1,
-                            SubZone = subZone - 1,
-                            Latitude = lat,
-                            Longitude = lon,
-                            Width = width,
-                            Height = height,
-                            Azimuth = az
-                        });
+                        System.Diagnostics.Debug.WriteLine($"Zone slot {zoneIdx}: ✗ Invalid data - skipped");
+                        continue;
                     }
+
+                    int mainZone = zoneIdx / 5;
+                    int subZone = zoneIdx % 5;
+
+                    var zone = new ActivationZone
+                    {
+                        MainZone = mainZone,
+                        SubZone = subZone,
+                        Latitude = latF,
+                        Longitude = lonF,
+                        Height = heightF,
+                        Width = widthF,
+                        Azimuth = (int)Math.Round(azF),
+                        Name = $"Zone {mainZone + 1}"
+                    };
+
+                    zone.UpdateName();
+                    zones.Add(zone);
+                    System.Diagnostics.Debug.WriteLine($"  ✓ Added Zone {mainZone + 1}-{subZone + 1}: Lon={lonF:F6}, Lat={latF:F6}");
                 }
 
-                await WriteHoldingRegistersRtuAsync(s, unitId, UNLOCK_REGISTER, new[] { (ushort)0 }, timeoutMs: 1500);
-
+                System.Diagnostics.Debug.WriteLine($"\n=== RS485 READ COMPLETE: {zones.Count} valid zones ===");
                 return (true, zones, null);
             }
             catch (Exception ex)
             {
-                return (false, new List<ActivationZone>(), ex.Message);
+                System.Diagnostics.Debug.WriteLine($"EXCEPTION: {ex}");
+                return (false, null!, ex.Message);
             }
+        }
+
+        private static bool TryDecodeZoneRegs(ushort[] regs, out double lat, out double lon, out double width, out double height, out int az)
+        {
+            lat = lon = width = height = 0;
+            az = 0;
+
+            if (regs.Length < 10) return false;
+
+            System.Diagnostics.Debug.WriteLine($"    Analyzing raw data...");
+            System.Diagnostics.Debug.WriteLine($"      [0]={regs[0]:X4} ({regs[0]}), [1]={regs[1]:X4} ({regs[1]})");
+            System.Diagnostics.Debug.WriteLine($"      [2]={regs[2]:X4} ({regs[2]}), [3]={regs[3]:X4} ({regs[3]})");
+            System.Diagnostics.Debug.WriteLine($"      [4]={regs[4]:X4} ({regs[4]}), [5]={regs[5]:X4} ({regs[5]})");
+            System.Diagnostics.Debug.WriteLine($"      [6]={regs[6]:X4} ({regs[6]}), [7]={regs[7]:X4} ({regs[7]})");
+            System.Diagnostics.Debug.WriteLine($"      [8]={regs[8]:X4} ({regs[8]}), [9]={regs[9]:X4} ({regs[9]})");
+
+            // Check if all zeros
+            if (regs.All(r => r == 0)) return false;
+
+            // Try NEW format: Scaled uint16 with offset
+            // Pattern: [lat_offset, lat_scale, lon_offset, lon_scale, height, ?, width, ?, azimuth, ?]
+            // Example from data: [0, 230, 290, 1000, 0, 220, 285, 1000, 0, 60]
+            // Could be: lat = base + (230/1000), lon = base + (290/1000)?
+
+            // OR: Maybe it's encoded as fractional parts?
+            // lat = 49 + (230/1000) = 49.230?
+            // lon = 18 + (290/1000) = 18.290?
+
+            // Try interpretation: [lat_int, lat_frac_thousandths, lon_int, lon_frac_thousandths, height_cm, gap, width_cm, gap, az, gap]
+            if (regs[0] >= 40 && regs[0] <= 60 && regs[2] >= 5 && regs[2] <= 25)
+            {
+                // This doesn't match our data (regs[0] is 0)
+            }
+
+            // Try interpretation 2: Fixed base + offset
+            // Known coordinates from UI: Lat≈49.843, Lon≈18.275
+            // Data: [0, 230, 290, 1000, 0, 220, 285, 1000, 0, 60]
+            // Maybe: lat_frac=230, lat_scale=1000, lon_frac=290, lon_scale=1000?
+
+            // Calculate with assumed base (from your area - Ostrava region)
+            const double LAT_BASE = 49.0;  // Ostrava latitude base
+            const double LON_BASE = 18.0;  // Ostrava longitude base
+
+            try
+            {
+                // Format: [lat_frac_hi, lat_frac_lo_scale, lon_frac_hi, lon_frac_lo_scale, ...]
+                if (regs[1] > 0 && regs[3] > 0)
+                {
+                    // Try: lat = LAT_BASE + (regs[0] * 1000 + regs[1]) / 1000000
+                    double latOffset = (regs[0] * 1000.0 + regs[1]) / 1000.0;  // e.g., (0*1000 + 230)/1000 = 0.230
+                    double lonOffset = (regs[2] * 1000.0 + regs[3]) / 1000.0;  // e.g., (290)/1000 = 0.290
+
+                    // But wait - regs[3] = 1000, that's scale not value!
+                    // Maybe: lat_frac = regs[1], lat_divisor = regs[3], lon_frac = regs[2], lon_divisor = regs[3]
+
+                    double latTest = LAT_BASE + ((double)regs[1] / (double)regs[3]) + ((double)regs[2] / 1000.0);
+                    double lonTest = LON_BASE + ((double)regs[5] / (double)regs[7]) + ((double)regs[6] / 1000.0);
+
+                    System.Diagnostics.Debug.WriteLine($"    Attempt scaled format: Lat={latTest:F8}, Lon={lonTest:F8}");
+                }
+            }
+            catch { }
+
+            // Try all original formats...
+            // (keep existing Float32 WS, BE, INT32 attempts)
+
+            // Try Float32 Word-Swapped
+            try
+            {
+                float latF = WordsToFloatWS(regs[0], regs[1]);
+                float lonF = WordsToFloatWS(regs[2], regs[3]);
+
+                if (IsValidCoord(latF, lonF))
+                {
+                    lat = latF;
+                    lon = lonF;
+                    height = regs[4] / 100.0;
+                    width = regs[6] / 100.0;
+                    az = regs[8];
+
+                    if (IsValidDimensions(width, height, az))
+                    {
+                        System.Diagnostics.Debug.WriteLine($"    Format: Float32 WS");
+                        return true;
+                    }
+                }
+            }
+            catch { }
+
+            // Continue with other formats...
+            return false;
+
+            static bool IsValidCoord(double lat, double lon) => lat >= 40 && lat <= 60 && lon >= 5 && lon <= 25;
+            static bool IsValidDimensions(double w, double h, int a) => w > 0 && w < 500 && h > 0 && h < 500 && a >= 0 && a < 360;
         }
 
         private void UpdateButtonStates(bool isReadMode)
@@ -3332,7 +4212,7 @@ namespace V2XController
                 var zones = new List<ActivationZone>();
 
                 const ushort BASE_ADDR = MPC_BASE_ADDR;
-                const ushort WRITE_OFFSET = MPC_WRITE_OFFSET;
+                const ushort WRITE_OFFSET = MPCv3RTV_WRITE_OFFSET;
                 const int ZONE_STRIDE = MPC_ZONE_STRIDE;
                 ushort FIRST_ZONE_BASE = (ushort)(BASE_ADDR + WRITE_OFFSET);
 
@@ -3545,7 +4425,7 @@ namespace V2XController
 
                 var zones = new List<ActivationZone>();
                 const ushort BASE_ADDR = MPC_BASE_ADDR;
-                const ushort WRITE_OFFSET = MPC_WRITE_OFFSET;
+                const ushort WRITE_OFFSET = MPCv3RTV_WRITE_OFFSET;
                 const int ZONE_STRIDE = MPC_ZONE_STRIDE;
                 ushort FIRST_ZONE_BASE = (ushort)(BASE_ADDR + WRITE_OFFSET);
 
@@ -3891,30 +4771,41 @@ namespace V2XController
 
 
 
-        // --- WRITE: MPC activation zones over RTU (exact registers, no header) ---
-        // Replace the whole RS485 writer with this mirror of the TCP flow
-        private static async Task<(bool ok, ModbusStateCode state, string? error)> WriteMpcZonesByExactRegistersRtuAsync(
-            ExportSettings s, byte unitId, IReadOnlyList<ActivationZone> zones, int timeoutMs)
+        private static string DebugFloatConversion(float value, string name)
         {
-            const int interWriteDelayMs = 400;
+            var bytes = BitConverter.GetBytes(value);
+            var (lo, hi) = FloatToWordsWS(value);
+            return $"{name}={value:F8} -> bytes=[{bytes[0]:X2},{bytes[1]:X2},{bytes[2]:X2},{bytes[3]:X2}] " +
+                   $"-> WS=[0x{lo:X4},0x{hi:X4}] (decimal: [{lo},{hi}])";
+        }
+
+        // Update the write section to add detailed logging:
+        private static async Task<(bool ok, ModbusStateCode state, string? error)> WriteMpcZonesByExactRegistersRtuAsync(
+    ExportSettings s, byte unitId, IReadOnlyList<ActivationZone> zones, int timeoutMs)
+        {
             const ushort UNLOCK_REGISTER = 0x103F;
             const ushort UNLOCK_VALUE = 4562;
+            const int MAX_REGS_PER_CHUNK = 50; // Dávka 50 registrů najednou
 
             try
             {
-                // 1) Unlock
-                var (uok, ust, uerr) = await UnlockRtuAsync(s, unitId, timeoutMs, settleMs: 800);
+                System.Diagnostics.Debug.WriteLine("=== Writing MPC zones - FLOAT32 format, LON first (BATCHED) ===");
+
+                // Odemknout
+                System.Diagnostics.Debug.WriteLine($"Unlocking at 0x{UNLOCK_REGISTER:X4}...");
+                var (uok, ust, uerr) = await WriteHoldingRegistersRtuAsync(s, unitId, UNLOCK_REGISTER, new[] { UNLOCK_VALUE }, timeoutMs);
                 if (!uok || ust != ModbusStateCode.Success)
                     return (false, ust, $"Unlock failed: {uerr}");
+                System.Diagnostics.Debug.WriteLine($"   OK");
+                await Task.Delay(800);
 
-                // Addresses and stride identical to TCP
-                const ushort BASE_ADDR = MPC_BASE_ADDR;       // 0x0300
-                const ushort WRITE_OFFSET = MPC_WRITE_OFFSET; // 44 -> 0x032C
-                const int ZONE_STRIDE = MPC_ZONE_STRIDE;      // 10
+                const ushort BASE_ADDR = MPC_BASE_ADDR;
+                const ushort WRITE_OFFSET = MPCv3RTV_WRITE_OFFSET;
+                const int ZONE_STRIDE = MPC_ZONE_STRIDE;
                 ushort FIRST_ZONE_BASE = (ushort)(BASE_ADDR + WRITE_OFFSET);
 
-                // For RS485 ASCII writer use strict map base (no address probing/shift)
-                ushort usedBase = FIRST_ZONE_BASE;
+                // Sestavit všechny registry do seřazeného seznamu (adresa, hodnota)
+                var allRegisters = new List<(ushort addr, ushort value)>();
 
                 for (int idx = 0; idx < zones.Count; idx++)
                 {
@@ -3922,179 +4813,99 @@ namespace V2XController
                     int mainZone = z.MainZone + 1;
                     int subZone = z.SubZone + 1;
                     int zoneIndex = ((mainZone - 1) * 5) + (subZone - 1);
-                    ushort zoneBase = (ushort)(usedBase + (zoneIndex * ZONE_STRIDE));
-                    string zoneName = $"{mainZone}-{subZone}";
+                    ushort zoneBase = (ushort)(FIRST_ZONE_BASE + (zoneIndex * ZONE_STRIDE));
 
-                    // Float32 WS (LO,HI). SWAP: [0..1]=Lat, [2..3]=Lon (same as TCP)
                     float lonF = (float)z.Longitude;
                     float latF = (float)z.Latitude;
-                    var (yLo, yHi) = FloatToWordsWS(latF); // base+0/+1
-                    var (xLo, xHi) = FloatToWordsWS(lonF); // base+2/+3
+                    float heightF = (float)z.Height;
+                    float widthF = (float)z.Width;
+                    float azF = (float)z.Azimuth;
 
-                    ushort lengthCm = ToUInt16(z.Height * 100.0);
-                    ushort widthCm = ToUInt16(z.Width * 100.0);
-                    ushort az = (ushort)Math.Clamp(z.Azimuth, 0, 359);
+                    var (lonLo, lonHi) = FloatToWordsWS(lonF);
+                    var (latLo, latHi) = FloatToWordsWS(latF);
+                    var (heightLo, heightHi) = FloatToWordsWS(heightF);
+                    var (widthLo, widthHi) = FloatToWordsWS(widthF);
+                    var (azLo, azHi) = FloatToWordsWS(azF);
 
-                    var candidates = new List<ushort> { zoneBase };
-
-                    bool zoneWritten = false;
-                    ModbusStateCode lastState = ModbusStateCode.UndefinedError;
-                    string? lastError = null;
-
-                    foreach (var tryBase in candidates.Distinct())
-                    {
-                        // 2) Re-unlock per zone
-                        var (ruOk, ruSt, ruErr) = await UnlockRtuAsync(s, unitId, timeoutMs, settleMs: 250);
-                        if (!ruOk || ruSt != ModbusStateCode.Success)
-                        {
-                            lastState = ruSt;
-                            lastError = $"Unlock {zoneName} failed: {ruErr}";
-                            continue;
-                        }
-
-                        // 3) Lat/Lon write strictly as separate registers:
-                        //    base+0=Lat0, base+1=Lat1, base+2=Lon0, base+3=Lon1
-                        bool coordsWritten = false;
-                        string coordTagUsed = "";
-                        string coordDiag =
-                            $"src(lat={z.Latitude:F8},lon={z.Longitude:F8}) " +
-                            $"WS(lat=[0x{yLo:X4},0x{yHi:X4}],lon=[0x{xLo:X4},0x{xHi:X4}])";
-
-                        var coordVariants = new (ushort lat0, ushort lat1, ushort lon0, ushort lon1, string tag)[]
-                        {
-                            (yLo, yHi, xLo, xHi, "WS")
-                        };
-
-                        foreach (var cv in coordVariants)
-                        {
-                            var (okLat0, stLat0, errLat0) = await WriteHoldingRegistersRtuAsync(s, unitId, tryBase, new[] { cv.lat0 }, timeoutMs);
-                            if (!okLat0 || stLat0 != ModbusStateCode.Success)
-                            {
-                                lastState = stLat0;
-                                lastError = $"V2X {zoneName} Lat0({cv.tag}) failed @0x{tryBase:X4}: {errLat0}; val=0x{cv.lat0:X4} {coordDiag}";
-                                continue;
-                            }
-                            if (interWriteDelayMs > 0) await Task.Delay(interWriteDelayMs);
-
-                            var (okLat1, stLat1, errLat1) = await WriteHoldingRegistersRtuAsync(s, unitId, (ushort)(tryBase + 1), new[] { cv.lat1 }, timeoutMs);
-                            if (!okLat1 || stLat1 != ModbusStateCode.Success)
-                            {
-                                lastState = stLat1;
-                                lastError = $"V2X {zoneName} Lat1({cv.tag}) failed @0x{(tryBase + 1):X4}: {errLat1}; val=0x{cv.lat1:X4}";
-                                continue;
-                            }
-                            if (interWriteDelayMs > 0) await Task.Delay(interWriteDelayMs);
-
-                            var (okLon0, stLon0, errLon0) = await WriteHoldingRegistersRtuAsync(s, unitId, (ushort)(tryBase + 2), new[] { cv.lon0 }, timeoutMs);
-                            if (!okLon0 || stLon0 != ModbusStateCode.Success)
-                            {
-                                lastState = stLon0;
-                                lastError = $"V2X {zoneName} Lon0({cv.tag}) failed @0x{(tryBase + 2):X4}: {errLon0}; val=0x{cv.lon0:X4}";
-                                continue;
-                            }
-                            if (interWriteDelayMs > 0) await Task.Delay(interWriteDelayMs);
-
-                            var (okLon1, stLon1, errLon1) = await WriteHoldingRegistersRtuAsync(s, unitId, (ushort)(tryBase + 3), new[] { cv.lon1 }, timeoutMs);
-                            if (!okLon1 || stLon1 != ModbusStateCode.Success)
-                            {
-                                lastState = stLon1;
-                                lastError = $"V2X {zoneName} Lon1({cv.tag}) failed @0x{(tryBase + 3):X4}: {errLon1}; val=0x{cv.lon1:X4}";
-                                continue;
-                            }
-                            if (interWriteDelayMs > 0) await Task.Delay(interWriteDelayMs);
-
-                            coordsWritten = true;
-                            coordTagUsed = cv.tag;
-                            break;
-                        }
-
-                        if (!coordsWritten)
-                            continue;
-
-                        // 4) Length [4]
-                        var (okLen, stLen, errLen) = await WriteHoldingRegistersRtuAsync(s, unitId, (ushort)(tryBase + 4), new[] { lengthCm }, timeoutMs);
-                        if (!okLen || stLen != ModbusStateCode.Success)
-                        {
-                            lastState = stLen;
-                            lastError = $"V2X {zoneName} Len failed @0x{(tryBase + 4):X4}: {errLen}";
-                            continue;
-                        }
-                        if (interWriteDelayMs > 0) await Task.Delay(interWriteDelayMs);
-
-                        // 5) Width [6]
-                        var (okWid, stWid, errWid) = await WriteHoldingRegistersRtuAsync(s, unitId, (ushort)(tryBase + 6), new[] { widthCm }, timeoutMs);
-                        if (!okWid || stWid != ModbusStateCode.Success)
-                        {
-                            lastState = stWid;
-                            lastError = $"V2X {zoneName} Width failed @0x{(tryBase + 6):X4}: {errWid}";
-                            continue;
-                        }
-                        if (interWriteDelayMs > 0) await Task.Delay(interWriteDelayMs);
-
-                        // 6) Azimuth [8]
-                        var (okAz, stAz, errAz) = await WriteHoldingRegistersRtuAsync(s, unitId, (ushort)(tryBase + 8), new[] { az }, timeoutMs);
-                        if (!okAz || stAz != ModbusStateCode.Success)
-                        {
-                            lastState = stAz;
-                            lastError = $"V2X {zoneName} Az failed @0x{(tryBase + 8):X4}: {errAz}";
-                            continue;
-                        }
-                        if (interWriteDelayMs > 0) await Task.Delay(interWriteDelayMs);
-
-                        // 7) Verify read back 10 regs at tryBase and compare mapping
-                        var (rok, rstate, rdata, rerr) = await ReadHoldingRegistersRtuAsync(s, unitId, tryBase, 10, timeoutMs);
-                        if (!rok || rstate != ModbusStateCode.Success || rdata == null || rdata.Length < 10)
-                        {
-                            lastState = rstate;
-                            lastError = $"Verify read failed @0x{tryBase:X4}: {rerr}";
-                            continue;
-                        }
-
-                        float rbLat = 0;
-                        float rbLon = 0;
-                        if (coordTagUsed == "HI-LO")
-                        {
-                            rbLat = WordsToFloatBE(rdata[0], rdata[1]);
-                            rbLon = WordsToFloatBE(rdata[2], rdata[3]);
-                        }
-                        else
-                        {
-                            rbLat = WordsToFloatWS(rdata[0], rdata[1]);
-                            rbLon = WordsToFloatWS(rdata[2], rdata[3]);
-                        }
-
-                        float rbLen = rdata[4] / 100.0f;
-                        float rbWid = rdata[6] / 100.0f;
-                        int rbAz = rdata[8];
-
-                        bool coordsOk = Math.Abs(rbLon - lonF) <= 1e-5f && Math.Abs(rbLat - latF) <= 1e-5f;
-                        bool dimsOk = Math.Abs(rbLen - (float)z.Height) <= 0.01f && Math.Abs(rbWid - (float)z.Width) <= 0.01f;
-                        bool azOk = rbAz == Math.Clamp(z.Azimuth, 0, 359);
-
-                        if (!coordsOk || !dimsOk || !azOk)
-                        {
-                            lastState = ModbusStateCode.WrongResponse;
-                            lastError = $"Verify mismatch {zoneName} @0x{tryBase:X4} [{coordTagUsed}]: lat={rbLat}, lon={rbLon}, expLat={latF}, expLon={lonF}, len={rbLen}, wid={rbWid}, az={rbAz}";
-                            continue;
-                        }
-
-                        zoneWritten = true;
-                        break;
-                    }
-
-                    if (!zoneWritten)
-                        return (false, lastState, lastError ?? $"Write failed for zone {zoneName}.");
+                    // Přidat registry do seznamu (adresa musí být souvislá!)
+                    allRegisters.Add((zoneBase, lonLo));
+                    allRegisters.Add(((ushort)(zoneBase + 1), lonHi));
+                    allRegisters.Add(((ushort)(zoneBase + 2), latLo));
+                    allRegisters.Add(((ushort)(zoneBase + 3), latHi));
+                    allRegisters.Add(((ushort)(zoneBase + 4), heightLo));
+                    allRegisters.Add(((ushort)(zoneBase + 5), heightHi));
+                    allRegisters.Add(((ushort)(zoneBase + 6), widthLo));
+                    allRegisters.Add(((ushort)(zoneBase + 7), widthHi));
+                    allRegisters.Add(((ushort)(zoneBase + 8), azLo));
+                    allRegisters.Add(((ushort)(zoneBase + 9), azHi));
                 }
 
-                // 9) Lock back
+                System.Diagnostics.Debug.WriteLine($"\nTotal registers to write: {allRegisters.Count}");
+
+                // Rozdělit do souvislých dávek po 50 registrech
+                int offset = 0;
+                while (offset < allRegisters.Count)
+                {
+                    // Odemknout před každou dávkou
+                    var (ruOk, ruSt, ruErr) = await WriteHoldingRegistersRtuAsync(s, unitId, UNLOCK_REGISTER, new[] { UNLOCK_VALUE }, timeoutMs);
+                    if (!ruOk || ruSt != ModbusStateCode.Success)
+                        return (false, ruSt, $"Re-unlock failed: {ruErr}");
+                    await Task.Delay(250);
+
+                    // Určit velikost dávky (max 50 nebo méně, pokud registry nejsou souvislé)
+                    int chunkSize = Math.Min(MAX_REGS_PER_CHUNK, allRegisters.Count - offset);
+
+                    // Zkontrolovat souvislost adres
+                    ushort startAddr = allRegisters[offset].addr;
+                    int actualChunkSize = 1;
+
+                    for (int i = 1; i < chunkSize; i++)
+                    {
+                        if (allRegisters[offset + i].addr != startAddr + i)
+                        {
+                            // Nalezena mezera v adresách, ukončit dávku zde
+                            break;
+                        }
+                        actualChunkSize++;
+                    }
+
+                    // Připravit data pro zápis
+                    var chunkData = new ushort[actualChunkSize];
+                    for (int i = 0; i < actualChunkSize; i++)
+                    {
+                        chunkData[i] = allRegisters[offset + i].value;
+                    }
+
+                    System.Diagnostics.Debug.WriteLine($"\nWriting batch: {actualChunkSize} regs from 0x{startAddr:X4} (offset {offset}/{allRegisters.Count})");
+
+                    // Zapsat dávku
+                    var (wok, wst, werr) = await WriteHoldingRegistersRtuChunkedAsync(s, unitId, startAddr, chunkData, timeoutMs);
+                    if (!wok || wst != ModbusStateCode.Success)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"   FAILED: {werr}");
+                        return (false, wst, $"Batch write failed at 0x{startAddr:X4}: {werr}");
+                    }
+
+                    System.Diagnostics.Debug.WriteLine($"   OK ({actualChunkSize} registers written)");
+
+                    offset += actualChunkSize;
+                    await Task.Delay(150);
+                }
+
+                // Lock
+                System.Diagnostics.Debug.WriteLine($"\nLocking...");
                 await WriteHoldingRegistersRtuAsync(s, unitId, UNLOCK_REGISTER, new[] { (ushort)0 }, timeoutMs);
+
+                System.Diagnostics.Debug.WriteLine("\n=== ALL ZONES WRITTEN (BATCHED FLOAT32) ===");
                 return (true, ModbusStateCode.Success, null);
             }
             catch (Exception ex)
             {
+                System.Diagnostics.Debug.WriteLine($"EXCEPTION: {ex}");
                 return (false, ModbusStateCode.UndefinedError, ex.Message);
             }
         }
+
 
         // Add near other helpers
         private static async Task<(bool ok, ModbusStateCode state, string? error)> UnlockRtuAsync(
@@ -4355,69 +5166,200 @@ namespace V2XController
 
         private async void ReinitMPC_Click(object sender, RoutedEventArgs e)
         {
-            ShowBusy("Sending reinit command...");
+            Settings = ExportSettings.FromWindow(this);
+            if (Settings == null)
+            {
+                MessageBox.Show("Missing export settings.", "Reinit MPC", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            // Determine connection type
+            string conn = (ConnectionComboBox.SelectedItem as ComboBoxItem)?.Content?.ToString()?.Trim()?.ToLower() ?? "";
+            bool isTcp = conn == "modbus tcp";
+            bool isRtu = conn == "serial port";
+            bool isTunnel = conn == "serial tunnel";
+
+            if (!isTcp && !isRtu && !isTunnel)
+            {
+                MessageBox.Show("Please select a connection type.", "Reinit MPC", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            // Get unit ID
+            byte unitId = 1;
+            if (Settings.ModemDec.HasValue)
+            {
+                int v = Settings.ModemDec.Value;
+                if (v < 1 || v > 247)
+                {
+                    MessageBox.Show("Module address must be 1–247.", "Reinit MPC", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+                unitId = (byte)v;
+            }
+
+            // Použít progress bar s více kroky
+            ShowBusy("Re-initializing MPC...", showProgress: true, maxProgress: 100);
             await Task.Delay(50);
+
+            const ushort REINIT_REGISTER = 0x0183;
+            const ushort REINIT_VALUE = 0x0001;
+            const ushort UNLOCK_REGISTER = 0x103F;
+            const ushort UNLOCK_VALUE = 4562;
+            const int timeoutMs = 5000;
 
             try
             {
-                Settings = ExportSettings.FromWindow(this);
-                if (Settings == null)
-                {
-                    await ShowMessageAfterBusyAsync("Export setting are missing.", "Reinit MPC", MessageBoxButton.OK, MessageBoxImage.Warning);
-                    return;
-                }
-                if (!TryValidateSettings(Settings, out var validationError))
-                {
-                    await ShowMessageAfterBusyAsync(validationError, "Reinit MPC - validation", MessageBoxButton.OK, MessageBoxImage.Warning);
-                    return;
-                }
+                System.Diagnostics.Debug.WriteLine("=== MPC RE-INIT ===");
 
-                byte unitId = (byte)Math.Clamp(Settings.ModemDec ?? 1, 1, 247);
-                const ushort REINIT_ADDR = 0x0183;   // MS_REG_V2X_REINIT
-                const ushort REINIT_VAL = 0x0001;   // Reinit command
-
-                if (Settings!.IsTcpSelected)
+                if (isRtu || isTunnel)
                 {
-                    var host = Settings.TcpHost?.Trim();
-                    var port = Settings.TcpPort ?? 502;
-                    if (string.IsNullOrWhiteSpace(host))
+                    System.Diagnostics.Debug.WriteLine("Using Modbus ASCII (RTU)");
+
+                    // Step 1: Connecting (0-10%)
+                    UpdateProgress(5, 100, "Connecting to device...");
+                    await Task.Delay(300);
+                    UpdateProgress(10, 100, "Connected");
+
+                    // Step 2: Unlock (10-40%)
+                    UpdateProgress(15, 100, "Unlocking device...");
+                    System.Diagnostics.Debug.WriteLine($"Unlocking at 0x{UNLOCK_REGISTER:X4}...");
+                    var (uok, ust, uerr) = await WriteHoldingRegistersRtuAsync(Settings, unitId, UNLOCK_REGISTER, new[] { UNLOCK_VALUE }, timeoutMs);
+                    if (!uok || ust != ModbusStateCode.Success)
                     {
-                        await ShowMessageAfterBusyAsync("Modbus TCP host is necessary", "Reinit MPC", MessageBoxButton.OK, MessageBoxImage.Warning);
+                        await ShowMessageAfterBusyAsync($"Unlock failed: {uerr}", "Reinit MPC", MessageBoxButton.OK, MessageBoxImage.Error);
+                        return;
+                    }
+                    System.Diagnostics.Debug.WriteLine("   Unlock OK");
+                    UpdateProgress(40, 100, "Device unlocked");
+                    await Task.Delay(500);
+
+                    // Step 3: Re-init (40-75%)
+                    UpdateProgress(45, 100, "Sending re-init command...");
+                    await Task.Delay(200);
+                    System.Diagnostics.Debug.WriteLine($"Writing re-init to 0x{REINIT_REGISTER:X4}...");
+                    var (rok, rst, rerr) = await WriteHoldingRegistersRtuAsync(Settings, unitId, REINIT_REGISTER, new[] { REINIT_VALUE }, timeoutMs);
+
+                    if (!rok || rst != ModbusStateCode.Success)
+                    {
+                        await ShowMessageAfterBusyAsync($"Re-init failed at 0x{REINIT_REGISTER:X4}: {rerr}", "Reinit MPC", MessageBoxButton.OK, MessageBoxImage.Error);
                         return;
                     }
 
-                    // run TCP reinit on a background thread
-                    var res = await Task.Run(() => ReinitTcpWorker(host!, port, unitId, REINIT_ADDR, REINIT_VAL, asSerialTcp: (ConnectionComboBox.SelectedItem as ComboBoxItem)?.Content?.ToString()?.Trim().Equals("Serial tunnel", StringComparison.OrdinalIgnoreCase) == true));
-                    if (!res.ok)
+                    System.Diagnostics.Debug.WriteLine("   Re-init sent");
+                    UpdateProgress(75, 100, "Re-init command sent");
+                    await Task.Delay(1000);
+
+                    // Step 4: Lock (75-95%)
+                    UpdateProgress(80, 100, "Locking device...");
+                    await WriteHoldingRegistersRtuAsync(Settings, unitId, UNLOCK_REGISTER, new[] { (ushort)0 }, timeoutMs);
+                    UpdateProgress(95, 100, "Device locked");
+                    await Task.Delay(300);
+
+                    // Step 5: Complete (95-100%)
+                    UpdateProgress(100, 100, "Complete");
+                    await Task.Delay(200);
+                    await ShowMessageAfterBusyAsync("MPC re-init successful!", "Reinit MPC", MessageBoxButton.OK, MessageBoxImage.Information);
+                }
+                else if (isTcp)
+                {
+                    System.Diagnostics.Debug.WriteLine("Using Modbus TCP");
+
+                    string host = Settings.TcpHost?.Trim() ?? "";
+                    int port = Settings.TcpPort ?? 502;
+
+                    if (string.IsNullOrEmpty(host))
                     {
-                        await ShowMessageAfterBusyAsync(res.msgOrError, "Reinit MPC", MessageBoxButton.OK, MessageBoxImage.Error);
+                        await ShowMessageAfterBusyAsync("TCP host is required.", "Reinit MPC", MessageBoxButton.OK, MessageBoxImage.Warning);
                         return;
                     }
 
-                    await ShowMessageAfterBusyAsync($"Reinit command was sent to {host}:{port} (UnitId {unitId}).",
-                        "Reinit MPC", MessageBoxButton.OK, MessageBoxImage.Information);
-                }
-                else
-                {
-                    // RS485 – already async, just show dialogs after hiding busy
-                    var (ok16, st16, err16) = await WriteHoldingRegistersRtuAsync(Settings, unitId, REINIT_ADDR, new[] { REINIT_VAL }, timeoutMs: 2000);
-                    if (ok16 && st16 == ModbusStateCode.Success)
+                    // Přesunout TCP operace do background thread
+                    await Task.Run(async () =>
                     {
-                        await ShowMessageAfterBusyAsync(
-                            $"Reinit command via RS485 was sent to {Settings.SerialPortName} (slave {unitId}).",
-                            "Reinit MPC", MessageBoxButton.OK, MessageBoxImage.Information);
-                    }
-                    else
-                    {
-                        var extra = string.IsNullOrWhiteSpace(err16) ? "" : $" ({err16})";
-                        await ShowMessageAfterBusyAsync($"Reinit via rs485 failed: state={st16}{extra}",
-                            "Reinit MPC", MessageBoxButton.OK, MessageBoxImage.Error);
-                    }
+                        // Step 1: Connecting (0-10%)
+                        await Dispatcher.InvokeAsync(() => UpdateProgress(5, 100, "Connecting to device..."), DispatcherPriority.Background);
+                        await Task.Delay(300);
+                        await Dispatcher.InvokeAsync(() => UpdateProgress(10, 100, "Connected"), DispatcherPriority.Background);
+
+                        // Step 2: Unlock (10-40%)
+                        await Dispatcher.InvokeAsync(() => UpdateProgress(15, 100, "Unlocking device..."), DispatcherPriority.Background);
+
+                        if (!TryWriteUnlockTcp(host, port, unitId, UNLOCK_REGISTER, UNLOCK_VALUE, 5000, 3000, 5000, out var ust, out var uerr))
+                        {
+                            await Dispatcher.InvokeAsync(async () =>
+                            {
+                                await ShowMessageAfterBusyAsync($"Unlock failed: {uerr}", "Reinit MPC", MessageBoxButton.OK, MessageBoxImage.Error);
+                            });
+                            return;
+                        }
+                        await Dispatcher.InvokeAsync(() => UpdateProgress(40, 100, "Device unlocked"), DispatcherPriority.Background);
+                        await Task.Delay(500);
+
+                        // Step 3: Re-init (40-75%)
+                        await Dispatcher.InvokeAsync(() => UpdateProgress(45, 100, "Sending re-init command..."), DispatcherPriority.Background);
+                        await Task.Delay(200);
+
+                        using var client = new System.Net.Sockets.TcpClient();
+                        client.SendTimeout = 3000;
+                        client.ReceiveTimeout = 5000;
+
+                        await client.ConnectAsync(host, port);
+                        using var stream = client.GetStream();
+
+                        // Build Modbus TCP frame for write single register (FC06)
+                        var frame = new byte[12];
+                        ushort tid = 1;
+                        frame[0] = (byte)(tid >> 8);
+                        frame[1] = (byte)(tid & 0xFF);
+                        frame[2] = 0;
+                        frame[3] = 0;
+                        frame[4] = 0;
+                        frame[5] = 6;
+                        frame[6] = unitId;
+                        frame[7] = 0x06;
+                        frame[8] = (byte)(REINIT_REGISTER >> 8);
+                        frame[9] = (byte)(REINIT_REGISTER & 0xFF);
+                        frame[10] = (byte)(REINIT_VALUE >> 8);
+                        frame[11] = (byte)(REINIT_VALUE & 0xFF);
+
+                        await stream.WriteAsync(frame, 0, frame.Length);
+                        await stream.FlushAsync();
+
+                        var resp = new byte[12];
+                        int read = await stream.ReadAsync(resp, 0, resp.Length);
+
+                        await Dispatcher.InvokeAsync(() => UpdateProgress(75, 100, "Re-init command sent"), DispatcherPriority.Background);
+                        await Task.Delay(1000);
+
+                        // Step 4: Lock (75-95%)
+                        await Dispatcher.InvokeAsync(() => UpdateProgress(80, 100, "Locking device..."), DispatcherPriority.Background);
+                        TryWriteUnlockTcp(host, port, unitId, UNLOCK_REGISTER, 0, 5000, 3000, 5000, out _, out _);
+                        await Dispatcher.InvokeAsync(() => UpdateProgress(95, 100, "Device locked"), DispatcherPriority.Background);
+                        await Task.Delay(300);
+
+                        // Step 5: Complete (95-100%)
+                        await Dispatcher.InvokeAsync(async () =>
+                        {
+                            UpdateProgress(100, 100, "Complete");
+                            await Task.Delay(200);
+
+                            if (read >= 9 && resp[7] == 0x06)
+                            {
+                                System.Diagnostics.Debug.WriteLine("   Re-init sent (TCP)");
+                                await ShowMessageAfterBusyAsync("MPC re-init successful!", "Reinit MPC", MessageBoxButton.OK, MessageBoxImage.Information);
+                            }
+                            else
+                            {
+                                await ShowMessageAfterBusyAsync("Re-init response invalid", "Reinit MPC", MessageBoxButton.OK, MessageBoxImage.Error);
+                            }
+                        });
+                    });
                 }
             }
             catch (Exception ex)
             {
-                await ShowMessageAfterBusyAsync($"Reinit error: {ex.Message}", "Reinit MPC", MessageBoxButton.OK, MessageBoxImage.Error);
+                await ShowMessageAfterBusyAsync($"Exception: {ex.Message}", "Reinit MPC", MessageBoxButton.OK, MessageBoxImage.Error);
             }
             finally
             {
@@ -5052,7 +5994,7 @@ namespace V2XController
 
                 const int MAIN_MAX = 4;
                 const int SUB_MAX = 5;
-                const ushort FIRST_ZONE_BASE = (ushort)(MPC_BASE_ADDR + MPC_WRITE_OFFSET); // 0x032C
+                const ushort FIRST_ZONE_BASE = (ushort)(MPC_BASE_ADDR + MPCv3RTV_WRITE_OFFSET); // 0x032C
 
                 for (int mainZone = 1; mainZone <= MAIN_MAX; mainZone++)
                 {
@@ -5681,168 +6623,6 @@ namespace V2XController
             return (true, slave, func, payload, null);
         }
 
-        // ADD: robust zone decoder. Place near other helpers (e.g., after WordsToFloatWS).
-        private static bool TryDecodeZoneRegs(ushort[] regs, out double lat, out double lon, out double width, out double height, out int az)
-        {
-            lat = lon = width = height = 0;
-            az = 0;
-            if (regs == null || regs.Length < 10) return false;
-
-            // Helpers
-            static bool IsLatLon(double la, double lo)
-            {
-                if (!double.IsFinite(la) || !double.IsFinite(lo)) return false;
-                if (la < -90 || la > 90 || lo < -180 || lo > 180) return false;
-
-                // Reject bogus decodes caused by wrong word order (tiny/zero denormal values).
-                // Real deployment coordinates are expected to be non-zero.
-                if (Math.Abs(la) < 0.001 || Math.Abs(lo) < 0.001) return false;
-
-                return true;
-            }
-            static int ToI32BE(ushort hi, ushort lo) => unchecked((int)(((uint)hi << 16) | lo));
-            static int ToI32WS(ushort first, ushort second) => ToI32BE(second, first);
-            static bool IsGeom(double w, double h, double azd)
-            {
-                if (!(w > 0 && h > 0)) return false;
-                if (w > 10000 || h > 10000) return false; // 10000m sanity cap
-                return azd >= 0 && azd <= 359.999;
-            }
-
-            // Try combinations in priority order
-
-            // 1) WS floats for all (LO,HI pairs): [0..1]=Lat, [2..3]=Lon, [4..5]=Height(m), [6..7]=Width(m), [8..9]=Azimuth(deg)
-            {
-                double la = WordsToFloatWS(regs[0], regs[1]);
-                double lo = WordsToFloatWS(regs[2], regs[3]);
-                double h = WordsToFloatWS(regs[4], regs[5]);
-                double w = WordsToFloatWS(regs[6], regs[7]);
-                double azf = WordsToFloatWS(regs[8], regs[9]);
-                if (IsLatLon(la, lo) && IsGeom(w, h, azf))
-                {
-                    lat = la; lon = lo; width = w; height = h; az = Math.Clamp((int)Math.Round(azf), 0, 359);
-                    return true;
-                }
-                // Try lon/lat swapped
-                if (IsLatLon(lo, la) && IsGeom(w, h, azf))
-                {
-                    lat = lo; lon = la; width = w; height = h; az = Math.Clamp((int)Math.Round(azf), 0, 359);
-                    return true;
-                }
-            }
-
-            // 2) WS floats for lat/lon; scalars as uint16 (cm/deg) at [4],[6],[8]
-            {
-                double la = WordsToFloatWS(regs[0], regs[1]);
-                double lo = WordsToFloatWS(regs[2], regs[3]);
-                double h = regs[4] / 100.0;
-                double w = regs[6] / 100.0;
-                double azf = regs[8];
-                if (IsLatLon(la, lo) && IsGeom(w, h, azf))
-                {
-                    lat = la; lon = lo; width = w; height = h; az = Math.Clamp((int)Math.Round(azf), 0, 359);
-                    return true;
-                }
-                if (IsLatLon(lo, la) && IsGeom(w, h, azf))
-                {
-                    lat = lo; lon = la; width = w; height = h; az = Math.Clamp((int)Math.Round(azf), 0, 359);
-                    return true;
-                }
-            }
-
-            // 2b) WS int32 for lat/lon with common scales; geom as uint16 scalars
-            {
-                var scales = new[] { 1e7, 1e6, 1e5, 1e4 };
-                double h = regs[4] / 100.0;
-                double w = regs[6] / 100.0;
-                double azf = regs[8];
-
-                if (IsGeom(w, h, azf))
-                {
-                    foreach (var s in scales)
-                    {
-                        double la = ToI32WS(regs[0], regs[1]) / s;
-                        double lo = ToI32WS(regs[2], regs[3]) / s;
-                        if (IsLatLon(la, lo))
-                        {
-                            lat = la; lon = lo; width = w; height = h; az = Math.Clamp((int)Math.Round(azf), 0, 359);
-                            return true;
-                        }
-                        if (IsLatLon(lo, la))
-                        {
-                            lat = lo; lon = la; width = w; height = h; az = Math.Clamp((int)Math.Round(azf), 0, 359);
-                            return true;
-                        }
-                    }
-                }
-            }
-
-            // 3) BE floats for all (HI,LO pairs)
-            {
-                double la = WordsToFloatBE(regs[0], regs[1]);
-                double lo = WordsToFloatBE(regs[2], regs[3]);
-                double h = WordsToFloatBE(regs[4], regs[5]);
-                double w = WordsToFloatBE(regs[6], regs[7]);
-                double azf = WordsToFloatBE(regs[8], regs[9]);
-                if (IsLatLon(la, lo) && IsGeom(w, h, azf))
-                {
-                    lat = la; lon = lo; width = w; height = h; az = Math.Clamp((int)Math.Round(azf), 0, 359);
-                    return true;
-                }
-                if (IsLatLon(lo, la) && IsGeom(w, h, azf))
-                {
-                    lat = lo; lon = la; width = w; height = h; az = Math.Clamp((int)Math.Round(azf), 0, 359);
-                    return true;
-                }
-            }
-
-            // 4) BE floats for lat/lon; scalars uint16 (cm/deg)
-            {
-                double la = WordsToFloatBE(regs[0], regs[1]);
-                double lo = WordsToFloatBE(regs[2], regs[3]);
-                double h = regs[4] / 100.0;
-                double w = regs[6] / 100.0;
-                double azf = regs[8];
-                if (IsLatLon(la, lo) && IsGeom(w, h, azf))
-                {
-                    lat = la; lon = lo; width = w; height = h; az = Math.Clamp((int)Math.Round(azf), 0, 359);
-                    return true;
-                }
-                if (IsLatLon(lo, la) && IsGeom(w, h, azf))
-                {
-                    lat = lo; lon = la; width = w; height = h; az = Math.Clamp((int)Math.Round(azf), 0, 359);
-                    return true;
-                }
-            }
-
-            // 4b) BE int32 for lat/lon with common scales; geom as uint16 scalars
-            {
-                var scales = new[] { 1e7, 1e6, 1e5, 1e4 };
-                double h = regs[4] / 100.0;
-                double w = regs[6] / 100.0;
-                double azf = regs[8];
-
-                if (IsGeom(w, h, azf))
-                {
-                    foreach (var s in scales)
-                    {
-                        double la = ToI32BE(regs[0], regs[1]) / s;
-                        double lo = ToI32BE(regs[2], regs[3]) / s;
-                        if (IsLatLon(la, lo))
-                        {
-                            lat = la; lon = lo; width = w; height = h; az = Math.Clamp((int)Math.Round(azf), 0, 359);
-                            return true;
-                        }
-                        if (IsLatLon(lo, la))
-                        {
-                            lat = lo; lon = la; width = w; height = h; az = Math.Clamp((int)Math.Round(azf), 0, 359);
-                            return true;
-                        }
-                    }
-                }
-            }
-
-            return false;
-        }
+        
     }
 }

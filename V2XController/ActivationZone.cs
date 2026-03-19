@@ -21,6 +21,7 @@ namespace V2XController
         private double longitude;
         private int mainZone = 0;
         private int subZone = 0;
+        private bool isSwitchZone = false;
 
         public Point StartPoint
         {
@@ -105,11 +106,11 @@ namespace V2XController
                 {
                     mainZone = v;
                     OnPropertyChanged();
+                    UpdateName();
                 }
             }
         }
 
-        // Updated clamp to support Sub 0..6 for switch zones
         public int SubZone
         {
             get => subZone;
@@ -120,8 +121,41 @@ namespace V2XController
                 {
                     subZone = v;
                     OnPropertyChanged();
+                    UpdateName(); 
                 }
             }
+        }
+
+        public bool IsSwitchZone
+        {
+            get => isSwitchZone;
+            set { isSwitchZone = value; OnPropertyChanged(); }
+        }
+
+        // Add this method to ActivationZone class
+        public void UpdateName()
+        {
+            int linearIdx = (mainZone * 7) + subZone;
+
+            // Zone structure (35 zones total):
+            // 0-6:   P 1-1 to P 1-7
+            // 7-13:  P 2-1 to P 2-7
+            // 14-20: B 1 to B 7
+            // 21-27: V 1-1 to V 1-7
+            // 28-34: V 2-1 to V 2-7
+
+            if (linearIdx >= 0 && linearIdx <= 6)
+                Name = $"P 1-{linearIdx + 1}";
+            else if (linearIdx >= 7 && linearIdx <= 13)
+                Name = $"P 2-{linearIdx - 6}";
+            else if (linearIdx >= 14 && linearIdx <= 20)
+                Name = $"B {linearIdx - 13}";
+            else if (linearIdx >= 21 && linearIdx <= 27)
+                Name = $"V 1-{linearIdx - 20}";
+            else if (linearIdx >= 28 && linearIdx <= 34)
+                Name = $"V 2-{linearIdx - 27}";
+            else
+                Name = $"Zone {mainZone + 1}-{subZone + 1}";
         }
 
         public event PropertyChangedEventHandler PropertyChanged;

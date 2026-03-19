@@ -341,10 +341,10 @@
         <GroupBox Header="Activation Zones" Padding="10" HorizontalAlignment="Left" 
                   MaxWidth="790" Width="790" Margin="2,0,0,5" VerticalAlignment="Bottom">
             <StackPanel>
-                <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
+                <ScrollViewer HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Disabled">
                     <DataGrid x:Name="ActivationZonesDataGrid" HeadersVisibility="Column" Height="110"
                               ItemsSource="{Binding ActivationZonesCollection}" AutoGenerateColumns="False"
-                              CanUserAddRows="False" IsReadOnly="False"
+                              CanUserAddRows="False" IsReadOnly="False" CellEditEnding="ActivationZonesDataGrid_CellEditEnding" CanUserReorderColumns="False"
                               PreviewKeyDown="ActivationZonesDataGrid_PreviewKeyDown">
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="60" CanUserResize="False"/>

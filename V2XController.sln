@@ -12,8 +12,8 @@ Global
 		V2XController-Debug|Any CPU = V2XController-Debug|Any CPU
 	EndGlobalSection
 	GlobalSection(ProjectConfigurationPlatforms) = postSolution
-		{53A184AA-9EFE-4852-9FE7-C2C929C557E6}.Debug|Any CPU.ActiveCfg = Release|Any CPU
-		{53A184AA-9EFE-4852-9FE7-C2C929C557E6}.Debug|Any CPU.Build.0 = Release|Any CPU
+		{53A184AA-9EFE-4852-9FE7-C2C929C557E6}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{53A184AA-9EFE-4852-9FE7-C2C929C557E6}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{53A184AA-9EFE-4852-9FE7-C2C929C557E6}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{53A184AA-9EFE-4852-9FE7-C2C929C557E6}.Release|Any CPU.Build.0 = Release|Any CPU
 		{53A184AA-9EFE-4852-9FE7-C2C929C557E6}.V2XController-Debug|Any CPU.ActiveCfg = V2XController-Debug|Any CPU
