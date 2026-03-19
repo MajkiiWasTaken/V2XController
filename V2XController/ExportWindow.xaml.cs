@@ -577,7 +577,7 @@ namespace V2XController
                     var z = zones[idx];
                     int mainZone = z.MainZone + 1;
                     int subZone = z.SubZone + 1;
-                    int zoneIndex = ((mainZone - 1) * 5) + (subZone - 1);
+                    int zoneIndex = ((mainZone - 1) * 7) + (subZone - 1);
                     ushort zoneBase = (ushort)(FIRST_ZONE_BASE + (zoneIndex * ZONE_STRIDE));
 
                     var (latLo, latHi) = FloatToWordsWS((float)z.Latitude);
@@ -834,7 +834,7 @@ namespace V2XController
                     var z = zones[idx];
                     int mainZone = z.MainZone + 1;
                     int subZone = z.SubZone + 1;
-                    int zoneIndex = ((mainZone - 1) * 5) + (subZone - 1);
+                    int zoneIndex = ((mainZone - 1) * 7) + (subZone - 1);
                     ushort zoneBase = (ushort)(FIRST_ZONE_BASE + (zoneIndex * ZONE_STRIDE));
 
                     float lonF = (float)z.Longitude;
@@ -3605,8 +3605,8 @@ namespace V2XController
                     if (!IsValidZoneData(lonF, latF, heightF, widthF, azF))
                         continue;
 
-                    int mainZone = zoneIdx / 5;
-                    int subZone = zoneIdx % 5;
+                    int mainZone = zoneIdx / 7;
+                    int subZone = zoneIdx % 7;
 
                     var zone = new ActivationZone
                     {
@@ -3757,8 +3757,8 @@ namespace V2XController
                         continue;
                     }
 
-                    int mainZone = zoneIdx / 5;
-                    int subZone = zoneIdx % 5;
+                    int mainZone = zoneIdx / 7;
+                    int subZone = zoneIdx % 7;
 
                     var zone = new ActivationZone
                     {
@@ -3799,7 +3799,7 @@ namespace V2XController
 
 
         private static (bool ok, List<ActivationZone> zones, bool isRtv, string? error)
-    ReadZonesFromModbusTcpWorker(string host, int port, byte unitId, bool asSerialTcp = false)
+        ReadZonesFromModbusTcpWorker(string host, int port, byte unitId, bool asSerialTcp = false)
         {
             try
             {
@@ -3856,7 +3856,6 @@ namespace V2XController
                     registersRead += data.Length;
                     System.Diagnostics.Debug.WriteLine($"   OK - {data.Length} regs (total: {registersRead}/{TOTAL_REGISTERS})");
 
-                    // OPRAVA: Kratší pauza, aby byl loading rychlejší, ale UI stále responzivní
                     System.Threading.Thread.Sleep(50); // Změněno z 100ms na 50ms
                 }
 
@@ -4039,7 +4038,7 @@ namespace V2XController
                     // VALIDACE: Filtrovat invalidní data
                     if (!IsValidZoneData(lonF, latF, heightF, widthF, azF))
                     {
-                        System.Diagnostics.Debug.WriteLine($"Zone slot {zoneIdx}: ✗ Invalid data - skipped");
+                        System.Diagnostics.Debug.WriteLine($"Zone slot {zoneIdx}:  Invalid data - skipped");
                         continue;
                     }
 
@@ -4060,7 +4059,7 @@ namespace V2XController
 
                     zone.UpdateName();
                     zones.Add(zone);
-                    System.Diagnostics.Debug.WriteLine($"  ✓ Added Zone {mainZone + 1}-{subZone + 1}: Lon={lonF:F6}, Lat={latF:F6}");
+                    System.Diagnostics.Debug.WriteLine($"   Added Zone {mainZone + 1}-{subZone + 1}: Lon={lonF:F6}, Lat={latF:F6}");
                 }
 
                 System.Diagnostics.Debug.WriteLine($"\n=== RS485 READ COMPLETE: {zones.Count} valid zones ===");
@@ -4110,7 +4109,7 @@ namespace V2XController
             // Data: [0, 230, 290, 1000, 0, 220, 285, 1000, 0, 60]
             // Maybe: lat_frac=230, lat_scale=1000, lon_frac=290, lon_scale=1000?
 
-            // Calculate with assumed base (from your area - Ostrava region)
+            // Calculate with assumed base (Ostrava region)
             const double LAT_BASE = 49.0;  // Ostrava latitude base
             const double LON_BASE = 18.0;  // Ostrava longitude base
 
@@ -4160,7 +4159,6 @@ namespace V2XController
             }
             catch { }
 
-            // Continue with other formats...
             return false;
 
             static bool IsValidCoord(double lat, double lon) => lat >= 40 && lat <= 60 && lon >= 5 && lon <= 25;
@@ -4169,7 +4167,6 @@ namespace V2XController
 
         private void UpdateButtonStates(bool isReadMode)
         {
-            // Use the actual button names from your XAML
             if (Start != null)
                 Start.IsEnabled = !isReadMode;
 
@@ -4216,9 +4213,9 @@ namespace V2XController
                 const int ZONE_STRIDE = MPC_ZONE_STRIDE;
                 ushort FIRST_ZONE_BASE = (ushort)(BASE_ADDR + WRITE_OFFSET);
 
-                for (int mainZone = 1; mainZone <= 4; mainZone++)
+                for (int mainZone = 1; mainZone <= 5; mainZone++)
                 {
-                    for (int subZone = 1; subZone <= 5; subZone++)
+                    for (int subZone = 1; subZone <= 7; subZone++)
                     {
                         if ((mainZone > 1 || subZone > 1) && subZone == 1)
                         {
@@ -4226,7 +4223,7 @@ namespace V2XController
                             System.Threading.Thread.Sleep(300);
                         }
 
-                        int zoneIndex = ((mainZone - 1) * 5) + (subZone - 1);
+                        int zoneIndex = ((mainZone - 1) * 7) + (subZone - 1);
                         ushort zoneBase = (ushort)(FIRST_ZONE_BASE + (zoneIndex * ZONE_STRIDE));
 
                         var data = modbus.ReadDataFrom16bitRegisters(
@@ -4305,7 +4302,7 @@ namespace V2XController
         }
 
         private static async Task<(bool ok, ModbusStateCode state, ushort[]? data, string? error)> ReadHoldingRegistersRtuAsync(
-    ExportSettings s, byte slave, ushort regAddr, ushort count, int timeoutMs)
+        ExportSettings s, byte slave, ushort regAddr, ushort count, int timeoutMs)
         {
             if (count <= 0) return (false, ModbusStateCode.IllegalResponseLength, null, "Count must be > 0");
             try

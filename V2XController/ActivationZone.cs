@@ -121,7 +121,7 @@ namespace V2XController
                 {
                     subZone = v;
                     OnPropertyChanged();
-                    UpdateName(); 
+                    UpdateName();
                 }
             }
         }
@@ -138,11 +138,11 @@ namespace V2XController
             int linearIdx = (mainZone * 7) + subZone;
 
             // Zone structure (35 zones total):
-            // 0-6:   P 1-1 to P 1-7
-            // 7-13:  P 2-1 to P 2-7
-            // 14-20: B 1 to B 7
-            // 21-27: V 1-1 to V 1-7
-            // 28-34: V 2-1 to V 2-7
+            // 0-6:   P 1-1 to P 1-7 (mainZone=0, subZone=0-6)
+            // 7-13:  P 2-1 to P 2-7 (mainZone=1, subZone=0-6)
+            // 14-20: B 1 to B 7    (mainZone=2, subZone=0-6)
+            // 21-27: V 1-1 to V 1-7 (mainZone=3, subZone=0-6)
+            // 28-34: V 2-1 to V 2-7 (mainZone=4, subZone=0-6)
 
             if (linearIdx >= 0 && linearIdx <= 6)
                 Name = $"P 1-{linearIdx + 1}";

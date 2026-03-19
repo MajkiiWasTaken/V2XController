@@ -348,8 +348,8 @@
                               PreviewKeyDown="ActivationZonesDataGrid_PreviewKeyDown">
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="60" CanUserResize="False"/>
-                            <DataGridTextColumn Header="Latitude [°]" Binding="{Binding Latitude, StringFormat=F6}" Width="100" CanUserResize="False"/>
-                            <DataGridTextColumn Header="Longitude [°]" Binding="{Binding Longitude, StringFormat=F6}" Width="100" CanUserResize="False"/>
+                            <DataGridTextColumn Header="Latitude [°]" Binding="{Binding Latitude, StringFormat=F6}" Width="92" CanUserResize="False"/>
+                            <DataGridTextColumn Header="Longitude [°]" Binding="{Binding Longitude, StringFormat=F6}" Width="92" CanUserResize="False"/>
                             <DataGridTextColumn Header="Azimuth [°]" Binding="{Binding Azimuth}" Width="75" CanUserResize="False"/>
                             <DataGridTextColumn Header="Length [m]" Binding="{Binding Height}" Width="Auto" CanUserResize="False"/>
                             <DataGridTextColumn Header="Width [m]" Binding="{Binding Width}" Width="Auto" CanUserResize="False"/>
