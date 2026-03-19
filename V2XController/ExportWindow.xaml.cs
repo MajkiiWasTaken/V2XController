@@ -3422,6 +3422,78 @@ namespace V2XController
                 return;
             }
 
+            // === PRE-READ DIAGNOSTICS: Read Register 0x0000 ===
+            System.Diagnostics.Debug.WriteLine("\n=== PRE-READ DIAGNOSTICS ===");
+            bool shouldSwitchToRtvMode = false;
+            bool shouldSwitchToWlcMode = false;
+            try
+            {
+                var (success, reg0Value, error) = await ReadRegister0x0000AsStringAsync();
+                if (success)
+                {
+                    System.Diagnostics.Debug.WriteLine($"Register 0x0000 (Device Info): '{reg0Value}'");
+                    System.Diagnostics.Debug.WriteLine($"Register 0x0000 Length: {reg0Value.Length} chars");
+
+                    // Parse version if format is known (e.g., "MPC-RTV v2.1.3" or "MPC-WLC v1.2.0")
+                    if (reg0Value.Contains("MPC") || reg0Value.Contains("RTV") || reg0Value.Contains("WLC"))
+                    {
+                        System.Diagnostics.Debug.WriteLine($"Device Type: MPC");
+                        System.Diagnostics.Debug.WriteLine($"Full String: {reg0Value}");
+
+                        // Pokud detekujeme RTV, nastavíme příznak pro přepnutí na Switches mode
+                        if (reg0Value.Contains("RTV"))
+                        {
+                            shouldSwitchToRtvMode = true;
+                            System.Diagnostics.Debug.WriteLine("RTV - will switch MainWindow to Switches mode");
+                        }
+                        // Pokud detekujeme WLC, nastavíme příznak pro přepnutí na Zone mode
+                        else if (reg0Value.Contains("WLC"))
+                        {
+                            shouldSwitchToWlcMode = true;
+                            System.Diagnostics.Debug.WriteLine("WLC - will switch MainWindow to Zone mode (Activation Zones)");
+                        }
+                    }
+                    else
+                    {
+                        System.Diagnostics.Debug.WriteLine($"Unknown device type: {reg0Value}");
+                    }
+                }
+                else
+                {
+                    System.Diagnostics.Debug.WriteLine($"WARNING: Failed to read register 0x0000: {error}");
+                }
+            }
+            catch (Exception diagEx)
+            {
+                System.Diagnostics.Debug.WriteLine($"WARNING: Exception during pre-read diagnostics: {diagEx.Message}");
+            }
+            System.Diagnostics.Debug.WriteLine("=== END PRE-READ DIAGNOSTICS ===\n");
+
+            // Pokud byl detekován RTV, přepneme RadioButton v MainWindow na Switches mode
+            if (shouldSwitchToRtvMode && Owner is MainWindow mw)
+            {
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    if (mw.SwitchRadio != null)
+                    {
+                        mw.SwitchRadio.IsChecked = true;
+                        System.Diagnostics.Debug.WriteLine("MainWindow RadioButton switched to Switches mode");
+                    }
+                });
+            }
+            // Pokud byl detekován WLC, přepneme RadioButton v MainWindow na Zone mode (Activation Zones)
+            else if (shouldSwitchToWlcMode && Owner is MainWindow mw2)
+            {
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    if (mw2.ZoneRadio != null)
+                    {
+                        mw2.ZoneRadio.IsChecked = true;
+                        System.Diagnostics.Debug.WriteLine("MainWindow RadioButton switched to Zone mode (Activation Zones)");
+                    }
+                });
+            }
+
             // Předpokládáme max 35 zón (7 hlavních x 5 sub-zón), každá 10 registrů = 350 registrů
             const int estimatedTotalRegisters = 350;
             ShowBusy("Reading activation zones...", showProgress: true, maxProgress: estimatedTotalRegisters);
@@ -3450,11 +3522,7 @@ namespace V2XController
                         return;
                     }
 
-                    string hostOnly = host.Split(new[] { ':', ';', ',' }, 2, StringSplitOptions.RemoveEmptyEntries)[0].Trim();
-
-                    // Spustit v background thread
-                    var result = await Task.Run(() => ReadZonesFromModbusTcpWorkerWithProgress(hostOnly, port, unitId, false, progress));
-
+                    var result = await Task.Run(() => ReadZonesFromModbusTcpWorker(host, port, unitId, usingTunnel));
                     if (!result.ok)
                     {
                         await ShowMessageAfterBusyAsync($"Failed to read zones via TCP: {result.error}", "Read", MessageBoxButton.OK, MessageBoxImage.Error);
@@ -3475,14 +3543,14 @@ namespace V2XController
                     zones = readZones;
                 }
 
-                if (Owner is MainWindow mw)
+                if (Owner is MainWindow mw3)
                 {
                     await Dispatcher.InvokeAsync(() =>
                     {
-                        mw.ActivationZonesCollection.Clear();
+                        mw3.ActivationZonesCollection.Clear();
                         foreach (var z in zones)
                         {
-                            mw.ActivationZonesCollection.Add(z);
+                            mw3.ActivationZonesCollection.Add(z);
                         }
                     });
 
@@ -3498,6 +3566,160 @@ namespace V2XController
             finally
             {
                 HideBusy();
+            }
+        }
+
+        private async Task<(bool success, string value, string? error)> ReadRegister0x0000AsStringAsync()
+        {
+            Settings = ExportSettings.FromWindow(this);
+            if (Settings == null)
+                return (false, "", "Settings are missing");
+
+            // Determine connection type
+            string conn = (ConnectionComboBox.SelectedItem as ComboBoxItem)?.Content?.ToString()?.Trim()?.ToLower() ?? "";
+            bool isTcp = conn == "modbus tcp";
+            bool isRtu = conn == "serial port";
+            bool isTunnel = conn == "serial tunnel";
+
+            if (!isTcp && !isRtu && !isTunnel)
+                return (false, "", "Please select a connection type");
+
+            // Get unit ID
+            byte unitId = (byte)Math.Clamp(Settings.ModemDec ?? 1, 1, 247);
+
+            const ushort START_ADDR = 0x0000;
+            const ushort REG_COUNT = 0x0020; // Read 32 registers (64 bytes)
+            const int timeoutMs = 5000;
+
+            try
+            {
+                if (isTcp || isTunnel)
+                {
+                    // === TCP Connection ===
+                    string host = Settings.TcpHost?.Trim() ?? "";
+                    int port = Settings.TcpPort ?? 502;
+
+                    if (string.IsNullOrWhiteSpace(host))
+                        return (false, "", "TCP host is required");
+
+                    // Use Task.Run to avoid blocking UI
+                    var result = await Task.Run(() =>
+                    {
+                        try
+                        {
+                            var endpoint = $"{host}:{port}";
+                            using var modbus = new ModbusTcpIp(endpoint, BuildProtocolParams(isTunnel));
+
+                            ushort[]? block = modbus.ReadDataFrom16bitRegisters(
+                                unitId,
+                                START_ADDR,
+                                REG_COUNT,
+                                RegType16b.HoldingRegister,
+                                out ModbusStateCode state,
+                                null);
+
+                            if (state == ModbusStateCode.Success && block != null)
+                            {
+                                string decoded = DecodeRegistersToString(block);
+                                return (true, decoded, null);
+                            }
+
+                            return (false, "", $"Read failed: {state}");
+                        }
+                        catch (Exception ex)
+                        {
+                            return (false, "", $"TCP error: {ex.Message}");
+                        }
+                    });
+
+                    return result;
+                }
+                else if (isRtu)
+                {
+                    // === RS485/RTU Connection ===
+                    var (ok, state, data, error) = await ReadHoldingRegistersRtuAsync(
+                        Settings, unitId, START_ADDR, REG_COUNT, timeoutMs);
+
+                    if (!ok || state != ModbusStateCode.Success || data == null)
+                        return (false, "", $"RS485 read failed: {error ?? state.ToString()}");
+
+                    string decoded = DecodeRegistersToString(data);
+                    return (true, decoded, null);
+                }
+
+                return (false, "", "Unknown connection type");
+            }
+            catch (Exception ex)
+            {
+                return (false, "", $"Exception: {ex.Message}");
+            }
+        }
+
+        private static string DecodeRegistersToString(ushort[] registers)
+        {
+            if (registers == null || registers.Length == 0)
+                return string.Empty;
+
+            var sb = new System.Text.StringBuilder();
+
+            foreach (ushort reg in registers)
+            {
+                // High byte
+                byte upper = (byte)(reg >> 8);
+                if (upper == 0x00) break;
+
+                // Filter printable ASCII characters (0x20-0x7E)
+                if (upper >= 0x20 && upper <= 0x7E)
+                    sb.Append((char)upper);
+
+                // Low byte
+                byte lower = (byte)(reg & 0xFF);
+                if (lower == 0x00) break;
+
+                // Filter printable ASCII characters (0x20-0x7E)
+                if (lower >= 0x20 && lower <= 0x7E)
+                    sb.Append((char)lower);
+            }
+
+            return sb.ToString().Trim();
+        }
+
+        private static bool TryReadRegister0x0000Tcp(
+            string host, int port, byte unitId, bool asSerialTcp,
+            out string value, out ModbusStateCode state, out string? error)
+        {
+            value = string.Empty;
+            error = null;
+            state = ModbusStateCode.Success;
+
+            try
+            {
+                var endpoint = $"{host}:{port}";
+                using var modbus = new ModbusTcpIp(endpoint, BuildProtocolParams(asSerialTcp));
+
+                // Read 32 holding registers at 0x0000
+                ushort[]? block = modbus.ReadDataFrom16bitRegisters(
+                    unitId,
+                    0x0000,
+                    0x0020, // 32 registers
+                    RegType16b.HoldingRegister,
+                    out state,
+                    null);
+
+                if (state == ModbusStateCode.Success && block != null)
+                {
+                    value = DecodeRegistersToString(block);
+                    return true;
+                }
+
+                error = $"Read failed: {state}";
+                return false;
+            }
+            catch (Exception ex)
+            {
+                state = ModbusStateCode.UndefinedError;
+                error = ex.Message;
+                return false;
             }
         }
 
@@ -4535,7 +4757,7 @@ namespace V2XController
 
         private static bool IsRtvFirmware(string firmware) =>
             !string.IsNullOrWhiteSpace(firmware) &&
-            firmware.IndexOf("RTV", StringComparison.OrdinalIgnoreCase) >= 0;
+            firmware.IndexOf("MPCv3 RTV", StringComparison.OrdinalIgnoreCase) >= 0;
 
         private static string DecodeAsciiFromRegs(ushort[]? data)
         {
