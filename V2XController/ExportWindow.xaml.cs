@@ -22,7 +22,9 @@ using System.Runtime.CompilerServices;
 
 namespace V2XController
 {
-
+    //Todo:
+    //
+    //IDK NIC ME NENAPADA UZ AAAAAAAAAAAAAAAAAAAAAAAAA
 
     public partial class ExportWindow : Window
     {
@@ -35,9 +37,9 @@ namespace V2XController
 
         private const int MAX_REGS_PER_REQUEST = 50;
 
-        // Writable V2X map starts at 0x0300 + 44 (0x032C)
-        private const ushort MPCv3WLC_WRITE_OFFSET = 44;
-        private const ushort MPCv3RTV_WRITE_OFFSET = 176;
+        // Writable V2X map starts at 0x0300 + 44 (0x032C) on MPCv3 WLC and at 0x0300 + 176 (0x03B0) on MPCv3 RTV, 10 regs for a zone without spaces.
+        private const ushort MPCv3WLC_WRITE_OFFSET = 44; // Offset for WLC
+        private const ushort MPCv3RTV_WRITE_OFFSET = 176; // Offset for RTV
         private const int MPC_ZONE_STRIDE = 10;      // registers per zone "slot" (X/Y=2+2, len=1, width=1, az=1 with gaps)
 
         // add near other helpers inside ExportWindow
@@ -326,7 +328,6 @@ namespace V2XController
             else SetReadMode(false);  // Default to export mode
         }
 
-
         private async void Start_Click(object sender, RoutedEventArgs e)
         {
             Settings = ExportSettings.FromWindow(this);
@@ -374,10 +375,9 @@ namespace V2XController
                 return;
             }
 
-            var doAct = true;
-            var doSw = false;
-            var zonesAct = mw.ActivationZonesCollection.Where(z => !z.IsSwitchZone).ToList();
-            var zonesSw = mw.ActivationZonesCollection.Where(z => z.IsSwitchZone).ToList();
+            // Určit, jaké zóny exportujeme (podle IsSwitchZone)
+            var zonesAct = mw.ActivationZonesCollection.Where(z => !z.IsSwitchZone).ToList(); // WLC zóny
+            var zonesSw = mw.ActivationZonesCollection.Where(z => z.IsSwitchZone).ToList();   // RTV zóny
 
             if (zonesAct.Count == 0 && zonesSw.Count == 0)
             {
@@ -385,25 +385,93 @@ namespace V2XController
                 return;
             }
 
-            if (doAct && zonesAct.Count > 0)
+            // === PRE-EXPORT VALIDATION: Read Register 0x0000 and check device type ===
+            System.Diagnostics.Debug.WriteLine("\n=== PRE-EXPORT VALIDATION ===");
+            string? deviceType = null;
+            bool isDeviceWLC = false;
+            bool isDeviceRTV = false;
+
+            try
             {
-                var report = BuildZonesDebugReport(zonesAct, 8, "Activation zones (preview)");
+                var (success, reg0Value, error) = await ReadRegister0x0000AsStringAsync();
+                if (success && !string.IsNullOrWhiteSpace(reg0Value))
+                {
+                    deviceType = reg0Value;
+                    isDeviceWLC = reg0Value.Contains("WLC", StringComparison.OrdinalIgnoreCase);
+                    isDeviceRTV = reg0Value.Contains("RTV", StringComparison.OrdinalIgnoreCase);
+
+                    System.Diagnostics.Debug.WriteLine($"Device type detected: {deviceType}");
+                    System.Diagnostics.Debug.WriteLine($"Is WLC: {isDeviceWLC}, Is RTV: {isDeviceRTV}");
+                }
+                else
+                {
+                    System.Diagnostics.Debug.WriteLine($"WARNING: Could not read device type from register 0x0000: {error}");
+                }
+            }
+            catch (Exception diagEx)
+            {
+                System.Diagnostics.Debug.WriteLine($"WARNING: Exception during device type detection: {diagEx.Message}");
+            }
+
+            bool exportingWLC = zonesAct.Count > 0;
+            bool exportingRTV = zonesSw.Count > 0;
+
+            if (deviceType != null) 
+            {
+                string zonesType = exportingWLC ? "WLC (Activation Zones)" : "RTV (Switches)";
+                string deviceTypeStr = isDeviceWLC ? "WLC" : (isDeviceRTV ? "RTV" : "Unknown");
+
+                // Kontrola nesouladu - NELZE POKRAČOVAT
+                if ((exportingWLC && isDeviceRTV) || (exportingRTV && isDeviceWLC))
+                {
+                    System.Diagnostics.Debug.WriteLine("DEVICE TYPE MISMATCH DETECTED!");
+
+                    MessageBox.Show(
+                        $"DEVICE FIRMWARE TYPE MISMATCH!\n\n" +
+                        $"Device type: MPC-{deviceTypeStr}\n" +
+                        $"Zones in table: {zonesType}\n\n" +
+                        $"You are trying to export {zonesType} zones to an MPC-{deviceTypeStr}!\n\n" +
+                        $"Switch to the correct mode ({deviceTypeStr})\n" +
+                        $"Please try exporting again after switching to correct mode.",
+                        "Export Type Mismatch",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Error);
+                    return;
+                }
+                else
+                {
+                    System.Diagnostics.Debug.WriteLine($" Type match OK: Exporting {zonesType} to MPC-{deviceTypeStr}");
+                }
+            }
+            System.Diagnostics.Debug.WriteLine("=== END PRE-EXPORT VALIDATION ===\n");
+
+            // Určit správný offset podle typu zón
+            ushort writeOffset = exportingWLC ? MPCv3WLC_WRITE_OFFSET : MPCv3RTV_WRITE_OFFSET;
+            var zonesToExport = exportingWLC ? zonesAct : zonesSw;
+            string zoneTypeName = exportingWLC ? "activation zones (WLC)" : "switch zones (RTV)";
+
+            // Validace obsahu zón
+            if (zonesToExport.Count > 0)
+            {
+                var report = BuildZonesDebugReport(zonesToExport, 8, $"{zoneTypeName} (preview)");
                 System.Diagnostics.Debug.WriteLine(report);
-                bool allLatZero = zonesAct.All(z => ApproximatelyZero(z.Latitude));
-                bool allLonZero = zonesAct.All(z => ApproximatelyZero(z.Longitude));
-                bool anySize = zonesAct.Any(z => z.Width > 0 && z.Height > 0);
+
+                bool allLatZero = zonesToExport.All(z => ApproximatelyZero(z.Latitude));
+                bool allLonZero = zonesToExport.All(z => ApproximatelyZero(z.Longitude));
+                bool anySize = zonesToExport.Any(z => z.Width > 0 && z.Height > 0);
+
                 if ((allLatZero && allLonZero) || !anySize)
                 {
                     var shortPreview = string.Join(Environment.NewLine, report.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None).Take(15));
-                    var msg = "Activation zones look empty (all coordinates are zero or sizes are zero).\n\nContinue anyway?\n\n" + shortPreview;
+                    var msg = $"{zoneTypeName} look empty (all coordinates are zero or sizes are zero).\n\nContinue anyway?\n\n" + shortPreview;
                     if (MessageBox.Show(msg, "Export preflight", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
                         return;
                 }
             }
 
             // Spočítat celkový počet registrů pro progress
-            int totalRegisters = zonesAct.Count * 10; // 10 registrů na zónu
-            ShowBusy(doSw ? "Exporting switch zones..." : "Exporting activation zones...", showProgress: true, maxProgress: totalRegisters);
+            int totalRegisters = zonesToExport.Count * 10; // 10 registrů na zónu
+            ShowBusy($"Exporting {zoneTypeName}...", showProgress: true, maxProgress: totalRegisters);
             await Task.Delay(50);
 
             try
@@ -442,36 +510,32 @@ namespace V2XController
                         return;
                     }
 
-                    // === ZÁPIS AKTIVAČNÍCH ZÓN (TCP) ===
-                    if (doAct && zonesAct.Count > 0)
+                    // === ZÁPIS ZÓN (TCP) ===
+                    UpdateProgress(0, totalRegisters, "Writing zones...");
+
+                    var progress = new Progress<(int current, int total, string message)>(p =>
                     {
-                        UpdateProgress(0, totalRegisters, "Writing zones...");
+                        UpdateProgress(p.current, p.total, p.message);
+                    });
 
-                        var progress = new Progress<(int current, int total, string message)>(p =>
-                        {
-                            UpdateProgress(p.current, p.total, p.message);
-                        });
+                    var actRes = await Task.Run(() =>
+                        WriteMpcZonesBatchedWithProgress(
+                            hostOnly, port, unitId, zonesToExport, writeOffset, isTcp: true, null,
+                            connectTimeoutMs: Math.Max(cfg.ConnectionTimeout, 3000),
+                            sendTimeoutMs: Math.Max(cfg.SendTimeout, 2000),
+                            receiveTimeoutMs: Math.Max(cfg.ReceiveTimeout, 6000),
+                            progress,
+                            out ModbusStateCode st, out string? err));
 
-                        var actRes = await Task.Run(() =>
-                            WriteMpcZonesBatchedWithProgress(
-                                hostOnly, port, unitId, zonesAct, isTcp: true, null,
-                                connectTimeoutMs: Math.Max(cfg.ConnectionTimeout, 3000),
-                                sendTimeoutMs: Math.Max(cfg.SendTimeout, 2000),
-                                receiveTimeoutMs: Math.Max(cfg.ReceiveTimeout, 6000),
-                                progress,
-                                out ModbusStateCode st, out string? err));
-
-                        if (!actRes)
-                        {
-                            await ShowMessageAfterBusyAsync($"Export (activation zones) failed.\nTarget={displayEndpoint}, UnitId={unitId}",
-                                "Export", MessageBoxButton.OK, MessageBoxImage.Error);
-                            return;
-                        }
+                    if (!actRes)
+                    {
+                        await ShowMessageAfterBusyAsync($"Export ({zoneTypeName}) failed.\nTarget={displayEndpoint}, UnitId={unitId}",
+                            "Export", MessageBoxButton.OK, MessageBoxImage.Error);
+                        return;
                     }
 
                     await ShowMessageAfterBusyAsync(
-                        doSw ? $"Exported switch zones to {displayEndpoint} (UnitId {unitId})." :
-                               $"Exported {zonesAct.Count} activation zone(s) to {displayEndpoint} (UnitId {unitId}).",
+                        $"Exported {zonesToExport.Count} {zoneTypeName} to {displayEndpoint} (UnitId {unitId}).",
                         "Export", MessageBoxButton.OK, MessageBoxImage.Information);
                 }
                 // === SERIAL PORT (RS485) ===
@@ -479,26 +543,21 @@ namespace V2XController
                 {
                     byte slave = (byte)Math.Clamp(Settings.ModemDec ?? 1, 1, 247);
 
-                    // === ZÁPIS AKTIVAČNÍCH ZÓN (RS485) ===
-                    if (doAct && zonesAct.Count > 0)
+                    var progress = new Progress<(int current, int total, string message)>(p =>
                     {
-                        var progress = new Progress<(int current, int total, string message)>(p =>
-                        {
-                            UpdateProgress(p.current, p.total, p.message);
-                        });
+                        UpdateProgress(p.current, p.total, p.message);
+                    });
 
-                        var (ok, st, err) = await WriteMpcZonesBatchedAsyncWithProgress(Settings, slave, zonesAct, timeoutMs: 3000, progress);
-                        if (!ok || st != ModbusStateCode.Success)
-                        {
-                            var extra = string.IsNullOrWhiteSpace(err) ? "" : $" ({err})";
-                            await ShowMessageAfterBusyAsync($"Export activation zones over RS485 failed (state={st}){extra}.", "Export", MessageBoxButton.OK, MessageBoxImage.Error);
-                            return;
-                        }
+                    var (ok, st, err) = await WriteMpcZonesBatchedAsyncWithProgress(Settings, slave, zonesToExport, writeOffset, timeoutMs: 3000, progress);
+                    if (!ok || st != ModbusStateCode.Success)
+                    {
+                        var extra = string.IsNullOrWhiteSpace(err) ? "" : $" ({err})";
+                        await ShowMessageAfterBusyAsync($"Export {zoneTypeName} over RS485 failed (state={st}){extra}.", "Export", MessageBoxButton.OK, MessageBoxImage.Error);
+                        return;
                     }
 
                     await ShowMessageAfterBusyAsync(
-                        doSw ? $"Exported switch zones over RS485 on {Settings.SerialPortName} (slave {slave})." :
-                               $"Exported {zonesAct.Count} activation zone(s) over RS485 on {Settings.SerialPortName} (slave {slave}).",
+                        $"Exported {zonesToExport.Count} {zoneTypeName} over RS485 on {Settings.SerialPortName} (slave {slave}).",
                         "Export", MessageBoxButton.OK, MessageBoxImage.Information);
                 }
             }
@@ -529,12 +588,13 @@ namespace V2XController
         }
 
         private static bool WriteMpcZonesBatchedWithProgress(
-            string host, int port, byte unitId,
-            IReadOnlyList<ActivationZone> zones,
-            bool isTcp, ExportSettings? settingsForRtu,
-            int connectTimeoutMs, int sendTimeoutMs, int receiveTimeoutMs,
-            IProgress<(int, int, string)>? progress,
-            out ModbusStateCode state, out string? error)
+    string host, int port, byte unitId,
+    IReadOnlyList<ActivationZone> zones,
+    ushort writeOffset, // PŘIDÁNO: offset pro WLC (44) nebo RTV (176)
+    bool isTcp, ExportSettings? settingsForRtu,
+    int connectTimeoutMs, int sendTimeoutMs, int receiveTimeoutMs,
+    IProgress<(int, int, string)>? progress,
+    out ModbusStateCode state, out string? error)
         {
             state = ModbusStateCode.Success;
             error = null;
@@ -546,6 +606,7 @@ namespace V2XController
             try
             {
                 System.Diagnostics.Debug.WriteLine($"=== Writing MPC zones via {(isTcp ? "TCP" : "RS485")} (BATCHED) ===");
+                System.Diagnostics.Debug.WriteLine($"Write offset: 0x{writeOffset:X4} ({writeOffset})");
 
                 progress?.Report((0, zones.Count * 10, "Unlocking device..."));
 
@@ -565,9 +626,8 @@ namespace V2XController
                 }
 
                 const ushort BASE_ADDR = MPC_BASE_ADDR;       // 0x0300
-                const ushort WRITE_OFFSET = MPCv3RTV_WRITE_OFFSET; // 44
                 const int ZONE_STRIDE = MPC_ZONE_STRIDE;      // 10
-                ushort FIRST_ZONE_BASE = (ushort)(BASE_ADDR + WRITE_OFFSET);
+                ushort FIRST_ZONE_BASE = (ushort)(BASE_ADDR + writeOffset); // Použít předaný offset
 
                 // Sestavit všechny registry
                 var allRegisters = new List<(ushort addr, ushort value)>();
@@ -577,7 +637,11 @@ namespace V2XController
                     var z = zones[idx];
                     int mainZone = z.MainZone + 1;
                     int subZone = z.SubZone + 1;
-                    int zoneIndex = ((mainZone - 1) * 7) + (subZone - 1);
+
+                    // Pro WLC: 4 hlavní × 5 sub = 20 zón
+                    // Pro RTV: 5 hlavních × 7 sub = 35 zón
+                    int subsPerMain = (writeOffset == MPCv3WLC_WRITE_OFFSET) ? 5 : 7;
+                    int zoneIndex = ((mainZone - 1) * subsPerMain) + (subZone - 1);
                     ushort zoneBase = (ushort)(FIRST_ZONE_BASE + (zoneIndex * ZONE_STRIDE));
 
                     var (latLo, latHi) = FloatToWordsWS((float)z.Latitude);
@@ -597,8 +661,9 @@ namespace V2XController
                     allRegisters.Add(((ushort)(zoneBase + 7), widthHi));
                     allRegisters.Add(((ushort)(zoneBase + 8), azLo));
                     allRegisters.Add(((ushort)(zoneBase + 9), azHi));
+                
 
-                    System.Diagnostics.Debug.WriteLine($"Zone {mainZone}-{subZone}: base=0x{zoneBase:X4}, 10 regs");
+                System.Diagnostics.Debug.WriteLine($"Zone {mainZone}-{subZone}: base=0x{zoneBase:X4}, 10 regs");
                 }
 
                 System.Diagnostics.Debug.WriteLine($"Total registers to write: {allRegisters.Count}");
@@ -803,7 +868,11 @@ namespace V2XController
         }
 
         private static async Task<(bool ok, ModbusStateCode state, string? error)> WriteMpcZonesBatchedAsyncWithProgress(
-            ExportSettings s, byte unitId, IReadOnlyList<ActivationZone> zones, int timeoutMs, IProgress<(int, int, string)>? progress)
+    ExportSettings s, byte unitId,
+    IReadOnlyList<ActivationZone> zones,
+    ushort writeOffset, // PŘIDÁNO: offset pro WLC (44) nebo RTV (176)
+    int timeoutMs,
+    IProgress<(int current, int total, string message)>? progress)
         {
             const ushort UNLOCK_REGISTER = 0x103F;
             const ushort UNLOCK_VALUE = 4562;
@@ -811,22 +880,13 @@ namespace V2XController
 
             try
             {
-                System.Diagnostics.Debug.WriteLine("=== Writing MPC zones via RS485 (BATCHED) ===");
-
-                progress?.Report((0, zones.Count * 10, "Unlocking device..."));
-
-                // Odemknout
-                var (uok, ust, uerr) = await WriteHoldingRegistersRtuAsync(s, unitId, UNLOCK_REGISTER, new[] { UNLOCK_VALUE }, timeoutMs);
-                if (!uok || ust != ModbusStateCode.Success)
-                    return (false, ust, $"Unlock failed: {uerr}");
-                await Task.Delay(800);
+                System.Diagnostics.Debug.WriteLine("=== Writing MPC zones via Modbus ASCII (BATCHED FLOAT32) ===");
+                System.Diagnostics.Debug.WriteLine($"Write offset: 0x{writeOffset:X4} ({writeOffset})");
 
                 const ushort BASE_ADDR = MPC_BASE_ADDR;
-                const ushort WRITE_OFFSET = MPCv3RTV_WRITE_OFFSET;
                 const int ZONE_STRIDE = MPC_ZONE_STRIDE;
-                ushort FIRST_ZONE_BASE = (ushort)(BASE_ADDR + WRITE_OFFSET);
+                ushort FIRST_ZONE_BASE = (ushort)(BASE_ADDR + writeOffset); // Použít předaný offset
 
-                // Sestavit všechny registry
                 var allRegisters = new List<(ushort addr, ushort value)>();
 
                 for (int idx = 0; idx < zones.Count; idx++)
@@ -834,7 +894,11 @@ namespace V2XController
                     var z = zones[idx];
                     int mainZone = z.MainZone + 1;
                     int subZone = z.SubZone + 1;
-                    int zoneIndex = ((mainZone - 1) * 7) + (subZone - 1);
+
+                    // Pro WLC: 4 hlavní × 5 sub = 20 zón
+                    // Pro RTV: 5 hlavních × 7 sub = 35 zón
+                    int subsPerMain = (writeOffset == MPCv3WLC_WRITE_OFFSET) ? 5 : 7;
+                    int zoneIndex = ((mainZone - 1) * subsPerMain) + (subZone - 1);
                     ushort zoneBase = (ushort)(FIRST_ZONE_BASE + (zoneIndex * ZONE_STRIDE));
 
                     float lonF = (float)z.Longitude;
@@ -849,6 +913,7 @@ namespace V2XController
                     var (widthLo, widthHi) = FloatToWordsWS(widthF);
                     var (azLo, azHi) = FloatToWordsWS(azF);
 
+                    // Přidat registry do seznamu (adresa musí být souvislá!)
                     allRegisters.Add((zoneBase, lonLo));
                     allRegisters.Add(((ushort)(zoneBase + 1), lonHi));
                     allRegisters.Add(((ushort)(zoneBase + 2), latLo));

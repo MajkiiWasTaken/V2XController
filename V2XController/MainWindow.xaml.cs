@@ -362,12 +362,8 @@ namespace V2XController
 
         // helper: current drawing/adding mode comes from radio buttons
         private bool IsSwitchMode() => SwitchRadio?.IsChecked == true;
-
-        // helper: per-row type detection (prefer Tag, fallback to Name prefix)
         private static bool IsSwitchZone(ActivationZone z) =>
-            z != null &&
-            (string.Equals(z?.Rectangle?.Tag as string, "SwitchZone", StringComparison.OrdinalIgnoreCase)
-             || (!string.IsNullOrWhiteSpace(z?.Name) && z.Name.StartsWith("Switch", StringComparison.OrdinalIgnoreCase)));
+            z?.IsSwitchZone ?? false;
 
         public List<Stop> stops = new List<Stop>();
 
@@ -2274,6 +2270,27 @@ namespace V2XController
                 if (rectPhase == RectangleDrawPhase.None)
                 {
                     _drawToSwitchZones = IsSwitchMode();
+
+                    int currentZoneCount = ActivationZonesCollection.Count(z => z.IsSwitchZone == _drawToSwitchZones);
+                    int maxZones = _drawToSwitchZones ? 35 : 20; 
+
+                    if (currentZoneCount >= maxZones)
+                    {
+                        string modeName = _drawToSwitchZones ? "Switches mode" : "Activation Zones mode";
+                        MessageBox.Show(
+                            $"Maximum number of zones reached!\n\n" +
+                            $"Mode: {modeName}\n" +
+                            $"Current zones: {currentZoneCount}\n" +
+                            $"Maximum allowed: {maxZones}\n\n" +
+                            $"Please delete some zones before adding new ones.",
+                            "Zone Limit Reached",
+                            MessageBoxButton.OK,
+                            MessageBoxImage.Warning);
+
+                        currentDrawingMode = DrawingMode.None;
+                        isDrawing = false;
+                        return;
+                    }
                 }
 
                 if (rectPhase == RectangleDrawPhase.None)
@@ -2428,7 +2445,8 @@ namespace V2XController
                         Longitude = latlon.X,
                         Azimuth = (int)angle,
                         MainZone = nextMain,
-                        SubZone = nextSub
+                        SubZone = nextSub,
+                        IsSwitchZone = _drawToSwitchZones
                     };
 
                     // tag by type and add always to the single collection
@@ -8541,7 +8559,7 @@ namespace V2XController
                 }
                 else return;
 
-                bool isSwitch = IsSwitchZone(zone);
+                bool isSwitch = zone.IsSwitchZone;
 
                 if (path == nameof(ActivationZone.MainZone))
                     zone.MainZone = Math.Clamp(val, 0, isSwitch ? 4 : 3);
@@ -9397,7 +9415,6 @@ namespace V2XController
             }
         }
 
-        // Next automatic indices for switch zones (fill 0..6 in each main 0..4) within single collection
         private (int main, int sub) GetNextSwitchZoneIndices()
         {
             for (int main = 0; main <= 4; main++)
@@ -9415,7 +9432,13 @@ namespace V2XController
                         return (main, sub);
                 }
             }
-            return (0, 0);
+
+            int totalSwitchZones = ActivationZonesCollection.Count(z => IsSwitchZone(z));
+
+            int nextMain = totalSwitchZones / 7;
+            int nextSub = totalSwitchZones % 7;
+
+            return (nextMain, nextSub);
         }
 
         private void ReadButtonMain_Click(object sender, RoutedEventArgs e)

@@ -95,31 +95,30 @@ namespace V2XController
             set { azimuth = value; OnPropertyChanged(); }
         }
 
-        // Updated clamp to support Main 0..4 for switch zones
+        // OPRAVENO: Bez Math.Clamp - validace se dělá v UI layer (DataGrid CellEditEnding)
         public int MainZone
         {
             get => mainZone;
             set
             {
-                var v = Math.Clamp(value, 0, 4);
-                if (mainZone != v)
+                if (mainZone != value)
                 {
-                    mainZone = v;
+                    mainZone = value;
                     OnPropertyChanged();
                     UpdateName();
                 }
             }
         }
 
+        // OPRAVENO: Bez Math.Clamp - validace se dělá v UI layer (DataGrid CellEditEnding)
         public int SubZone
         {
             get => subZone;
             set
             {
-                var v = Math.Clamp(value, 0, 6);
-                if (subZone != v)
+                if (subZone != value)
                 {
-                    subZone = v;
+                    subZone = value;
                     OnPropertyChanged();
                     UpdateName();
                 }
@@ -129,33 +128,54 @@ namespace V2XController
         public bool IsSwitchZone
         {
             get => isSwitchZone;
-            set { isSwitchZone = value; OnPropertyChanged(); }
+            set { isSwitchZone = value; OnPropertyChanged(); UpdateName(); }
         }
 
         // Add this method to ActivationZone class
         public void UpdateName()
         {
-            int linearIdx = (mainZone * 7) + subZone;
+            if (isSwitchZone)
+            {
+                // RTV režim: Switches (35 zón celkem)
+                // Struktura:
+                // mainZone=0: P1-1 až P1-7 (Přibližovací 1)
+                // mainZone=1: P2-1 až P2-7 (Přibližovací 2)
+                // mainZone=2: B1 až B7 (Blokovací)
+                // mainZone=3: V1-1 až V1-7 (Vzdalovací 1)
+                // mainZone=4: V2-1 až V2-7 (Vzdalovací 2)
 
-            // Zone structure (35 zones total):
-            // 0-6:   P 1-1 to P 1-7 (mainZone=0, subZone=0-6)
-            // 7-13:  P 2-1 to P 2-7 (mainZone=1, subZone=0-6)
-            // 14-20: B 1 to B 7    (mainZone=2, subZone=0-6)
-            // 21-27: V 1-1 to V 1-7 (mainZone=3, subZone=0-6)
-            // 28-34: V 2-1 to V 2-7 (mainZone=4, subZone=0-6)
-
-            if (linearIdx >= 0 && linearIdx <= 6)
-                Name = $"P 1-{linearIdx + 1}";
-            else if (linearIdx >= 7 && linearIdx <= 13)
-                Name = $"P 2-{linearIdx - 6}";
-            else if (linearIdx >= 14 && linearIdx <= 20)
-                Name = $"B {linearIdx - 13}";
-            else if (linearIdx >= 21 && linearIdx <= 27)
-                Name = $"V 1-{linearIdx - 20}";
-            else if (linearIdx >= 28 && linearIdx <= 34)
-                Name = $"V 2-{linearIdx - 27}";
+                switch (mainZone)
+                {
+                    case 0:
+                        Name = $"P1-{subZone + 1}";
+                        break;
+                    case 1:
+                        Name = $"P2-{subZone + 1}";
+                        break;
+                    case 2:
+                        Name = $"B{subZone + 1}";
+                        break;
+                    case 3:
+                        Name = $"V1-{subZone + 1}";
+                        break;
+                    case 4:
+                        Name = $"V2-{subZone + 1}";
+                        break;
+                    default:
+                        Name = $"Switch {mainZone + 1}-{subZone + 1}";
+                        break;
+                }
+            }
             else
-                Name = $"Zone {mainZone + 1}-{subZone + 1}";
+            {
+                // WLC režim: Activation Zones (20 zón celkem)
+                // Struktura:
+                // mainZone=0: Z1-1 až Z1-5
+                // mainZone=1: Z2-1 až Z2-5
+                // mainZone=2: Z3-1 až Z3-5
+                // mainZone=3: Z4-1 až Z4-5
+                Name = $"Z{mainZone + 1}-{subZone + 1}";
+            }
         }
 
         public event PropertyChangedEventHandler PropertyChanged;
