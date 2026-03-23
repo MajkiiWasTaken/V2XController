@@ -1,4 +1,4 @@
-# V2X Controller
+#  V2X Controller
 
 ![Platform](https://img.shields.io/badge/platform-Windows-blue)
 ![Framework](https://img.shields.io/badge/.NET-8.0-purple)
@@ -6,269 +6,187 @@
 ![Language](https://img.shields.io/badge/language-C%23-239120)
 ![Status](https://img.shields.io/badge/status-Prototype%20%2F%20Internal-orange)
 
-Desktop WPF aplikace pro práci s **V2X daty**, vizualizaci vozidel na mapě, kreslení **aktivních zón / switch zón**, přehrávání záznamů a export zón do externího zařízení přes **Modbus TCP / serial / serial tunnel**.
+---
 
-Projekt kombinuje několik částí do jedné aplikace:
+##  Overview
 
-- zobrazení mapy nad OSM dlaždicemi,
-- příjem a parsování V2X zpráv přes sériový port,
-- zobrazení živých i replay vozidel,
-- kreslení a editaci mapových objektů,
-- ukládání/načítání mapy do XML,
-- export zón do MPC zařízení,
-- pomocné okno pro dekódování **Protobuf** zpráv,
-- debug terminál pro sledování dění v aplikaci.
+**V2X Controller** is a WPF desktop application designed for working with **V2X data**, visualizing vehicles on a map, drawing **activation/switch zones**, replaying recordings, and exporting zones to external hardware via **Modbus TCP / serial / serial tunnel**.
+
+The application combines multiple functionalities into a single tool:
+
+- map rendering using OSM tiles,
+- receiving and parsing V2X messages over serial communication,
+- visualization of live and replayed vehicles,
+- drawing and editing map objects,
+- saving/loading map configurations to XML,
+- exporting zones to MPC devices,
+- built-in **Protobuf message decoder**,
+- debug terminal for internal diagnostics.
 
 ---
 
-## Co aplikace umí
+##  Features
 
-### 1. Mapové zobrazení
-- vykreslení mapy z dlaždic,
-- plynulé posouvání a zoom,
-- přepočet překryvných objektů při změně středu nebo zoomu,
-- zobrazení RSU oblasti a práce s GPS souřadnicemi,
-- dopočet lokální nadmořské výšky pro filtraci a vizualizaci.
+###  Map Visualization
+- tile-based map rendering,
+- smooth panning and zooming,
+- recalculation of overlay objects on zoom/center change,
+- RSU area visualization and GPS-based positioning,
+- local altitude estimation for filtering and visualization.
 
-### 2. Live příjem V2X zpráv
-- připojení na COM port,
-- nastavení baudrate,
-- čtení příchozích XML/V2X zpráv,
-- parsování CAM/SRV dat,
-- aktualizace aktivních vozidel v tabulce i na mapě,
-- zobrazování trailu pohybu vozidel.
+###  Live V2X Data Processing
+- connection to COM port,
+- configurable baudrate,
+- reading incoming XML/V2X messages,
+- parsing CAM/SRV messages,
+- updating active vehicles in table and map,
+- vehicle movement trail visualization.
 
-### 3. Kreslení objektů nad mapou
-- **Activation Zone** režim,
-- **Railway** režim,
-- ruční simulace tramvají,
-- výběr a úpravy objektů,
-- práce se switch zónami a běžnými zónami,
-- undo/redo zásobník pro akce nad kreslením.
+###  Map Object Drawing
+- **Activation Zone mode**,
+- **Railway mode**,
+- manual tram simulation,
+- object selection and editing,
+- support for switch zones and standard zones,
+- undo/redo stack for drawing actions.
 
-### 4. Záznam a playback
-- záznam live CAM dat,
-- ukládání záznamů,
-- načtení playback souboru,
-- přehrávání po keyframech,
-- ruční krokování přes slider,
-- loop a změna rychlosti přehrávání,
-- timeshift/catch-up logika.
+###  Recording & Playback
+- recording of live CAM data,
+- saving recordings,
+- loading playback files,
+- keyframe-based playback,
+- manual stepping via slider,
+- loop and playback speed control,
+- timeshift / catch-up logic.
 
-### 5. Export do MPC
-- export zón do registrů zařízení,
-- podpora **Modbus TCP**,
-- podpora **serial port** komunikace,
-- podpora **serial tunnel** režimu,
-- čtení registrů,
-- validace typu zařízení před exportem,
-- dávkový zápis zón do holding registrů.
+###  Export to MPC
+- exporting zones into device registers,
+- support for **Modbus TCP**,
+- support for **serial communication**,
+- support for **serial tunnel mode**,
+- reading registers,
+- device type validation,
+- batch writing of zones into holding registers.
 
-### 6. Protobuf decoder
-Samostatné okno `ProtobufWindow` umí:
-- načítat více `.proto` souborů,
-- spojit definice do jednoho pohledu,
-- zkusit dekódovat Hex/Base64 vstup,
-- uložit seznam použitých proto definic do AppData,
-- dělat rychlý interní test dekódování bez nutnosti externího nástroje.
+###  Protobuf Decoder
+Dedicated `ProtobufWindow` allows:
+- loading multiple `.proto` files,
+- merging definitions,
+- decoding Hex/Base64 input,
+- storing proto definitions in AppData,
+- quick internal decoding without external tools.
 
-### 7. Debug terminal
-Okno `TerminalWindow` slouží jako jednoduchý barevný terminál pro diagnostické výpisy.
-
----
-
-## Architektura projektu
-
-Aplikace je postavená jako **single WPF desktop app**, kde `MainWindow` funguje jako hlavní orchestrátor mapy, komunikace a UI logiky.
-
-### Hlavní části
-
-#### `MainWindow.xaml` / `MainWindow.xaml.cs`
-Hlavní okno aplikace. Řeší hlavně:
-- mapové dlaždice,
-- práci s Canvas vrstvou,
-- live komunikaci přes `SerialPort`,
-- příjem a parsování zpráv,
-- vykreslování vozidel,
-- aktivní a switch zóny,
-- playback a recording,
-- XML import/export mapy,
-- ovládání většiny UI.
-
-#### `ExportWindow.xaml` / `ExportWindow.xaml.cs`
-Samostatné exportní okno pro zápis zón do MPC zařízení.
-Obsahuje logiku pro:
-- volbu komunikačního profilu,
-- Modbus TCP / serial / serial tunnel,
-- ukládání export profilů,
-- serializaci nastavení,
-- zápis zón do registrů,
-- čtení registrů,
-- progress overlay a diagnostiku exportu.
-
-#### `ProtobufWindow.xaml` / `ProtobufWindow.xaml.cs`
-Pomocné okno pro správu `.proto` souborů a ruční dekódování payloadů.
-
-#### `ProtobufParser.cs`
-Vlastní interní parser a dekodér protobuf zpráv. Obsahuje:
-- parsování `.proto` definic,
-- detekci typu zprávy,
-- dekódování hex/base64 vstupu,
-- převod do lidsky čitelné podoby.
-
-#### `V2XMessageParser.cs`
-Parser V2X zpráv z raw XML do interního modelu `V2XMessage`.
-
-#### `SRVMessage.cs`
-Model a parser pro SRV zprávu.
-
-#### `ActivationZone.cs`
-Datový model zóny s podporou `INotifyPropertyChanged`. Uchovává například:
-- název,
-- šířku/výšku,
-- lat/lon,
-- azimut,
-- main/sub zone index,
-- stav aktivace,
-- informaci, zda jde o switch zónu.
-
-#### Další modely
-- `MapPoint.cs` – vozidlo / bod na mapě včetně vizuálních prvků a trailu,
-- `MapRectangle.cs` – základní obdélník na mapě,
-- `Railway.cs` – úsečka koleje,
-- `MovementFrame.cs` – jeden frame pohybu pro replay,
-- `TramInfo.cs` – data pro tabulku aktivních tramvají,
-- `ExportSettings.cs` + `ExportSettingsStorage.cs` – uložení profilů exportu.
+###  Debug Terminal
+`TerminalWindow` provides a simple colored terminal for diagnostic logs.
 
 ---
 
-## Jak data tečou aplikací
+##  How It Works
 
-### Live režim
-1. Uživatel zvolí COM port a baudrate.
-2. `MainWindow` otevře `SerialPort`.
-3. Aplikace čte příchozí řádky / zprávy.
-4. `V2XMessageParser` nebo `SRVMessage` zprávu rozparsuje.
-5. Souřadnice se převedou do mapových pixelů.
-6. Vozidlo se vykreslí / aktualizuje na Canvasu.
-7. Trail, tabulka aktivních tramvají a zóny se přepočítají.
+The application is built around a **map-based visualization engine**, where all entities (vehicles, zones, signals) are rendered on a canvas aligned with geographic coordinates.
 
-### Playback režim
-1. Načte se uložený záznam.
-2. Vytvoří se keyframy a interní replay struktury.
-3. Slider nebo timer vybírá aktuální čas.
-4. Vozidla se dopočtou a vykreslí do mapy.
-5. Statistiky a doprovodné UI se synchronizují s časem přehrávání.
+### Core workflow:
 
-### Export režim
-1. Uživatel otevře exportní okno.
-2. Vybere typ spojení a cílový profil.
-3. Zóny se rozdělí na **WLC activation zones** a **RTV switch zones**.
-4. Aplikace ověří typ cílového zařízení.
-5. Hodnoty zón se přepočtou do registrů.
-6. Proběhne dávkový zápis přes Modbus.
+1. **Map Rendering**
+   - Tiles are fetched from OpenStreetMap
+   - Coordinates are converted from latitude/longitude to pixels
+   - Zoom recalculates tiles instead of scaling images
 
----
+2. **Data Input**
+   - Incoming V2X or simulated data
+   - Parsed into internal data structures
 
-## Struktura důležitých souborů
+3. **Object Representation**
+   - Vehicles and zones are represented as UI elements
+   - Bound to geographic coordinates
 
-```text
-V2XController/
-├─ App.xaml
-├─ MainWindow.xaml
-├─ MainWindow.xaml.cs
-├─ ExportWindow.xaml
-├─ ExportWindow.xaml.cs
-├─ ProtobufWindow.xaml
-├─ ProtobufWindow.xaml.cs
-├─ TerminalWindow.xaml
-├─ TerminalWindow.xaml.cs
-├─ ActivationZone.cs
-├─ V2XMessage.cs
-├─ V2XMessageParser.cs
-├─ SRVMessage.cs
-├─ ProtobufParser.cs
-├─ TramInfo.cs
-├─ MapPoint.cs
-├─ MapRectangle.cs
-├─ Railway.cs
-├─ MovementFrame.cs
-├─ ExportSettings.cs
-├─ ExportSettingsStorage.cs
-├─ Converters.cs
-└─ Libs/
-```
+4. **User Interaction**
+   - Drawing tools allow creation of custom zones
+   - Objects can be selected and modified
+
+5. **Real-Time Updates**
+   - UI updates dynamically based on incoming or replayed data
 
 ---
 
-## Technologie a závislosti
+##  Data Flow
 
-### NuGet balíčky
-- `Google.Protobuf`
-- `System.IO.Ports`
-- `Uno.UI`
+### Live Mode
+1. User selects COM port and baudrate  
+2. Application opens `SerialPort`  
+3. Incoming messages are read  
+4. Messages are parsed (CAM/SRV)  
+5. Coordinates are converted to map positions  
+6. Vehicles are rendered/updated on canvas  
+7. UI elements (trails, tables, zones) are updated  
 
-### Externí DLL reference
-Projekt používá i tyto reference:
-- `ComCommon.dll`
-- `Common.dll`
-- `Logger.dll`
-- `ModbusNewLib.dll`
+### Playback Mode
+1. Recorded file is loaded  
+2. Keyframes and replay structures are created  
+3. Slider/timer selects current timestamp  
+4. Vehicles are interpolated and rendered  
+5. UI is synchronized with playback time  
 
-> Pozor: v `.csproj` jsou `HintPath` aktuálně nastavené na relativní cestu do `Downloads/ModbusLib`. Pokud chceš projekt přesunout nebo buildit jinde, bude pravděpodobně potřeba reference upravit tak, aby mířily na lokální `Libs/` složku nebo na správnou firemní cestu.
-
----
-
-## Build / spuštění
-
-### Požadavky
-- Windows
-- .NET 8 SDK
-- Visual Studio 2022 nebo novější
-- dostupné DLL knihovny pro Modbus část
-
-### Doporučený postup
-1. Otevři `V2XController.csproj` ve Visual Studiu.
-2. Zkontroluj, že externí DLL reference ukazují na platné soubory.
-3. Obnov NuGet balíčky.
-4. Spusť build.
-5. Otestuj COM porty, mapu a exportní dialog.
+### Export Mode
+1. User opens export window  
+2. Selects connection type and profile  
+3. Zones are divided into activation and switch zones  
+4. Target device is validated  
+5. Zone data is converted to register values  
+6. Batch write is executed via Modbus  
 
 ---
 
-## Poznámky k projektu
+##  Requirements
 
-- Projekt působí jako **interní nástroj pro vývoj / testování / servisní práci**, ne jako hotový veřejný produkt.
-- Hodně logiky je soustředěno přímo v `MainWindow.xaml.cs`, takže pro další rozvoj by dávalo smysl časem oddělit:
-  - map rendering,
-  - serial communication,
-  - playback engine,
-  - export services,
-  - zone editor.
-- Díky tomu by byla jednodušší údržba, testování i další rozšiřování.
+- Windows  
+- .NET 8 SDK  
+- Visual Studio 2022 or newer  
+- External Modbus libraries available  
 
 ---
 
-## Co by šlo případně zlepšit
+##  Getting Started
 
-- rozdělit `MainWindow.xaml.cs` do menších služeb / manager tříd,
-- oddělit parsery a I/O od UI vrstvy,
-- přidat lepší logování a structured logging,
-- doplnit unit testy pro parsery a exportní výpočty,
-- sjednotit naming a vyčistit experimentální soubory,
-- doplnit dokumentaci formátů vstupních souborů.
+1. Clone the repository  
+2. Open the project in Visual Studio  
+3. Restore NuGet packages  
+4. Verify external DLL references  
+5. Build and run the application  
+
+>  Some external DLL references may require manual adjustment depending on your environment.
 
 ---
 
-## Shrnutí
+##  Technologies Used
 
-`V2X Controller` je dost široký nástroj, který v jednom desktop projektu spojuje:
+- **C# / WPF**
+- **.NET**
+- **OpenStreetMap tiles**
+- **Serial communication**
+- **Modbus (TCP / Serial)**
+- **Google Protobuf**
 
-- mapovou vizualizaci,
-- live V2X příjem,
-- replay záznamů,
-- kreslení zón,
-- export do hardware,
-- protobuf debugging.
+---
 
-Na GitHub README je to přesně ten typ projektu, kde se vyplatí ukázat, že nejde jen o „mapku“, ale o **kombinaci HMI, diagnostiky, parserů a exportní utility pro provozní V2X workflow**.
+##  Use Case
+
+This application is intended for:
+
+- development and testing of V2X systems,
+- tram/vehicle movement visualization,
+- infrastructure diagnostics,
+- simulation and validation of transport scenarios.
+
+---
+
+##  Notes
+
+This project is primarily an **internal tool** used for development, testing, and diagnostics.  
+It combines HMI, communication, data parsing, and export functionality into a single desktop application.
+
+---
+
+##  Author: Michal Švrček and others
+
+Developed as part of a real-world intelligent transport system project.
