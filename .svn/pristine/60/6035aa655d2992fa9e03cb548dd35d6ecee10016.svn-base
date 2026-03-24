@@ -4056,8 +4056,7 @@ namespace V2XController
                         Height = heightF,
                         Width = widthF,
                         Azimuth = (int)Math.Round(azF),
-                        Name = $"Zone {mainZone + 1}",
-                        isSwitchZone = true
+                        Name = $"Zone {mainZone + 1}"
                     };
 
                     zone.UpdateName();
@@ -4180,9 +4179,8 @@ namespace V2XController
                     if (!IsValidZoneData(lonF, latF, heightF, widthF, azF))
                         continue;
 
-                    int subsPerMain = isRtv ? 7 : 5;
-                    int mainZone = zoneIdx / subsPerMain;
-                    int subZone = zoneIdx % subsPerMain;
+                    int mainZone = zoneIdx / 5;
+                    int subZone = zoneIdx % 5;
 
                     var zone = new ActivationZone
                     {
@@ -4193,8 +4191,7 @@ namespace V2XController
                         Height = heightF,
                         Width = widthF,
                         Azimuth = (int)Math.Round(azF),
-                        Name = $"Zone {mainZone + 1}",
-                        IsSwitchZone = isRtv
+                        Name = $"Zone {mainZone + 1}"
                     };
 
                     zone.UpdateName();
@@ -5501,7 +5498,7 @@ namespace V2XController
 
                 if (isRtu || isTunnel)
                 {
-                    System.Diagnostics.Debug.WriteLine("Using Modbus ASCII");
+                    System.Diagnostics.Debug.WriteLine("Using Modbus ASCII (RTU)");
 
                     // Step 1: Connecting (0-10%)
                     UpdateProgress(5, 100, "Connecting to device...");

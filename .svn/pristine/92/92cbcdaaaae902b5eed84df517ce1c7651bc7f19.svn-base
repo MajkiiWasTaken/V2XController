@@ -110,7 +110,7 @@ namespace V2XController
         private Point startPoint;
         private Point lineStartPoint;
         private Line currentLine;
-        private List<Railway> railwayLines;
+        private List<Line> railwayLines = new List<Line>();
 
         private List<Point> trailPoints = new List<Point>();
         private Polyline tramTrail;
@@ -147,8 +147,8 @@ namespace V2XController
         //rectangle dimensions textblock
         private TextBlock dimensionTextBlock;
 
-        private Stack<UndoRedoAction> undoStack = new();
-        private Stack<UndoRedoAction> redoStack = new();
+        private Stack<Action> undoStack = new();
+        private Stack<Action> redoStack = new();
 
         //recording movement
         private bool isPlaying = false;
@@ -432,12 +432,6 @@ namespace V2XController
 
         private ProtobufWindow _protobufWindow;
 
-        private class UndoRedoAction
-        {
-            public Action UndoAction { get; set; }
-            public Action RedoAction { get; set; }
-        }
-
 
         //||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
         //Main window constructor
@@ -455,7 +449,6 @@ namespace V2XController
 
             // INIT TramTable BEFORE any timers or bindings use it
             TramTable = new ObservableCollection<TramInfo>();
-            railwayLines = new List<Railway>();
 
             InitSwitchZonesUi();
 
@@ -742,7 +735,7 @@ namespace V2XController
             return (lonlat.Y, lonlat.X);
         }
 
-        // Loading map tiles on the canvas
+        // Loading map tiles on the grid
         private async Task LoadTilesSmoothAsync(int startX, int startY, double offsetX = 0, double offsetY = 0)
         {
             _tileCts?.Cancel();
@@ -755,13 +748,15 @@ namespace V2XController
                 _currentTopLeftTileX = startX;
                 _currentTopLeftTileY = startY;
 
-                cameraX = startX * TileSize + (int)Math.Round(offsetX);
-                cameraY = startY * TileSize + (int)Math.Round(offsetY);
+                // Initialize camera position based on tile coordinates
+                cameraX = startX * TileSize;
+                cameraY = startY * TileSize;
 
                 isDrawing = false;
                 currentRect = null;
                 _currentMapRectangle = null;
 
+                // Use progressive rendering
                 RenderTilesProgressive();
 
                 await Task.Delay(100); // Allow tiles to load
@@ -782,6 +777,7 @@ namespace V2XController
             }
             catch (TaskCanceledException) { }
         }
+
 
         private async Task<BitmapSource?> FetchTileAsync(int z, int x, int y, CancellationToken ct)
         {
@@ -1055,66 +1051,34 @@ namespace V2XController
         {
             int delta = e.Delta > 0 ? 1 : -1;
             int newZoom = Math.Clamp(zoom + delta, 1, 18);
-
-            if (newZoom == zoom) return; // Už jsme na limitu
-
             _pendingZoom = newZoom;
 
+            // vizuální náhled zoomu pomocí ScaleTransform
             _lastWheelPos = e.GetPosition(TileCanvas);
             scale.CenterX = _lastWheelPos.X;
             scale.CenterY = _lastWheelPos.Y;
-
+            // poměr mezi cílovým a aktuálním zoomem (OSM používá 2x škálování na jeden level)
             double previewScale = Math.Pow(2, _pendingZoom - zoom);
             scale.ScaleX = previewScale;
             scale.ScaleY = previewScale;
 
+            // debounce commit (načtení dlaždic) po krátké pauze
             if (_zoomDebounceTimer == null)
             {
                 _zoomDebounceTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(350) };
                 _zoomDebounceTimer.Tick += async (s, ev) =>
                 {
                     _zoomDebounceTimer.Stop();
-                    
-                    int oldZoom = zoom;
-
-                    double worldMouseX = cameraX + _lastWheelPos.X;
-                    double worldMouseY = cameraY + _lastWheelPos.Y;
-
-                    double oldTileMouseX = worldMouseX / TileSize;
-                    double oldTileMouseY = worldMouseY / TileSize;
-
-                    double mouseLatLon_lon = TileXToLon(oldTileMouseX, oldZoom);
-                    double mouseLatLon_lat = TileYToLat(oldTileMouseY, oldZoom);
 
                     zoom = _pendingZoom;
                     scale.ScaleX = 1;
                     scale.ScaleY = 1;
 
-                    double newTileMouseX = LonToTileX(mouseLatLon_lon, zoom);
-                    double newTileMouseY = LatToTileY(mouseLatLon_lat, zoom);
+                    var (centerX, centerY) = LatLonToTileXY(latitude, longitude, zoom);
+                    await LoadTilesSmoothAsync(centerX - TileCount / 2, centerY - TileCount / 2);
 
-                    int newCameraX = (int)Math.Round(newTileMouseX * TileSize - _lastWheelPos.X);
-                    int newCameraY = (int)Math.Round(newTileMouseY * TileSize - _lastWheelPos.Y);
 
-                    int startX = (int)Math.Floor((double)newCameraX / TileSize);
-                    int startY = (int)Math.Floor((double)newCameraY / TileSize);
-
-                    double offsetX = newCameraX - (startX * TileSize);
-                    double offsetY = newCameraY - (startY * TileSize);
-
-                    await LoadTilesSmoothAsync(startX, startY, offsetX, offsetY);
-
-                    double centerWorldX = cameraX + TileCanvas.ActualWidth / 2.0;
-                    double centerWorldY = cameraY + TileCanvas.ActualHeight / 2.0;
-
-                    double centerTileX = centerWorldX / TileSize;
-                    double centerTileY = centerWorldY / TileSize;
-
-                    longitude = TileXToLon(centerTileX, zoom);
-                    latitude = TileYToLat(centerTileY, zoom);
-
-                    UpdateCenterTextBoxesFromFields();
-
+                    // Also refresh altitude for new center/zoom area
                     _ = EnsureLocalAreaAltitudeAsync(force: true);
 
                     ResetAllTramTrails();
@@ -1134,7 +1098,6 @@ namespace V2XController
             }
 
             _zoomDebounceTimer.Start();
-            e.Handled = true;
         }
 
         // Dragging the map with MMB
@@ -1198,8 +1161,6 @@ namespace V2XController
 
             // 6. Update replay vehicles
             UpdateReplayVehiclesPositions();
-
-            ReprojectRailwaysOnMapChange();
 
             // 7. Update radius circle if visible
             if (CircleCheckBox?.IsChecked == true)
@@ -1764,7 +1725,6 @@ namespace V2XController
             ReprojectAllZonesOnMapChange();
             ReprojectActiveVehiclesOnMapChange();
             ReprojectReplayOnMapChange();
-            ReprojectRailwaysOnMapChange();
         }
 
         //moving overlays
@@ -2037,13 +1997,12 @@ namespace V2XController
 
         public async void RefreshMap()
         {
-            int startX = (int)Math.Floor((double)cameraX / TileSize);
-            int startY = (int)Math.Floor((double)cameraY / TileSize);
+            // Snap to integer tile grid to keep imagery aligned with overlay math
+            var (centerX, centerY) = LatLonToTileXY(latitude, longitude, zoom);
+            int startX = centerX - TileCount / 2;
+            int startY = centerY - TileCount / 2;
 
-            double offsetX = cameraX - (startX * TileSize);
-            double offsetY = cameraY - (startY * TileSize);
-
-            await LoadTilesSmoothAsync(startX, startY, offsetX, offsetY);
+            await LoadTilesSmoothAsync(startX, startY, 0, 0);
 
             _ = EnsureLocalAreaAltitudeAsync(force: true);
             ResetAllTramTrails();
@@ -2052,7 +2011,6 @@ namespace V2XController
             ReprojectActiveVehiclesOnMapChange();
             ReprojectReplayOnMapChange();
             ReprojectSwitchZonesOnMapChange();
-            ReprojectRailwaysOnMapChange();
             DrawRadiusCircle();
 
             await Task.Delay(1);
@@ -2512,58 +2470,6 @@ namespace V2XController
                     rect.MouseLeave += Rectangle_MouseLeave;
                     rect.MouseLeftButtonDown += Rectangle_MouseLeftButtonDown;
 
-                    var rectToAdd = rect;
-                    var zoneToAdd = zone;
-                    var mapRectToAdd = new MapRectangle(rect);
-
-                    AddUndoRedo(
-                        undo: () =>
-                        {
-                            // Remove from canvas
-                            if (TileCanvas.Children.Contains(rectToAdd))
-                                TileCanvas.Children.Remove(rectToAdd);
-
-                            // Remove from dictionaries and collections
-                            activationZones.Remove(rectToAdd);
-                            ActivationZonesCollection.Remove(zoneToAdd);
-
-                            var mrToRemove = mapRectangles.FirstOrDefault(mr => mr.Shape == rectToAdd);
-                            if (mrToRemove != null)
-                                mapRectangles.Remove(mrToRemove);
-
-                            // Unsubscribe event
-                            zoneToAdd.PropertyChanged -= ActivationZone_PropertyChanged;
-
-                            isDirty = true;
-                        },
-                        redo: () =>
-                        {
-                            // Add back to canvas
-                            if (!TileCanvas.Children.Contains(rectToAdd))
-                                TileCanvas.Children.Add(rectToAdd);
-
-                            // Add back to dictionaries and collections
-                            if (!activationZones.ContainsKey(rectToAdd))
-                                activationZones[rectToAdd] = zoneToAdd;
-
-                            if (!ActivationZonesCollection.Contains(zoneToAdd))
-                                ActivationZonesCollection.Add(zoneToAdd);
-
-                            if (!mapRectangles.Any(mr => mr.Shape == rectToAdd))
-                                mapRectangles.Add(mapRectToAdd);
-
-                            // Resubscribe event
-                            zoneToAdd.PropertyChanged += ActivationZone_PropertyChanged;
-
-                            // Restore event handlers
-                            rectToAdd.MouseEnter += Rectangle_MouseEnter;
-                            rectToAdd.MouseLeave += Rectangle_MouseLeave;
-                            rectToAdd.MouseLeftButtonDown += Rectangle_MouseLeftButtonDown;
-
-                            isDirty = true;
-                        }
-                    );
-
                     ClearTempElements();
                     rectPhase = RectangleDrawPhase.None;
                 }
@@ -2671,68 +2577,30 @@ namespace V2XController
         //stop drawing when mouse button is released
         private void TileCanvas_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
         {
+            AddUndoRedo(
+                undo: () =>
+                {
+                    TileCanvas.Children.Remove(currentLine);
+                    railwayLines.Remove(currentLine);
+                },
+                redo: () =>
+                {
+                    TileCanvas.Children.Add(currentLine);
+                    railwayLines.Add(currentLine);
+
+
+                }
+            );
+
             if (currentDrawingMode == DrawingMode.Railway && currentLine != null)
             {
                 currentLine.IsHitTestVisible = true;
 
-                var start = new Point(currentLine.X1, currentLine.Y1);
-                var end = new Point(currentLine.X2, currentLine.Y2);
+                railwayLines.Add(currentLine);
 
-                var startLatLon = CanvasPixelsToLatLon(start, latitude, longitude, zoom);
-                var endLatLon = CanvasPixelsToLatLon(end, latitude, longitude, zoom);
+                isDirty = true; // Mark as modified
 
-                var railway = new Railway
-                {
-                    Lat1 = startLatLon.Y,
-                    Lon1 = startLatLon.X,
-                    Lat2 = endLatLon.Y,
-                    Lon2 = endLatLon.X,
-                    Line = currentLine,
-                    Color = ((SolidColorBrush)currentLine.Stroke).Color.ToString(),
-                    Thickness = currentLine.StrokeThickness
-                };
-
-                railwayLines.Add(railway);
-
-                var lineToAdd = currentLine;
-                var railwayToAdd = railway;
-
-                AddUndoRedo(
-                    undo: () =>
-                    {
-                        TileCanvas.Children.Remove(lineToAdd);
-                        railwayLines.Remove(railwayToAdd);
-                        isDirty = true;
-                    },
-                    redo: () =>
-                    {
-                        TileCanvas.Children.Add(lineToAdd);
-                        if (!railwayLines.Contains(railwayToAdd))
-                            railwayLines.Add(railwayToAdd);
-                        isDirty = true;
-                    }
-                );
-
-                isDirty = true;
                 currentLine = null;
-            }
-        }
-
-        private void ReprojectRailwaysOnMapChange()
-        {
-            foreach (var railway in railwayLines)
-            {
-                if (railway?.Line == null) continue;
-
-                // Převést lat/lon na canvas souřadnice
-                var (x1, y1) = ConvertLatLonToCanvasXY(railway.Lat1, railway.Lon1);
-                var (x2, y2) = ConvertLatLonToCanvasXY(railway.Lat2, railway.Lon2);
-
-                // Aktualizovat pozice Line
-                railway.Line.X1 = x1;
-                railway.Line.Y1 = y1;
-                railway.Line.X2 = x2;
-                railway.Line.Y2 = y2;
             }
         }
 
@@ -2861,36 +2729,6 @@ namespace V2XController
             var dx = currentPos.X - mouseOffset.X;
             var dy = currentPos.Y - mouseOffset.Y;
 
-            // PŘIDÁNO: Podpora pro pohyb Line (railway)
-            if (selectedElement is Line line)
-            {
-                line.X1 += dx;
-                line.Y1 += dy;
-                line.X2 += dx;
-                line.Y2 += dy;
-
-                // Aktualizovat lat/lon v Railway objektu
-                var railway = railwayLines.FirstOrDefault(r => r.Line == line);
-                if (railway != null)
-                {
-                    var start = new Point(line.X1, line.Y1);
-                    var end = new Point(line.X2, line.Y2);
-
-                    var startLatLon = CanvasPixelsToLatLon(start, latitude, longitude, zoom);
-                    var endLatLon = CanvasPixelsToLatLon(end, latitude, longitude, zoom);
-
-                    railway.Lat1 = startLatLon.Y;
-                    railway.Lon1 = startLatLon.X;
-                    railway.Lat2 = endLatLon.Y;
-                    railway.Lon2 = endLatLon.X;
-
-                    isDirty = true;
-                }
-
-                mouseOffset = currentPos;
-                return;
-            }
-
             if (selectedElement is FrameworkElement element)
             {
                 double left = Canvas.GetLeft(element);
@@ -3011,40 +2849,16 @@ namespace V2XController
             //deletion
             if (e.Key == Key.Delete && selectedElement != null)
             {
-                var elementToDelete = selectedElement;
+                TileCanvas.Children.Remove(selectedElement);
 
                 if (selectedElement is Ellipse ellipse)
                 {
                     var pointToRemove = points.FirstOrDefault(p => p.Ellipse == ellipse);
                     if (pointToRemove != null)
                     {
-                        var textToRemove = pointToRemove.Text;
-
-                        AddUndoRedo(
-                            undo: () =>
-                            {
-                                TileCanvas.Children.Add(ellipse);
-                                if (textToRemove != null)
-                                    TileCanvas.Children.Add(textToRemove);
-                                points.Add(pointToRemove);
-                                RecalculateConnectionLine();
-                                isDirty = true;
-                            },
-                            redo: () =>
-                            {
-                                TileCanvas.Children.Remove(ellipse);
-                                if (textToRemove != null)
-                                    TileCanvas.Children.Remove(textToRemove);
-                                points.Remove(pointToRemove);
-                                RecalculateConnectionLine();
-                                isDirty = true;
-                            }
-                        );
-
-                        TileCanvas.Children.Remove(ellipse);
-                        TileCanvas.Children.Remove(textToRemove);
+                        TileCanvas.Children.Remove(pointToRemove.Text);
                         points.Remove(pointToRemove);
-                        RecalculateConnectionLine();
+                        RecalculateConnectionLine(); //recalculate the connection line after removing the point
                     }
                 }
                 else if (selectedElement is TextBlock tb)
@@ -3052,31 +2866,7 @@ namespace V2XController
                     var pointToRemove = points.FirstOrDefault(p => p.Text == tb);
                     if (pointToRemove != null)
                     {
-                        var ellipseToRemove = pointToRemove.Ellipse;
-
-                        AddUndoRedo(
-                            undo: () =>
-                            {
-                                if (ellipseToRemove != null)
-                                    TileCanvas.Children.Add(ellipseToRemove);
-                                TileCanvas.Children.Add(tb);
-                                points.Add(pointToRemove);
-                                RecalculateConnectionLine();
-                                isDirty = true;
-                            },
-                            redo: () =>
-                            {
-                                if (ellipseToRemove != null)
-                                    TileCanvas.Children.Remove(ellipseToRemove);
-                                TileCanvas.Children.Remove(tb);
-                                points.Remove(pointToRemove);
-                                RecalculateConnectionLine();
-                                isDirty = true;
-                            }
-                        );
-
-                        TileCanvas.Children.Remove(ellipseToRemove);
-                        TileCanvas.Children.Remove(tb);
+                        TileCanvas.Children.Remove(pointToRemove.Ellipse);
                         points.Remove(pointToRemove);
                         RecalculateConnectionLine();
                     }
@@ -3084,75 +2874,19 @@ namespace V2XController
                 else if (selectedElement is Rectangle rect)
                 {
                     var mapRect = mapRectangles.FirstOrDefault(r => r.Shape == rect);
-                    ActivationZone zoneToRemove = null;
-
-                    if (activationZones.TryGetValue(rect, out zoneToRemove))
-                    {
-                        // Capture all state before removal
-                        var zoneSnapshot = zoneToRemove;
-                        var rectSnapshot = rect;
-                        var mapRectSnapshot = mapRect;
-
-                        AddUndoRedo(
-                            undo: () =>
-                            {
-                                TileCanvas.Children.Add(rectSnapshot);
-                                activationZones[rectSnapshot] = zoneSnapshot;
-                                if (!ActivationZonesCollection.Contains(zoneSnapshot))
-                                    ActivationZonesCollection.Add(zoneSnapshot);
-                                if (mapRectSnapshot != null && !mapRectangles.Contains(mapRectSnapshot))
-                                    mapRectangles.Add(mapRectSnapshot);
-                                isDirty = true;
-                            },
-                            redo: () =>
-                            {
-                                TileCanvas.Children.Remove(rectSnapshot);
-                                activationZones.Remove(rectSnapshot);
-                                ActivationZonesCollection.Remove(zoneSnapshot);
-                                if (mapRectSnapshot != null)
-                                    mapRectangles.Remove(mapRectSnapshot);
-                                isDirty = true;
-                            }
-                        );
-
-                        // Perform deletion
-                        ActivationZonesCollection.Remove(zoneToRemove);
-                        activationZones.Remove(rect);
-                    }
-
                     if (mapRect != null)
                         mapRectangles.Remove(mapRect);
 
-                    TileCanvas.Children.Remove(rect);
-                }
-                else if (selectedElement is Line line)
-                {
-                    var railwayToRemove = railwayLines.FirstOrDefault(r => r.Line == line);
-                    if (railwayToRemove != null)
+                    if (activationZones.TryGetValue(rect, out var zone))
                     {
-                        AddUndoRedo(
-                            undo: () =>
-                            {
-                                TileCanvas.Children.Add(line);
-                                if (!railwayLines.Contains(railwayToRemove))
-                                    railwayLines.Add(railwayToRemove);
-                                isDirty = true;
-                            },
-                            redo: () =>
-                            {
-                                TileCanvas.Children.Remove(line);
-                                railwayLines.Remove(railwayToRemove);
-                                isDirty = true;
-                            }
-                        );
-
-                        TileCanvas.Children.Remove(line);
-                        railwayLines.Remove(railwayToRemove);
+                        ActivationZonesCollection.Remove(zone);
+                        activationZones.Remove(rect);
                     }
+
+                    TileCanvas.Children.Remove(rect);
                 }
 
                 selectedElement = null;
-                isDirty = true;
                 e.Handled = true;
             }
 
@@ -3705,12 +3439,12 @@ namespace V2XController
             }
         }
 
+        //Undo and redo (for the key button function via. above)
         private void AddUndoRedo(Action undo, Action redo)
         {
-            undoStack.Push(new UndoRedoAction { UndoAction = undo, RedoAction = redo });
-            redoStack.Clear(); 
+            undoStack.Push(undo);
+            redoStack.Clear();
         }
-
 
 
         private void Undo()
@@ -3718,17 +3452,18 @@ namespace V2XController
             if (undoStack.Count > 0)
             {
                 var action = undoStack.Pop();
-                action.UndoAction?.Invoke();
+                action.Invoke();
                 redoStack.Push(action);
             }
         }
+
 
         private void Redo()
         {
             if (redoStack.Count > 0)
             {
                 var action = redoStack.Pop();
-                action.RedoAction?.Invoke();
+                action.Invoke();
                 undoStack.Push(action);
             }
         }
@@ -3899,15 +3634,15 @@ namespace V2XController
             root.Add(zonesElement);
 
             XElement railwaysElement = new XElement("Railways");
-            foreach (var railway in railwayLines)
+            foreach (var line in railwayLines)
             {
                 railwaysElement.Add(new XElement("Line",
-                    new XAttribute("Lat1", railway.Lat1.ToString("F8", CultureInfo.InvariantCulture)),
-                    new XAttribute("Lon1", railway.Lon1.ToString("F8", CultureInfo.InvariantCulture)),
-                    new XAttribute("Lat2", railway.Lat2.ToString("F8", CultureInfo.InvariantCulture)),
-                    new XAttribute("Lon2", railway.Lon2.ToString("F8", CultureInfo.InvariantCulture)),
-                    new XAttribute("Stroke", railway.Color),
-                    new XAttribute("StrokeThickness", railway.Thickness.ToString(CultureInfo.InvariantCulture))
+                    new XAttribute("X1", line.X1.ToString(CultureInfo.InvariantCulture)),
+                    new XAttribute("Y1", line.Y1.ToString(CultureInfo.InvariantCulture)),
+                    new XAttribute("X2", line.X2.ToString(CultureInfo.InvariantCulture)),
+                    new XAttribute("Y2", line.Y2.ToString(CultureInfo.InvariantCulture)),
+                    new XAttribute("Stroke", ((SolidColorBrush)line.Stroke).Color.ToString()),
+                    new XAttribute("StrokeThickness", line.StrokeThickness.ToString(CultureInfo.InvariantCulture))
                 ));
             }
             root.Add(railwaysElement);
@@ -4080,18 +3815,16 @@ namespace V2XController
                 railwayLines.Clear();
                 foreach (var lineElem in railwaysElement.Elements("Line"))
                 {
-                    // Načíst lat/lon místo X1/Y1/X2/Y2
-                    double lat1 = double.TryParse(lineElem.Attribute("Lat1")?.Value, NumberStyles.Any, CultureInfo.InvariantCulture, out var lat1Parsed) ? lat1Parsed : 0;
-                    double lon1 = double.TryParse(lineElem.Attribute("Lon1")?.Value, NumberStyles.Any, CultureInfo.InvariantCulture, out var lon1Parsed) ? lon1Parsed : 0;
-                    double lat2 = double.TryParse(lineElem.Attribute("Lat2")?.Value, NumberStyles.Any, CultureInfo.InvariantCulture, out var lat2Parsed) ? lat2Parsed : 0;
-                    double lon2 = double.TryParse(lineElem.Attribute("Lon2")?.Value, NumberStyles.Any, CultureInfo.InvariantCulture, out var lon2Parsed) ? lon2Parsed : 0;
-
+                    double x1 = double.Parse(lineElem.Attribute("X1")?.Value ?? "0", CultureInfo.InvariantCulture);
+                    double y1 = double.Parse(lineElem.Attribute("Y1")?.Value ?? "0", CultureInfo.InvariantCulture);
+                    double x2 = double.Parse(lineElem.Attribute("X2")?.Value ?? "0", CultureInfo.InvariantCulture);
+                    double y2 = double.Parse(lineElem.Attribute("Y2")?.Value ?? "0", CultureInfo.InvariantCulture);
                     var strokeColor = (Color)ColorConverter.ConvertFromString(lineElem.Attribute("Stroke")?.Value ?? "#000000");
-                    double thickness = double.Parse(lineElem.Attribute("StrokeThickness")?.Value ?? "2", CultureInfo.InvariantCulture);
+                    double thickness = double.Parse(lineElem.Attribute("StrokeThickness")?.Value ?? "1", CultureInfo.InvariantCulture);
 
-                    // Převést lat/lon na canvas souřadnice
-                    var (x1, y1) = ConvertLatLonToCanvasXY(lat1, lon1);
-                    var (x2, y2) = ConvertLatLonToCanvasXY(lat2, lon2);
+                    // Skip drawing if identical line already exists on the map
+                    if (RailwayLineAlreadyExists(x1, y1, x2, y2, strokeColor, thickness))
+                        continue;
 
                     Line line = new Line
                     {
@@ -4101,25 +3834,11 @@ namespace V2XController
                         Y2 = y2,
                         Stroke = new SolidColorBrush(strokeColor),
                         StrokeThickness = thickness,
-                        IsHitTestVisible = true  // ZMĚNĚNO na true pro pohyb pravým tlačítkem
+                        IsHitTestVisible = false
                     };
-
-                    var railway = new Railway
-                    {
-                        Lat1 = lat1,
-                        Lon1 = lon1,
-                        Lat2 = lat2,
-                        Lon2 = lon2,
-                        Line = line,
-                        Color = strokeColor.ToString(),
-                        Thickness = thickness
-                    };
-
                     TileCanvas.Children.Add(line);
-                    railwayLines.Add(railway);
-                    Panel.SetZIndex(line, 50);
+                    railwayLines.Add(line);
                 }
-            
             }
 
             foreach (var vehicle in activeVehicles.Values)
@@ -5450,7 +5169,38 @@ namespace V2XController
                     isDirty = false;
                 }
 
-                
+                var railwaysElement = root.Element("Railways");
+                if (railwaysElement != null)
+                {
+                    if (railwayLines != null && railwayLines.Count > 0)
+                    {
+                        foreach (var oldLine in railwayLines)
+                            TileCanvas.Children.Remove(oldLine);
+                        railwayLines.Clear();
+                    }
+
+                    foreach (var lineElem in railwaysElement.Elements("Line"))
+                    {
+                        Line line = new Line
+                        {
+                            X1 = double.Parse(lineElem.Attribute("X1")?.Value ?? "0", CultureInfo.InvariantCulture),
+                            Y1 = double.Parse(lineElem.Attribute("Y1")?.Value ?? "0", CultureInfo.InvariantCulture),
+                            X2 = double.Parse(lineElem.Attribute("X2")?.Value ?? "0", CultureInfo.InvariantCulture),
+                            Y2 = double.Parse(lineElem.Attribute("Y2")?.Value ?? "0", CultureInfo.InvariantCulture),
+                            Stroke = new SolidColorBrush(
+                                (Color)ColorConverter.ConvertFromString(lineElem.Attribute("Stroke")?.Value ?? "#000000")),
+                            StrokeThickness = double.Parse(lineElem.Attribute("StrokeThickness")?.Value ?? "1", CultureInfo.InvariantCulture),
+                            IsHitTestVisible = false
+                        };
+
+                        TileCanvas.Children.Add(line);
+                        Panel.SetZIndex(line, 90);
+                        if (railwayLines != null) railwayLines.Add(line);
+                        else return;
+                    }
+
+                    await BringAllOverlaysToFrontSafeAsync();
+                }
             }
 
             var camElements = doc.Descendants("CAM").ToList();
@@ -5961,23 +5711,8 @@ namespace V2XController
             Canvas.SetLeft(vehicle.Ellipse, newPos.X - 6);
             Canvas.SetTop(vehicle.Ellipse, newPos.Y - 6);
 
-            // id label s kontrolou shody s nakreslenými body
-            string displayText;
-            if (isSrv)
-            {
-                displayText = label;
-            }
-            else
-            {
-                string shortId = label?.Length > 4 ? label[^4..] : label;
-
-                bool matchesDrawnPoint = drawnTramIds.Any(drawnId =>
-                    drawnId?.Length >= 4 && drawnId[^4..] == shortId);
-
-                displayText = matchesDrawnPoint ? shortId : $"{shortId} (*)";
-            }
-
-            vehicle.Text.Text = displayText;
+            // id label
+            vehicle.Text.Text = isSrv ? label : (label?.Length > 4 ? label[^4..] : label);
             vehicle.Text.Foreground = isSrv ? Brushes.Black : (color ?? vehicle.Text.Foreground);
             Canvas.SetLeft(vehicle.Text, newPos.X + 5);
             Canvas.SetTop(vehicle.Text, newPos.Y - 10);
@@ -7441,20 +7176,14 @@ namespace V2XController
                 }
                 else if (child is Ellipse ellipse)
                 {
-                    if (ellipse.Tag == null ||
-                        (ellipse.Tag.ToString() != "Tram" &&
-                         ellipse.Tag.ToString() != "Srv" &&
-                         ellipse.Tag.ToString() != "Stop"))
+                    if (ellipse.Tag == null || (ellipse.Tag.ToString() != "Tram" && ellipse.Tag.ToString() != "Srv"))
                     {
                         elementsToRemove.Add(child);
                     }
                 }
                 else if (child is TextBlock textBlock)
                 {
-                    if (textBlock.Tag == null ||
-                        (textBlock.Tag.ToString() != "Tram" &&
-                         textBlock.Tag.ToString() != "Srv" &&
-                         textBlock.Tag.ToString() != "Stop"))
+                    if (textBlock.Tag == null || (textBlock.Tag.ToString() != "Tram" && textBlock.Tag.ToString() != "Srv"))
                     {
                         elementsToRemove.Add(child);
                     }
@@ -7466,15 +7195,11 @@ namespace V2XController
                 TileCanvas.Children.Remove(el);
             }
 
-            points.RemoveAll(p => p.Ellipse.Tag == null ||
-                                  (p.Ellipse.Tag.ToString() != "Tram" &&
-                                   p.Ellipse.Tag.ToString() != "Srv" &&
-                                   p.Ellipse.Tag.ToString() != "Stop"));
+            points.RemoveAll(p => p.Ellipse.Tag == null || (p.Ellipse.Tag.ToString() != "Tram" && p.Ellipse.Tag.ToString() != "Srv"));
 
             mapRectangles.Clear();
             activationZones.Clear();
             ActivationZonesCollection.Clear();
-            railwayLines.Clear();
             connectionLine.Points.Clear();
             TramTable.Clear();
 
@@ -7482,9 +7207,9 @@ namespace V2XController
             {
                 drawnTrams[i] = null;
                 drawnTramTrailPoints[i].Clear();
-                drawnTramTrailGeoPoints[i].Clear();
-                drawnTramLat[i] = null;
-                drawnTramLon[i] = null;
+                drawnTramTrailGeoPoints[i].Clear(); // nově
+                drawnTramLat[i] = null;             // nově
+                drawnTramLon[i] = null;             // nově
 
                 if (drawnTramTrails[i] != null)
                 {
@@ -9168,6 +8893,31 @@ namespace V2XController
         }
 
         private static bool SamePoint(Point a, Point b, double eps = 0.5) => Math.Abs(a.X - b.X) <= eps && Math.Abs(a.Y - b.Y) <= eps;
+
+        private bool RailwayLineAlreadyExists(double x1, double y1, double x2, double y2, Color stroke, double thickness, double eps = 0.5)
+        {
+            var p1 = new Point(x1, y1);
+            var p2 = new Point(x2, y2);
+
+            foreach (var l in railwayLines)
+            {
+                var lp1 = new Point(l.X1, l.Y1);
+                var lp2 = new Point(l.X2, l.Y2);
+
+                // same endpoints (any direction)
+                bool endpointsSame = (SamePoint(lp1, p1, eps) && SamePoint(lp2, p2, eps)) ||
+                                     (SamePoint(lp1, p2, eps) && SamePoint(lp2, p1, eps));
+                if (!endpointsSame) continue;
+
+                // same style
+                var lcolor = (l.Stroke as SolidColorBrush)?.Color ?? Colors.Black;
+                if (lcolor != stroke) continue;
+                if (!AlmostEqual(l.StrokeThickness, thickness, 1e-6)) continue;
+
+                return true;
+            }
+            return false;
+        }
 
         private void ApplyZoneColor(ActivationZone zone)
         {

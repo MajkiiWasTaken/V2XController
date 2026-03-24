@@ -21,7 +21,7 @@ namespace V2XController
         private double longitude;
         private int mainZone = 0;
         private int subZone = 0;
-        public bool isSwitchZone = false;
+        private bool isSwitchZone = false;
 
         public Point StartPoint
         {

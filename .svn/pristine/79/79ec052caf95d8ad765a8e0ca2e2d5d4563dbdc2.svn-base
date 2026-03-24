@@ -6,7 +6,7 @@
         xmlns:local="clr-namespace:V2XController"
         xmlns:sys="clr-namespace:System;assembly=mscorlib"
         mc:Ignorable="d"
-        Title="V2X Controller" Height="1000" Width="1600"
+        Title="V2X Controller" Height="970" Width="1600"
         MouseWheel="Window_MouseWheel"
         PreviewKeyDown="Window_PreviewKeyDown"
         KeyboardNavigation.DirectionalNavigation="None"
@@ -135,23 +135,22 @@
             <!-- Active Trams Table - PŘESUNUTO POD Drawing Tools -->
             <GroupBox Header="Active Trams" Padding="8" Margin="0,0,0,4">
                 <DataGrid AutoGenerateColumns="False" HeadersVisibility="Column" 
-ItemsSource="{Binding TramTable}" IsReadOnly="True" 
-Height="75" HorizontalScrollBarVisibility="Hidden" FontSize="9">
+                          ItemsSource="{Binding TramTable}" IsReadOnly="True" 
+                          Height="50" HorizontalScrollBarVisibility="Hidden" FontSize="9">
                     <DataGrid.Columns>
                         <DataGridTextColumn Header="ID" Binding="{Binding VehicleId}" 
-                  IsReadOnly="True" Width="105" CanUserResize="False"/>
+                                            IsReadOnly="True" Width="105" CanUserResize="False"/>
                         <DataGridTextColumn Header="Time" Binding="{Binding LastCamTime}" 
-                  IsReadOnly="True" Width="105" CanUserResize="False"/>
+                                            IsReadOnly="True" Width="105" CanUserResize="False"/>
                         <DataGridTextColumn Header="[s]" Binding="{Binding SecondsSinceLastCam}" 
-                  IsReadOnly="True" Width="60" CanUserResize="False"/>
+                                            IsReadOnly="True" Width="80" CanUserResize="False"/>
                     </DataGrid.Columns>
                 </DataGrid>
             </GroupBox>
-
         </StackPanel>
 
         <!-- Center Panel -->
-        <StackPanel HorizontalAlignment="Left" Width="450" Margin="340,0,0,0" VerticalAlignment="Top" Height="655">
+        <StackPanel HorizontalAlignment="Left" Width="450" Margin="340,0,0,0" VerticalAlignment="Top">
 
             <!-- Tram Configuration -->
             <GroupBox Header="Tram Configuration" Padding="10" Margin="0,0,0,10">
@@ -283,7 +282,7 @@ Height="75" HorizontalScrollBarVisibility="Hidden" FontSize="9">
         <StackPanel HorizontalAlignment="Right" Width="710" Margin="0,0,10,0" VerticalAlignment="Top">
 
             <!-- Filter Settings -->
-            <GroupBox Header="Filter and Display Settings" Padding="2" Margin="0,0,0,10">
+            <GroupBox Header="Filter and Display Settings" Padding="10" Margin="0,0,0,10">
                 <Grid>
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*"/>
@@ -314,28 +313,39 @@ Height="75" HorizontalScrollBarVisibility="Hidden" FontSize="9">
             </GroupBox>
 
             <!-- Map Canvas -->
-            <Border BorderBrush="Black" BorderThickness="2" Width="708" Height="862">
+            <Border BorderBrush="Black" BorderThickness="2">
                 <StackPanel>
-                    <Canvas x:Name="TileCanvas" Width="708" Height="862" ClipToBounds="True"
-                Background="Transparent"
-                MouseLeftButtonDown="TileCanvas_MouseLeftButtonDown"
-                MouseMove="TileCanvas_MouseMove"
-                MouseLeftButtonUp="TileCanvas_MouseLeftButtonUp"/>
+                    <Label Content="Map" FontWeight="Bold" FontSize="16" HorizontalAlignment="Center" Padding="5"/>
+                    <Canvas x:Name="TileCanvas" Width="694" Height="694" ClipToBounds="True"
+                            Background="Transparent"
+                            MouseLeftButtonDown="TileCanvas_MouseLeftButtonDown"
+                            MouseMove="TileCanvas_MouseMove"
+                            MouseLeftButtonUp="TileCanvas_MouseLeftButtonUp"/>
                 </StackPanel>
             </Border>
 
             <!-- Map Controls -->
+            <UniformGrid Rows="1" Columns="4" Margin="0,5,0,0">
+                <Button x:Name="btnRefreshMap" Content="Refresh map" Margin="5,0"
+                        Click="RefreshMap_Click" ToolTip="Refreshes whole map loading"/>
+                <Button x:Name="btnExportMap" Content="Export map" Margin="5,0"
+                        Click="ExportMap_Click" ToolTip="Exports map state into an image (.png)"/>
+                <Button Content="Protobuf Translator" Margin="5,0" Background="LightYellow"
+                        Click="OpenProtobuf_Click" ToolTip="Open Protobuf message translator"/>
+                <Button x:Name="MapControls" Content="Map controls" Margin="5,0"
+                        Click="MapControls_Click" ToolTip="Displays map controls"/>
+            </UniformGrid>
         </StackPanel>
 
         <!-- Activation Zones Table - Bottom -->
         <GroupBox Header="Activation Zones" Padding="10" HorizontalAlignment="Left" 
-          MaxWidth="790" Width="790" Margin="2,0,0,5" VerticalAlignment="Bottom">
+                  MaxWidth="790" Width="790" Margin="2,0,0,5" VerticalAlignment="Bottom">
             <StackPanel>
                 <ScrollViewer HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Disabled">
                     <DataGrid x:Name="ActivationZonesDataGrid" HeadersVisibility="Column" Height="110"
-ItemsSource="{Binding ActivationZonesCollection}" AutoGenerateColumns="False"
-CanUserAddRows="False" IsReadOnly="False" CellEditEnding="ActivationZonesDataGrid_CellEditEnding" CanUserReorderColumns="False"
-PreviewKeyDown="ActivationZonesDataGrid_PreviewKeyDown">
+                              ItemsSource="{Binding ActivationZonesCollection}" AutoGenerateColumns="False"
+                              CanUserAddRows="False" IsReadOnly="False" CellEditEnding="ActivationZonesDataGrid_CellEditEnding" CanUserReorderColumns="False"
+                              PreviewKeyDown="ActivationZonesDataGrid_PreviewKeyDown">
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="60" CanUserResize="False"/>
                             <DataGridTextColumn Header="Latitude [°]" Binding="{Binding Latitude, StringFormat=F6}" Width="92" CanUserResize="False"/>
@@ -367,36 +377,20 @@ PreviewKeyDown="ActivationZonesDataGrid_PreviewKeyDown">
 
                 <UniformGrid Rows="1" Columns="4" Margin="0,10,0,0">
                     <Button x:Name="NewRow" Content="Add table row" Margin="5,0"
-                        Click="NewRow_Click" ToolTip="Adds new table row"/>
+                            Click="NewRow_Click" ToolTip="Adds new table row"/>
                     <Button x:Name="ExportButton" Content="Export Table" Margin="5,0"
-                        Click="ExportButton_Click" ToolTip="Export zones to MPC registers"/>
+                            Click="ExportButton_Click" ToolTip="Export zones to MPC registers"/>
                     <Button x:Name="ReadButtonMain" Content="Read from MPC" Margin="5,0"
-                        Click="ReadButtonMain_Click" ToolTip="Read all zone registers from MPC"/>
+                            Click="ReadButtonMain_Click" ToolTip="Read all zone registers from MPC"/>
                     <Button x:Name="ClearButton" Content="Clear all objects" Margin="5,0"
-                        Click="ClearButton_Click" ToolTip="Clear all drawn objects on the map plot"/>
+                            Click="ClearButton_Click" ToolTip="Clear all drawn objects on the map plot"/>
                 </UniformGrid>
             </StackPanel>
         </GroupBox>
 
         <!-- Debug Terminal Button -->
-        <Button x:Name="OpenTerminal" Content="Debug terminal" HorizontalAlignment="Right"
-        Width="165" Height="20" Margin="0,0,890,199" VerticalAlignment="Bottom"
-        Click="OpenTerminal_Click" ToolTip="Open debug terminal window" Panel.ZIndex="100"/>
-
-        <Button x:Name="btnRefreshMap" Content="Refresh map" HorizontalAlignment="Left" VerticalAlignment="Bottom"
-        Width="165" Height="20" Margin="340,0,0,249"
-        Click="RefreshMap_Click" ToolTip="Refreshes whole map loading" Panel.ZIndex="100"/>
-
-        <Button x:Name="btnExportMap" Content="Export map" HorizontalAlignment="Left" VerticalAlignment="Bottom"
-        Width="165" Height="20" Margin="340,0,0,199"
-        Click="ExportMap_Click" ToolTip="Exports map state into an image (.png)" Panel.ZIndex="100"/>
-
-        <Button Content="Protobuf Translator" HorizontalAlignment="Left" VerticalAlignment="Bottom" Background="LightYellow"
-        Width="166" Height="20" Margin="510,0,0,249"
-        Click="OpenProtobuf_Click" ToolTip="Open Protobuf message translator" Panel.ZIndex="100"/>
-
-        <Button x:Name="MapControls" Content="Map controls" HorizontalAlignment="Left" VerticalAlignment="Bottom"
-        Width="109" Height="20" Margin="681,0,0,249"
-        Click="MapControls_Click" ToolTip="Displays map controls" Panel.ZIndex="100"/>
+        <Button x:Name="OpenTerminal" Content="Open debug terminal" HorizontalAlignment="Right"
+                Width="165" Height="20" Margin="0,0,16,30" VerticalAlignment="Bottom"
+                Click="OpenTerminal_Click" ToolTip="Open debug terminal window"/>
     </Grid>
 </Window>
