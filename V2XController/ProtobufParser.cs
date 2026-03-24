@@ -252,10 +252,10 @@ namespace V2XController
                 // If parsing fails, continue with what we got
             }
 
-            System.Diagnostics.Debug.WriteLine($"Detected field numbers: {string.Join(", ", fieldNumbers.OrderBy(x => x))}");
+            Console.WriteLine($"Detected field numbers: {string.Join(", ", fieldNumbers.OrderBy(x => x))}");
             if (field10InnerFieldNumbers.Count > 0)
             {
-                System.Diagnostics.Debug.WriteLine($"Field 10 inner field numbers: {string.Join(", ", field10InnerFieldNumbers.OrderBy(x => x))}");
+                Console.WriteLine($"Field 10 inner field numbers: {string.Join(", ", field10InnerFieldNumbers.OrderBy(x => x))}");
             }
 
             // **ROZHODNUTÍ podle field 10 inner structure**
@@ -292,7 +292,7 @@ namespace V2XController
                 {
                     if (_compiledMessages.TryGetValue("RsuToControllerMessageData", out var rsuMsg))
                     {
-                        System.Diagnostics.Debug.WriteLine("→ Selected RsuToControllerMessageData (field 10 has speed/heading)");
+                        Console.WriteLine("→ Selected RsuToControllerMessageData (field 10 has speed/heading)");
                         return rsuMsg;
                     }
                 }
@@ -302,7 +302,7 @@ namespace V2XController
                 {
                     if (_compiledMessages.TryGetValue("ControllerToRsuMessageData", out var ctrlMsg))
                     {
-                        System.Diagnostics.Debug.WriteLine("→ Selected ControllerToRsuMessageData (field 10 = IntersectionStatus)");
+                        Console.WriteLine("→ Selected ControllerToRsuMessageData (field 10 = IntersectionStatus)");
                         return ctrlMsg;
                     }
                 }
@@ -359,7 +359,7 @@ namespace V2XController
                             bestMessage = message;
                         }
 
-                        System.Diagnostics.Debug.WriteLine($"Scored {messageTypeName}: {score} points (fields={testDecode.Count}, known={knownFields})");
+                        Console.WriteLine($"Scored {messageTypeName}: {score} points (fields={testDecode.Count}, known={knownFields})");
                     }
                     catch
                     {
@@ -370,7 +370,7 @@ namespace V2XController
 
             if (bestMessage != null && bestScore > 0)
             {
-                System.Diagnostics.Debug.WriteLine($"→ Selected {bestMessage.Name} with score {bestScore}");
+                Console.WriteLine($"→ Selected {bestMessage.Name} with score {bestScore}");
                 return bestMessage;
             }
 

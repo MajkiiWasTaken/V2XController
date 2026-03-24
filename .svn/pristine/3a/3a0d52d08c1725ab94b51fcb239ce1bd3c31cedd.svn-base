@@ -19,7 +19,6 @@ using System.Windows.Shapes;
 using System.Windows.Threading;
 using System.Xml;
 using System.Xml.Linq;
-using System.Runtime.InteropServices;
 
 //TODO:
 //fix the map panning (now it works but its not as we wanted) !!!
@@ -439,23 +438,17 @@ namespace V2XController
             public Action RedoAction { get; set; }
         }
 
-        [DllImport("kernel32.dll")]
-        static extern bool AllocConsole();
 
         //||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
         //Main window constructor
         public MainWindow()
         {
-            #if DEBUG
-            AllocConsole();
-            #endif
             InitializeComponent();
             this.WindowStyle = WindowStyle.SingleBorderWindow;
             this.ResizeMode = ResizeMode.CanMinimize;
 
-
             LoadAvailableComPorts();
-            Console.WriteLine("[APP] Application started.");
+            Console.WriteLine("Application started.");
 
             // main data context
             this.DataContext = this;
@@ -571,7 +564,7 @@ namespace V2XController
             {
                 // Initialize camera and load tiles FIRST
                 await LoadTilesInitialAsync();
-                Console.WriteLine("[TILES] Tiles loaded.");
+
                 _ = EnsureLocalAreaAltitudeAsync(force: true);
 
                 Keyboard.Focus(this);
@@ -588,7 +581,7 @@ namespace V2XController
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"[ERR] Failed to load stops: {ex.Message}");
+                    Console.WriteLine($"[STOPS] Failed to load stops: {ex.Message}");
                 }
             };
 
@@ -1139,7 +1132,7 @@ namespace V2XController
             {
                 _zoomDebounceTimer.Stop();
             }
-            Console.WriteLine("[ZOOM] Current zoom: " + _pendingZoom);
+
             _zoomDebounceTimer.Start();
             e.Handled = true;
         }
@@ -1754,7 +1747,7 @@ namespace V2XController
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[LOAD TILES] Failed to load tile {z}/{x}/{y}: {ex.Message}");
+                Console.WriteLine($"Failed to load tile {z}/{x}/{y}: {ex.Message}");
             }
             finally
             {
@@ -3380,7 +3373,6 @@ namespace V2XController
 
                 TileCanvas.Children.Add(radiusEllipse);
                 Panel.SetZIndex(radiusEllipse, 1);
-                Console.WriteLine("[RSU CIRCLE] Drawing radius circle of radius: " + radiusPixels);
             }
             else
             {
@@ -3390,7 +3382,7 @@ namespace V2XController
                     TileCanvas.Children.Remove(radiusEllipse);
                     radiusEllipse = null;
                 }
-                Console.WriteLine("[RSU CIRCLE] Circle cannot be drawn - missing coordinates");
+                Console.WriteLine("Circle cannot be drawn - missing coordinates");
             }
         }
 
@@ -3417,7 +3409,6 @@ namespace V2XController
                     // Remove immediately after 30 seconds (no gradual cleanup)
                     RemoveVehicleCompletely(fullId, vehicle);
                     TramTable.Remove(item);
-                    Console.WriteLine("[VEHICLE] Removed vehicle: " + fullId);
                     continue;
                 }
 
@@ -3837,7 +3828,7 @@ namespace V2XController
 
             if (width == 0 || height == 0)
             {
-                Console.WriteLine("[CANVAS] Canvas size is zero, export skipped.");
+                Console.WriteLine("Canvas size is zero, export skipped.");
                 return;
             }
 
@@ -4488,7 +4479,7 @@ namespace V2XController
                 }
                 catch (Exception loopEx)
                 {
-                    Dispatcher.Invoke(() => Console.WriteLine($"[SERIAL] Serial listen loop error: {loopEx.Message}"));
+                    Dispatcher.Invoke(() => Console.WriteLine($"Serial listen loop error: {loopEx.Message}"));
                 }
             });
 
@@ -10634,7 +10625,7 @@ namespace V2XController
                     }
                     catch (Exception ex)
                     {
-                        Console.WriteLine($"[POPULATE] PopulateLiveTramBoxFromActiveVehicles UI update failed: {ex.Message}");
+                        Console.WriteLine($"PopulateLiveTramBoxFromActiveVehicles UI update failed: {ex.Message}");
                         _suppressFilterTramSelectionChanged = false;
                     }
                 }
@@ -10646,7 +10637,7 @@ namespace V2XController
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[POPULATE] PopulateLiveTramBoxFromActiveVehicles failed: {ex.Message}");
+                Console.WriteLine($"PopulateLiveTramBoxFromActiveVehicles failed: {ex.Message}");
             }
         }
 
