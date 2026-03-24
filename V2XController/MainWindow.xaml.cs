@@ -39,6 +39,10 @@ namespace V2XController
         private SerialPort serialPort = new SerialPort("COM10", 57600);
         private readonly object _serialIoLock = new();
 
+        //HEARTBEAT
+        private DispatcherTimer _heartbeatTimer;
+        private int _heartbeatCounter = 0;
+
         //Everything for the map 
         private int zoom = 18;
         private double latitude = 49.842432;
@@ -446,19 +450,43 @@ namespace V2XController
         //Main window constructor
         public MainWindow()
         {
+            InitializeComponent();
             #if DEBUG
             AllocConsole();
+            Console.WriteLine("[DEBUG] Allocating console...");
             #endif
-            InitializeComponent();
+            Console.WriteLine("[INIT] MainWindow initialized");
             this.WindowStyle = WindowStyle.SingleBorderWindow;
             this.ResizeMode = ResizeMode.CanMinimize;
 
-
             LoadAvailableComPorts();
             Console.WriteLine("[APP] Application started.");
-
+            Console.WriteLine($"[PARAMS] Zoom: {zoom}, Lat: {latitude:F6}, Lon: {longitude:F6}");
             // main data context
             this.DataContext = this;
+
+            _heartbeatTimer = new DispatcherTimer
+            {
+                Interval = TimeSpan.FromSeconds(3)
+            };
+
+            _heartbeatTimer.Tick += (s, e) =>
+            {
+                _heartbeatCounter++;
+                var connStatus = _isConnected ? $"Connected ({serialPort?.PortName})" : "Disconnected";
+                var playStatus = isPlaying ? "Playing" : (isRecording ? "Recording" : "Idle");
+
+                Console.WriteLine($"[HEARTBEAT #{_heartbeatCounter}] " +
+                                 $"Zoom: {zoom} | " +
+                                 $"Conn: {connStatus} | " +
+                                 $"Status: {playStatus} | " +
+                                 $"Zones: {ActivationZonesCollection.Count} | " +
+                                 $"Vehicles: {activeVehicles.Count}");
+            };
+
+            _heartbeatTimer.Start();
+            Console.WriteLine("[HEARTBEAT] Started (interval: 5 seconds)");
+        
 
             // INIT TramTable BEFORE any timers or bindings use it
             TramTable = new ObservableCollection<TramInfo>();
@@ -652,6 +680,14 @@ namespace V2XController
 
         private void MainWindow_Closing(object sender, CancelEventArgs e)
         {
+            Console.WriteLine("\n[APP] Closing application...");
+
+            if (_heartbeatTimer != null)
+            {
+                _heartbeatTimer.Stop();
+                Console.WriteLine("[HEARTBEAT] Stopped");
+            }
+
             if (isDirty)
             {
                 var result = MessageBox.Show(
@@ -752,6 +788,8 @@ namespace V2XController
         // Loading map tiles on the canvas
         private async Task LoadTilesSmoothAsync(int startX, int startY, double offsetX = 0, double offsetY = 0)
         {
+            Console.WriteLine($"[TILES] Start: tile=({startX}, {startY}), offset=({offsetX:F1}, {offsetY:F1})");
+
             _tileCts?.Cancel();
             _tileCts?.Dispose();
             _tileCts = new CancellationTokenSource();
@@ -765,13 +803,15 @@ namespace V2XController
                 cameraX = startX * TileSize + (int)Math.Round(offsetX);
                 cameraY = startY * TileSize + (int)Math.Round(offsetY);
 
+                Console.WriteLine($"[TILES] Camera set to: ({cameraX}, {cameraY})");
+
                 isDrawing = false;
                 currentRect = null;
                 _currentMapRectangle = null;
 
                 RenderTilesProgressive();
 
-                await Task.Delay(100); // Allow tiles to load
+                await Task.Delay(100);
 
                 if (!ct.IsCancellationRequested)
                 {
@@ -786,8 +826,13 @@ namespace V2XController
 
                     await BringAllOverlaysToFrontSafeAsync();
                 }
+
+                Console.WriteLine($"[TILES] Complete");
             }
-            catch (TaskCanceledException) { }
+            catch (TaskCanceledException)
+            {
+                Console.WriteLine($"[TILES] Cancelled");
+            }
         }
 
         private async Task<BitmapSource?> FetchTileAsync(int z, int x, int y, CancellationToken ct)
@@ -1754,7 +1799,7 @@ namespace V2XController
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[LOAD TILES] Failed to load tile {z}/{x}/{y}: {ex.Message}");
+                Console.WriteLine($"[TILES] Failed to load tile {z}/{x}/{y}: {ex.Message}");
             }
             finally
             {
@@ -2044,13 +2089,21 @@ namespace V2XController
 
         public async void RefreshMap()
         {
+            Console.WriteLine($"[REFRESH] Starting refresh...");
+            Console.WriteLine($"[CAMERA] Camera: ({cameraX}, {cameraY})");
+
             int startX = (int)Math.Floor((double)cameraX / TileSize);
             int startY = (int)Math.Floor((double)cameraY / TileSize);
 
             double offsetX = cameraX - (startX * TileSize);
             double offsetY = cameraY - (startY * TileSize);
 
+            Console.WriteLine($"[MAP] Start tile: ({startX}, {startY}), Offset: ({offsetX:F1}, {offsetY:F1})");
+
             await LoadTilesSmoothAsync(startX, startY, offsetX, offsetY);
+
+            Console.WriteLine($"[CAMERA] Camera after: ({cameraX}, {cameraY})");
+            Console.WriteLine($"[REFRESH] Complete");
 
             _ = EnsureLocalAreaAltitudeAsync(force: true);
             ResetAllTramTrails();
@@ -2127,6 +2180,7 @@ namespace V2XController
             }
 
             var pos = e.GetPosition(TileCanvas);
+            Console.WriteLine($"[MOUSE] Left button down at ({pos.X:F1}, {pos.Y:F1})");
 
             if (currentDrawingMode == DrawingMode.Point)
             {
@@ -2498,6 +2552,8 @@ namespace V2XController
                         IsSwitchZone = _drawToSwitchZones
                     };
 
+                    Console.WriteLine($"[ZONE] Drawn zone -> Width: {zone.Width}, Height: {zone.Height}, Lat.: {zone.Latitude}, Lon.: {zone.Longitude}, Az.: {zone.Azimuth}");
+
                     // tag by type and add always to the single collection
                     if (_drawToSwitchZones)
                     {
@@ -2541,6 +2597,8 @@ namespace V2XController
                             // Unsubscribe event
                             zoneToAdd.PropertyChanged -= ActivationZone_PropertyChanged;
 
+                            Console.WriteLine($"[ZONE] Undone zone -> Width: {zoneToAdd.Width}, Height: {zoneToAdd.Height}, Lat.: {zoneToAdd.Latitude}, Lon.: {zoneToAdd.Longitude}, Az.: {zoneToAdd.Azimuth}");
+
                             isDirty = true;
                         },
                         redo: () =>
@@ -2567,6 +2625,8 @@ namespace V2XController
                             rectToAdd.MouseLeave += Rectangle_MouseLeave;
                             rectToAdd.MouseLeftButtonDown += Rectangle_MouseLeftButtonDown;
 
+                            Console.WriteLine($"[ZONE] Redone zone -> Width: {zoneToAdd.Width}, Height: {zoneToAdd.Height}, Lat.: {zoneToAdd.Latitude}, Lon.: {zoneToAdd.Longitude}, Az.: {zoneToAdd.Azimuth}");
+
                             isDirty = true;
                         }
                     );
@@ -2591,6 +2651,8 @@ namespace V2XController
                     Y2 = startPoint.Y,
                     IsHitTestVisible = false
                 };
+
+                Console.WriteLine("[RAILWAY] Drawn line -> Start: ({0}; {1}), End: ({2}; {3})", Math.Round(startPoint.X, 2), Math.Round(startPoint.Y, 2), Math.Round(pos.X, 2), Math.Round(pos.Y, 2));
 
                 TileCanvas.Children.Add(currentLine);
                 return;
@@ -5222,7 +5284,7 @@ namespace V2XController
 
             ushort crc = ComputeCRC(vehPt);
             string xml = $"<CAM>{vehPt}<crc>{crc}</crc></CAM>";
-
+            Console.WriteLine(xml);
             try
             {
                 if (serialPort != null && serialPort.IsOpen)
@@ -5306,7 +5368,7 @@ namespace V2XController
             }
             catch (Exception ex)
             {
-                Console.WriteLine("[LoadPlaybackFile] Failed clearing existing zones: " + ex.Message);
+                Console.WriteLine("[PLAYBACK] Failed clearing existing zones: " + ex.Message);
             }
 
             if (!File.Exists(fileName))
@@ -5437,14 +5499,14 @@ namespace V2XController
                                 }
                                 catch (Exception uiEx)
                                 {
-                                    Console.WriteLine($"[LoadXML] UI creation for zone failed: {uiEx.Message}");
+                                    Console.WriteLine($"[LOADXML] UI creation for zone failed: {uiEx.Message}");
                                 }
                             });
                         }
                         catch (Exception ex)
                         {
                             // Log parse failure but continue with remaining zones
-                            Console.WriteLine($"[LoadXML] Zone parse failed: {ex.Message}");
+                            Console.WriteLine($"[LOADXML] Zone parse failed: {ex.Message}");
                         }
                     }
 
@@ -7430,6 +7492,8 @@ namespace V2XController
 
         private void ClearButton_Click(object sender, RoutedEventArgs e)
         {
+            Console.WriteLine($"[CLEAR] Clear all objects requested");
+
             var result = MessageBox.Show("Are you sure you want to delete everything?",
                                          "Confirmation",
                                          MessageBoxButton.YesNo,
@@ -7437,8 +7501,11 @@ namespace V2XController
 
             if (result != MessageBoxResult.Yes)
             {
+                Console.WriteLine($"[CLEAR] Cancelled by user\n");
                 return;
             }
+
+            Console.WriteLine($"[CLEAR] Clearing all objects...");
 
             var elementsToRemove = new List<UIElement>();
 
@@ -7525,7 +7592,9 @@ namespace V2XController
             isSelectionMode = true;
             currentDrawingMode = DrawingMode.Point;
             UpdateHitTestForSelectableElements();
+            Console.WriteLine($"[CLEAR] Complete - zones: {ActivationZonesCollection.Count}, railways: {railwayLines.Count}\n");
         }
+        
 
         private void Tram1TB_TextChanged(object sender, TextChangedEventArgs e)
         {
@@ -8224,6 +8293,9 @@ namespace V2XController
 
         private void NewRow_Click(object sender, RoutedEventArgs e)
         {
+            Console.WriteLine($"[ROW] Add table row clicked");
+            Console.WriteLine($"[ROW] Switch mode: {IsSwitchMode()}");
+
             var zone = new ActivationZone
             {
                 Name = string.Empty,
@@ -9614,6 +9686,10 @@ namespace V2XController
 
         private void ExportButton_Click(object sender, RoutedEventArgs e)
         {
+            Console.WriteLine($"[EXPORT] Export requested.");
+            Console.WriteLine($"[EXPORT] Switch mode: {IsSwitchMode()}");
+            Console.WriteLine($"[EXPORT] Zones count: WLC={ActivationZonesCollection.Count(z => !z.IsSwitchZone)}, RTV={ActivationZonesCollection.Count(z => z.IsSwitchZone)}");
+
             // Do not open export when there are no activation zones
             if (ActivationZonesCollection == null || ActivationZonesCollection.Count == 0)
             {
@@ -9702,6 +9778,9 @@ namespace V2XController
 
         private void ReadButtonMain_Click(object sender, RoutedEventArgs e)
         {
+            Console.WriteLine($"[READ] Read from MPC requested.");
+            Console.WriteLine($"[READ] Current mode: {(IsSwitchMode() ? "RTV (Switches)" : "WLC (Zones)")}");
+
             // Open ExportWindow in read mode
             var dlg = new ExportWindow { Owner = this };
 
@@ -9754,7 +9833,7 @@ namespace V2XController
             }
         }
 
-                private void NewSwitchRow_Click(object sender, RoutedEventArgs e)
+        private void NewSwitchRow_Click(object sender, RoutedEventArgs e)
         {
             var zone = new ActivationZone
             {
