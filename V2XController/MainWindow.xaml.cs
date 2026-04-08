@@ -105,7 +105,7 @@ namespace V2XController
         {
             None,
             Rectangle,
-            Railway,
+            Polyline,
             Point           //drawing selection
         }
 
@@ -114,8 +114,7 @@ namespace V2XController
         private Rectangle currentRect;
         private Point startPoint;
         private Point lineStartPoint;
-        private Line currentLine;
-        private List<Railway> railwayLines;
+        //private List<Railway> railwayLines;
 
         private List<Point> trailPoints = new List<Point>();
         private Polyline tramTrail;
@@ -472,11 +471,10 @@ namespace V2XController
 
             _heartbeatTimer.Tick += (s, e) =>
             {
-                _heartbeatCounter++;
                 var connStatus = _isConnected ? $"Connected ({serialPort?.PortName})" : "Disconnected";
                 var playStatus = isPlaying ? "Playing" : (isRecording ? "Recording" : "Idle");
 
-                Console.WriteLine($"[HEARTBEAT #{_heartbeatCounter}] " +
+                Console.WriteLine($"[HEARTBEAT] " +
                                  $"Zoom: {zoom} | " +
                                  $"Conn: {connStatus} | " +
                                  $"Status: {playStatus} | " +
@@ -485,12 +483,11 @@ namespace V2XController
             };
 
             _heartbeatTimer.Start();
-            Console.WriteLine("[HEARTBEAT] Started (interval: 5 seconds)");
+            Console.WriteLine("[HEARTBEAT] Started (interval: 3 seconds)");
         
 
             // INIT TramTable BEFORE any timers or bindings use it
             TramTable = new ObservableCollection<TramInfo>();
-            railwayLines = new List<Railway>();
 
             InitSwitchZonesUi();
 
@@ -680,7 +677,7 @@ namespace V2XController
 
         private void MainWindow_Closing(object sender, CancelEventArgs e)
         {
-            Console.WriteLine("\n[APP] Closing application...");
+            Console.WriteLine("[APP] Closing application...");
 
             if (_heartbeatTimer != null)
             {
@@ -1251,7 +1248,7 @@ namespace V2XController
             // 6. Update replay vehicles
             UpdateReplayVehiclesPositions();
 
-            ReprojectRailwaysOnMapChange();
+            //ReprojectRailwaysOnMapChange();
 
             // 7. Update radius circle if visible
             if (CircleCheckBox?.IsChecked == true)
@@ -1816,7 +1813,7 @@ namespace V2XController
             ReprojectAllZonesOnMapChange();
             ReprojectActiveVehiclesOnMapChange();
             ReprojectReplayOnMapChange();
-            ReprojectRailwaysOnMapChange();
+            //ReprojectRailwaysOnMapChange();
         }
 
         //moving overlays
@@ -2112,7 +2109,7 @@ namespace V2XController
             ReprojectActiveVehiclesOnMapChange();
             ReprojectReplayOnMapChange();
             ReprojectSwitchZonesOnMapChange();
-            ReprojectRailwaysOnMapChange();
+            //ReprojectRailwaysOnMapChange();
             DrawRadiusCircle();
 
             await Task.Delay(1);
@@ -2636,25 +2633,11 @@ namespace V2XController
                 }
             }
 
-            if (currentDrawingMode == DrawingMode.Railway)
+            if (currentDrawingMode == DrawingMode.Polyline)
             {
-                isDrawing = true;
-                startPoint = pos;
-
-                currentLine = new Line
-                {
-                    Stroke = Brushes.Black,
-                    StrokeThickness = 2,
-                    X1 = startPoint.X,
-                    Y1 = startPoint.Y,
-                    X2 = startPoint.X,
-                    Y2 = startPoint.Y,
-                    IsHitTestVisible = false
-                };
-
-                Console.WriteLine("[RAILWAY] Drawn line -> Start: ({0}; {1}), End: ({2}; {3})", Math.Round(startPoint.X, 2), Math.Round(startPoint.Y, 2), Math.Round(pos.X, 2), Math.Round(pos.Y, 2));
-
-                TileCanvas.Children.Add(currentLine);
+                Console.WriteLine("[POLYLINE] Polyline drawing - placeholder");
+                // TODO: Implementovat polyline kreslení
+                e.Handled = true;
                 return;
             }
         }
@@ -2725,11 +2708,6 @@ namespace V2XController
                 Canvas.SetTop(dimensionTextBlock, pos.Y + 10);
             }
 
-            else if (currentDrawingMode == DrawingMode.Railway && currentLine != null)
-            {
-                currentLine.X2 = pos.X;
-                currentLine.Y2 = pos.Y;
-            }
             else
             {
                 dimensionTextBlock.Visibility = Visibility.Collapsed;
@@ -2740,71 +2718,10 @@ namespace V2XController
         //stop drawing when mouse button is released
         private void TileCanvas_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
         {
-            if (currentDrawingMode == DrawingMode.Railway && currentLine != null)
-            {
-                currentLine.IsHitTestVisible = true;
-
-                var start = new Point(currentLine.X1, currentLine.Y1);
-                var end = new Point(currentLine.X2, currentLine.Y2);
-
-                var startLatLon = CanvasPixelsToLatLon(start, latitude, longitude, zoom);
-                var endLatLon = CanvasPixelsToLatLon(end, latitude, longitude, zoom);
-
-                var railway = new Railway
-                {
-                    Lat1 = startLatLon.Y,
-                    Lon1 = startLatLon.X,
-                    Lat2 = endLatLon.Y,
-                    Lon2 = endLatLon.X,
-                    Line = currentLine,
-                    Color = ((SolidColorBrush)currentLine.Stroke).Color.ToString(),
-                    Thickness = currentLine.StrokeThickness
-                };
-
-                railwayLines.Add(railway);
-
-                var lineToAdd = currentLine;
-                var railwayToAdd = railway;
-
-                AddUndoRedo(
-                    undo: () =>
-                    {
-                        TileCanvas.Children.Remove(lineToAdd);
-                        railwayLines.Remove(railwayToAdd);
-                        isDirty = true;
-                    },
-                    redo: () =>
-                    {
-                        TileCanvas.Children.Add(lineToAdd);
-                        if (!railwayLines.Contains(railwayToAdd))
-                            railwayLines.Add(railwayToAdd);
-                        isDirty = true;
-                    }
-                );
-
-                isDirty = true;
-                currentLine = null;
-            }
+            
         }
 
-        private void ReprojectRailwaysOnMapChange()
-        {
-            foreach (var railway in railwayLines)
-            {
-                if (railway?.Line == null) continue;
-
-                // Převést lat/lon na canvas souřadnice
-                var (x1, y1) = ConvertLatLonToCanvasXY(railway.Lat1, railway.Lon1);
-                var (x2, y2) = ConvertLatLonToCanvasXY(railway.Lat2, railway.Lon2);
-
-                // Aktualizovat pozice Line
-                railway.Line.X1 = x1;
-                railway.Line.Y1 = y1;
-                railway.Line.X2 = x2;
-                railway.Line.Y2 = y2;
-            }
-        }
-
+        
         private void ShowPreviewRectangle(double halfWidth)
         {
             var axis = rectSecondPoint - rectFirstPoint;
@@ -2929,37 +2846,7 @@ namespace V2XController
             var currentPos = e.GetPosition(TileCanvas);
             var dx = currentPos.X - mouseOffset.X;
             var dy = currentPos.Y - mouseOffset.Y;
-
-            // PŘIDÁNO: Podpora pro pohyb Line (railway)
-            if (selectedElement is Line line)
-            {
-                line.X1 += dx;
-                line.Y1 += dy;
-                line.X2 += dx;
-                line.Y2 += dy;
-
-                // Aktualizovat lat/lon v Railway objektu
-                var railway = railwayLines.FirstOrDefault(r => r.Line == line);
-                if (railway != null)
-                {
-                    var start = new Point(line.X1, line.Y1);
-                    var end = new Point(line.X2, line.Y2);
-
-                    var startLatLon = CanvasPixelsToLatLon(start, latitude, longitude, zoom);
-                    var endLatLon = CanvasPixelsToLatLon(end, latitude, longitude, zoom);
-
-                    railway.Lat1 = startLatLon.Y;
-                    railway.Lon1 = startLatLon.X;
-                    railway.Lat2 = endLatLon.Y;
-                    railway.Lon2 = endLatLon.X;
-
-                    isDirty = true;
-                }
-
-                mouseOffset = currentPos;
-                return;
-            }
-
+          
             if (selectedElement is FrameworkElement element)
             {
                 double left = Canvas.GetLeft(element);
@@ -3194,31 +3081,7 @@ namespace V2XController
 
                     TileCanvas.Children.Remove(rect);
                 }
-                else if (selectedElement is Line line)
-                {
-                    var railwayToRemove = railwayLines.FirstOrDefault(r => r.Line == line);
-                    if (railwayToRemove != null)
-                    {
-                        AddUndoRedo(
-                            undo: () =>
-                            {
-                                TileCanvas.Children.Add(line);
-                                if (!railwayLines.Contains(railwayToRemove))
-                                    railwayLines.Add(railwayToRemove);
-                                isDirty = true;
-                            },
-                            redo: () =>
-                            {
-                                TileCanvas.Children.Remove(line);
-                                railwayLines.Remove(railwayToRemove);
-                                isDirty = true;
-                            }
-                        );
-
-                        TileCanvas.Children.Remove(line);
-                        railwayLines.Remove(railwayToRemove);
-                    }
-                }
+                
 
                 selectedElement = null;
                 isDirty = true;
@@ -3258,15 +3121,7 @@ namespace V2XController
             }
 
             // Cancel railway drawing
-            if (currentDrawingMode == DrawingMode.Railway && currentLine != null)
-            {
-                // currentLine ještě není uložen do railwayLines, jen jej smaž z canvasu
-                if (TileCanvas.Children.Contains(currentLine))
-                    TileCanvas.Children.Remove(currentLine);
-                currentLine = null;
-                isDrawing = false;
-                didSomething = true;
-            }
+            
 
             // Cancel point drawing session (bez mazání existujících bodů)
             if (currentDrawingMode == DrawingMode.Point && isDrawing)
@@ -3969,19 +3824,7 @@ namespace V2XController
             }
             root.Add(zonesElement);
 
-            XElement railwaysElement = new XElement("Railways");
-            foreach (var railway in railwayLines)
-            {
-                railwaysElement.Add(new XElement("Line",
-                    new XAttribute("Lat1", railway.Lat1.ToString("F8", CultureInfo.InvariantCulture)),
-                    new XAttribute("Lon1", railway.Lon1.ToString("F8", CultureInfo.InvariantCulture)),
-                    new XAttribute("Lat2", railway.Lat2.ToString("F8", CultureInfo.InvariantCulture)),
-                    new XAttribute("Lon2", railway.Lon2.ToString("F8", CultureInfo.InvariantCulture)),
-                    new XAttribute("Stroke", railway.Color),
-                    new XAttribute("StrokeThickness", railway.Thickness.ToString(CultureInfo.InvariantCulture))
-                ));
-            }
-            root.Add(railwaysElement);
+            
 
             if (recordedCamMessages.Count > 0)
             {
@@ -4143,54 +3986,6 @@ namespace V2XController
                 }
 
                 isDirty = false;
-            }
-
-            var railwaysElement = root.Element("Railways");
-            if (railwaysElement != null)
-            {
-                railwayLines.Clear();
-                foreach (var lineElem in railwaysElement.Elements("Line"))
-                {
-                    // Načíst lat/lon místo X1/Y1/X2/Y2
-                    double lat1 = double.TryParse(lineElem.Attribute("Lat1")?.Value, NumberStyles.Any, CultureInfo.InvariantCulture, out var lat1Parsed) ? lat1Parsed : 0;
-                    double lon1 = double.TryParse(lineElem.Attribute("Lon1")?.Value, NumberStyles.Any, CultureInfo.InvariantCulture, out var lon1Parsed) ? lon1Parsed : 0;
-                    double lat2 = double.TryParse(lineElem.Attribute("Lat2")?.Value, NumberStyles.Any, CultureInfo.InvariantCulture, out var lat2Parsed) ? lat2Parsed : 0;
-                    double lon2 = double.TryParse(lineElem.Attribute("Lon2")?.Value, NumberStyles.Any, CultureInfo.InvariantCulture, out var lon2Parsed) ? lon2Parsed : 0;
-
-                    var strokeColor = (Color)ColorConverter.ConvertFromString(lineElem.Attribute("Stroke")?.Value ?? "#000000");
-                    double thickness = double.Parse(lineElem.Attribute("StrokeThickness")?.Value ?? "2", CultureInfo.InvariantCulture);
-
-                    // Převést lat/lon na canvas souřadnice
-                    var (x1, y1) = ConvertLatLonToCanvasXY(lat1, lon1);
-                    var (x2, y2) = ConvertLatLonToCanvasXY(lat2, lon2);
-
-                    Line line = new Line
-                    {
-                        X1 = x1,
-                        Y1 = y1,
-                        X2 = x2,
-                        Y2 = y2,
-                        Stroke = new SolidColorBrush(strokeColor),
-                        StrokeThickness = thickness,
-                        IsHitTestVisible = true  // ZMĚNĚNO na true pro pohyb pravým tlačítkem
-                    };
-
-                    var railway = new Railway
-                    {
-                        Lat1 = lat1,
-                        Lon1 = lon1,
-                        Lat2 = lat2,
-                        Lon2 = lon2,
-                        Line = line,
-                        Color = strokeColor.ToString(),
-                        Thickness = thickness
-                    };
-
-                    TileCanvas.Children.Add(line);
-                    railwayLines.Add(railway);
-                    Panel.SetZIndex(line, 50);
-                }
-            
             }
 
             foreach (var vehicle in activeVehicles.Values)
@@ -6501,10 +6296,10 @@ namespace V2XController
             isSelectionMode = true;
         }
 
-        private void RailwayButton_Click(object sender, RoutedEventArgs e)
+        private void PolylineButton_Click(object sender, RoutedEventArgs e)
         {
             isSelectionMode = false;
-            currentDrawingMode = DrawingMode.Railway;
+            currentDrawingMode = DrawingMode.Polyline;
             Keyboard.Focus(this);
         }
 
@@ -6966,17 +6761,21 @@ namespace V2XController
 
                     // START TIMESHIFT RIGHT AFTER CONNECT
                     StartTimeshiftSession();
-
                     UpdateUiEnabledState();
+                    Console.WriteLine($"[CONNECT] User connected on port {portName} at {baudRate} baud/s.");
                     MessageBox.Show($"Connected on {portName} at {baudRate} bps.");
+                    
                 }
                 else
                 {
+                    Console.WriteLine($"[CONNECT] User tried to connect to port {portName} but port is already open.");
                     MessageBox.Show("Port already open.");
+
                 }
             }
             catch (Exception ex)
             {
+                Console.WriteLine($"[ERR] Failed to connect: {ex.Message}");
                 MessageBox.Show($"Failed to connect: {ex.Message}");
             }
         }
@@ -7007,13 +6806,16 @@ namespace V2XController
                     }
                     catch (Exception ex)
                     {
+                        Console.WriteLine($"[DISCONNECT] Error while closing port: " + ex.Message);
                         MessageBox.Show("Error while closing port: " + ex.Message, "Disconnect", MessageBoxButton.OK, MessageBoxImage.Warning);
                     }
 
                     StopSrvAutoTimer();
                     _isConnected = false;
                     UpdateUiEnabledState();
+                    Console.WriteLine($"[DISCONNECT] User disconnected from selected serial port.");
                     MessageBox.Show("Disconnected from serial port.");
+
                     return;
                 }
 
@@ -7091,6 +6893,7 @@ namespace V2XController
                 }
                 catch (Exception ex)
                 {
+                    Console.WriteLine($"[ERR] Error while closing port: " + ex.Message);
                     MessageBox.Show("Error while closing port: " + ex.Message, "Disconnect", MessageBoxButton.OK, MessageBoxImage.Warning);
                 }
 
@@ -7098,10 +6901,12 @@ namespace V2XController
                 _isConnected = false;
 
                 UpdateUiEnabledState();
+                Console.WriteLine($"[DISCONNECT] User disconnected from selected serial port.");
                 MessageBox.Show("Disconnected from serial port.");
             }
             catch (Exception ex)
             {
+                Console.WriteLine($"[ERR] Error disconnecting: " + ex.Message);
                 MessageBox.Show("Error disconnecting: " + ex.Message);
             }
         }
@@ -7111,11 +6916,9 @@ namespace V2XController
         {
             // consider activation zones and railways too
             bool hasZones = activationZones.Count > 0 || (ActivationZonesCollection?.Count > 0);
-            bool hasRailway = railwayLines.Count > 0;
 
             bool hasAnything =
                 hasZones ||
-                hasRailway ||
                 points.Count > 0 ||
                 mapRectangles.Count > 0 ||
                 connectionLine.Points.Count > 0;
@@ -7550,7 +7353,6 @@ namespace V2XController
             mapRectangles.Clear();
             activationZones.Clear();
             ActivationZonesCollection.Clear();
-            railwayLines.Clear();
             connectionLine.Points.Clear();
             TramTable.Clear();
 
@@ -7592,7 +7394,7 @@ namespace V2XController
             isSelectionMode = true;
             currentDrawingMode = DrawingMode.Point;
             UpdateHitTestForSelectableElements();
-            Console.WriteLine($"[CLEAR] Complete - zones: {ActivationZonesCollection.Count}, railways: {railwayLines.Count}\n");
+            Console.WriteLine($"[CLEAR] Complete - zones: {ActivationZonesCollection.Count}");
         }
         
 
@@ -7993,6 +7795,7 @@ namespace V2XController
             FilterCheckBox?.SetValue(IsEnabledProperty, _isConnected || _playbackLoaded);
             ExportButton?.SetValue(IsEnabledProperty, ActivationZonesCollection != null && ActivationZonesCollection.Count > 0);
             CircleCheckBox?.SetValue(IsEnabledProperty, _isConnected);
+            TramTrailLengthTB?.SetValue(IsEnabledProperty, _isConnected);
         }
 
         public void ReprojectActivationZonesOnMapChange()

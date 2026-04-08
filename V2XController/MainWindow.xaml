@@ -107,8 +107,8 @@
 
                         <Button x:Name="rectButton" Content="Activation Zone" Grid.Row="0" Grid.Column="0"
                                 ToolTip="Draw zones" Click="rectButton_Click"/>
-                        <Button x:Name="RailwayButton" Content="Railway" Grid.Row="0" Grid.Column="2"
-                                ToolTip="Draw railways" Click="RailwayButton_Click"/>
+                        <Button x:Name="Polyline" Content="Polyline" Grid.Row="0" Grid.Column="2"
+                                ToolTip="Draw polyline" Click="PolylineButton_Click"/>
 
                         <Button x:Name="StopDrawing" Content="Stop Drawing" Grid.Row="2" Grid.Column="0"
                                 ToolTip="Stop active drawing" Click="StopDrawing_Click"/>
