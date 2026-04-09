@@ -106,6 +106,12 @@ namespace V2XController
 
         private List<Ellipse> _currentPolylineCircles = new List<Ellipse>();
         private List<System.Windows.Shapes.Path> _currentPolylineSegments = new List<System.Windows.Shapes.Path>();
+        private Dictionary<Ellipse, (Polyline polyline, int pointIndex)> _polylineVertexMap = new Dictionary<Ellipse, (Polyline, int)>();
+        private Dictionary<Polyline, List<System.Windows.Shapes.Path>> _polylineToSegments = new Dictionary<Polyline, List<System.Windows.Shapes.Path>>();
+        private Dictionary<Ellipse, Ellipse> _polylineVertexToCircle = new Dictionary<Ellipse, Ellipse>();
+        private Dictionary<Polyline, List<(double lat, double lon)>> _polylineGeoPoints = new Dictionary<Polyline, List<(double, double)>>();
+        private bool _isDrawingPolyline = false;
+        private Ellipse _hoveredVertex = null;
 
         private List<string> recordedCamMessages = new();
 
@@ -1261,11 +1267,67 @@ namespace V2XController
             UpdateReplayVehiclesPositions();
 
             //ReprojectRailwaysOnMapChange();
+            // Update polyline live
+            UpdatePolylinePositions();
 
             // 7. Update radius circle if visible
             if (CircleCheckBox?.IsChecked == true)
             {
                 DrawRadiusCircle();
+            }
+        }
+
+        private void UpdatePolylinePositions()
+        {
+            foreach (var kv in _polylineGeoPoints.ToList())
+            {
+                var poly = kv.Key;
+
+                if (_isDrawingPolyline && poly == currentPolyline)
+                    continue;
+
+                if (selectedElement == poly)
+                    continue;
+
+                if (selectedElement is Ellipse selDot &&
+                    _polylineVertexMap.TryGetValue(selDot, out var selInfo) &&
+                    selInfo.polyline == poly)
+                    continue;
+
+                var geoPoints = kv.Value;
+
+                double mpp = MetersPerPixel(latitude, zoom);
+                double halfWidthPx = (_polylineZoneWidthMeters / 2.0) / mpp;
+
+                for (int i = 0; i < geoPoints.Count && i < poly.Points.Count; i++)
+                {
+                    var (gLat, gLon) = geoPoints[i];
+                    var canvasPos = ConvertLatLonToCanvasXY(gLat, gLon);
+                    poly.Points[i] = new Point(canvasPos.x, canvasPos.y);
+
+                    foreach (var dotKv in _polylineVertexMap.Where(d => d.Value.polyline == poly && d.Value.pointIndex == i))
+                    {
+                        var dot = dotKv.Key;
+                        Canvas.SetLeft(dot, canvasPos.x - 4);
+                        Canvas.SetTop(dot, canvasPos.y - 4);
+
+                        if (_polylineVertexToCircle.TryGetValue(dot, out var circle))
+                        {
+                            circle.Width = halfWidthPx * 2;
+                            circle.Height = halfWidthPx * 2;
+                            Canvas.SetLeft(circle, canvasPos.x - halfWidthPx);
+                            Canvas.SetTop(circle, canvasPos.y - halfWidthPx);
+                        }
+                    }
+                }
+
+                if (_polylineToSegments.TryGetValue(poly, out var segments))
+                {
+                    for (int i = 0; i < segments.Count && i < poly.Points.Count - 1; i++)
+                    {
+                        UpdateSegmentGeometry(segments[i], poly.Points[i], poly.Points[i + 1], halfWidthPx);
+                    }
+                }
             }
         }
 
@@ -2198,6 +2260,7 @@ namespace V2XController
                 isDrawing = true;
                 startPoint = pos;
 
+
                 int idx = currentDrawnTramIndex;
 
                 if (drawnTrams[idx] == null)
@@ -2650,11 +2713,85 @@ namespace V2XController
             {
                 e.Handled = true;
                 var position = e.GetPosition(TileCanvas);
-
-                Console.WriteLine($"[POLYLINE] Point added at ({position.X:F1}, {position.Y:F1})");
+                _isDrawingPolyline = true;
 
                 if (currentPolyline == null)
                 {
+                    var hit = VisualTreeHelper.HitTest(TileCanvas, position);
+                    if (hit?.VisualHit is Ellipse clickedDot &&
+                        clickedDot.Tag is string dotTag && dotTag == "PolylineVertex" &&
+                        _polylineVertexMap.TryGetValue(clickedDot, out var vertexInfo))
+                    {
+                        var poly = vertexInfo.polyline;
+                        var idx = vertexInfo.pointIndex;
+
+                        bool isEndpoint = (idx == 0 || idx == poly.Points.Count - 1);
+                        if (isEndpoint)
+                        {
+                            Console.WriteLine($"[POLYLINE] Continuing from existing polyline (point {idx})");
+                            _isDrawingPolyline = true;
+                            currentPolyline = poly;
+
+                            polylinePoints.Clear();
+                            polylineVertexDots.Clear();
+                            _currentPolylineCircles.Clear();
+                            _currentPolylineSegments.Clear();
+
+                            if (idx == 0)
+                            {
+                                for (int i = poly.Points.Count - 1; i >= 0; i--)
+                                {
+                                    polylinePoints.Add(poly.Points[i]);
+
+                                    foreach (var kv in _polylineVertexMap)
+                                    {
+                                        if (kv.Value.polyline == poly && kv.Value.pointIndex == i)
+                                        {
+                                            polylineVertexDots.Add(kv.Key);
+
+                                            if (_polylineVertexToCircle.TryGetValue(kv.Key, out var existingCircle))
+                                                _currentPolylineCircles.Add(existingCircle);
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                poly.Points.Clear();
+                                foreach (var pt in polylinePoints)
+                                    poly.Points.Add(pt);
+
+                                var oldMap = _polylineVertexMap.Where(kv => kv.Value.polyline == poly).ToList();
+                                foreach (var kv in oldMap)
+                                    _polylineVertexMap.Remove(kv.Key);
+
+                                for (int i = 0; i < polylineVertexDots.Count; i++)
+                                    _polylineVertexMap[polylineVertexDots[i]] = (poly, i);
+                            }
+                            else 
+                            {
+                                polylinePoints.AddRange(poly.Points);
+
+                                foreach (var kv in _polylineVertexMap.Where(kv => kv.Value.polyline == poly).OrderBy(kv => kv.Value.pointIndex))
+                                {
+                                    polylineVertexDots.Add(kv.Key);
+
+                                    if (_polylineVertexToCircle.TryGetValue(kv.Key, out var existingCircle))
+                                        _currentPolylineCircles.Add(existingCircle);
+                                }
+                            }
+
+                            if (_polylineToSegments.TryGetValue(poly, out var segs))
+                                _currentPolylineSegments.AddRange(segs);
+
+                            var mr = mapRectangles.FirstOrDefault(m => m.Shape == poly);
+                            if (mr != null)
+                                mapRectangles.Remove(mr);
+
+                            Console.WriteLine($"[POLYLINE] Resuming with {polylinePoints.Count} existing points");
+                            return; 
+                        }
+                    }
+
                     currentPolyline = new Polyline
                     {
                         Stroke = _strokeBrush,
@@ -2666,25 +2803,33 @@ namespace V2XController
 
                     polylinePoints.Clear();
                     polylineVertexDots.Clear();
-                    _currentPolylineCircles.Clear();      
-                    _currentPolylineSegments.Clear();     
+                    _currentPolylineCircles.Clear();
+                    _currentPolylineSegments.Clear();
+
+                    _polylineToSegments[currentPolyline] = new List<System.Windows.Shapes.Path>();
                 }
+
+                Console.WriteLine($"[POLYLINE] Point added at ({position.X:F1}, {position.Y:F1})");
 
                 polylinePoints.Add(position);
                 currentPolyline.Points.Add(position);
 
+                var (geoLat, geoLon) = ConvertCanvasXYToLatLon(position.X, position.Y, zoom);
+                if (!_polylineGeoPoints.ContainsKey(currentPolyline))
+                    _polylineGeoPoints[currentPolyline] = new List<(double, double)>();
+                _polylineGeoPoints[currentPolyline].Add((geoLat, geoLon));
+
                 double mpp = MetersPerPixel(latitude, zoom);
                 double halfWidthPx = (_polylineZoneWidthMeters / 2.0) / mpp;
 
-                // ===== KRUH =====
                 var circle = new Ellipse
                 {
                     Width = halfWidthPx * 2,
                     Height = halfWidthPx * 2,
                     Fill = new SolidColorBrush(Color.FromArgb(50,
-                        ((SolidColorBrush)_strokeBrush).Color.R,
-                        ((SolidColorBrush)_strokeBrush).Color.G,
-                        ((SolidColorBrush)_strokeBrush).Color.B)),
+                                    ((SolidColorBrush)_strokeBrush).Color.R,
+                                    ((SolidColorBrush)_strokeBrush).Color.G,
+                                    ((SolidColorBrush)_strokeBrush).Color.B)),
                     Stroke = null,
                     StrokeThickness = 0,
                     IsHitTestVisible = false,
@@ -2703,14 +2848,21 @@ namespace V2XController
                     Fill = Brushes.Black,
                     Stroke = Brushes.White,
                     StrokeThickness = 1,
-                    IsHitTestVisible = false,
+                    IsHitTestVisible = true,
                     Tag = "PolylineVertex"
                 };
                 Canvas.SetLeft(dot, position.X - 4);
                 Canvas.SetTop(dot, position.Y - 4);
+
+                dot.MouseEnter += PolylineVertex_MouseEnter;
+                dot.MouseLeave += PolylineVertex_MouseLeave;
+
                 TileCanvas.Children.Add(dot);
                 Panel.SetZIndex(dot, 101);
                 polylineVertexDots.Add(dot);
+
+                _polylineVertexMap[dot] = (currentPolyline, polylinePoints.Count - 1);
+                _polylineVertexToCircle[dot] = circle;
 
                 if (polylinePoints.Count >= 2)
                 {
@@ -2751,6 +2903,8 @@ namespace V2XController
                         TileCanvas.Children.Add(segmentPath);
                         Panel.SetZIndex(segmentPath, 50);
                         _currentPolylineSegments.Add(segmentPath);
+
+                        _polylineToSegments[currentPolyline].Add(segmentPath);
                     }
                 }
 
@@ -2759,7 +2913,58 @@ namespace V2XController
             }
         }
 
+        private void PolylineVertex_MouseEnter(object sender, MouseEventArgs e)
+        {
+            if (sender is Ellipse dot)
+            {
+                if (_hoveredVertex == dot)
+                    return;
 
+                if (_polylineVertexMap.TryGetValue(dot, out var vertexInfo))
+                {
+                    var poly = vertexInfo.polyline;
+                    var idx = vertexInfo.pointIndex;
+
+                    bool isEndpoint = (idx == 0 || idx == poly.Points.Count - 1);
+                    if (!isEndpoint)
+                        return;
+                }
+
+                _hoveredVertex = dot;
+
+                var currentLeft = Canvas.GetLeft(dot);
+                var currentTop = Canvas.GetTop(dot);
+
+                dot.Width = 12;
+                dot.Height = 12;
+                dot.Fill = new SolidColorBrush(Color.FromRgb(255, 100, 0));
+                dot.StrokeThickness = 2;
+
+                Canvas.SetLeft(dot, currentLeft - 2);
+                Canvas.SetTop(dot, currentTop - 2);
+
+                TileCanvas.Cursor = Cursors.Hand;
+            }
+        }
+
+        private void PolylineVertex_MouseLeave(object sender, MouseEventArgs e)
+        {
+            if (sender is Ellipse dot && _hoveredVertex == dot)
+            {
+                var currentLeft = Canvas.GetLeft(dot);
+                var currentTop = Canvas.GetTop(dot);
+
+                dot.Width = 8;
+                dot.Height = 8;
+                dot.Fill = Brushes.Black;
+                dot.StrokeThickness = 1;
+                Canvas.SetLeft(dot, currentLeft + 2);
+                Canvas.SetTop(dot, currentTop + 2);
+
+                _hoveredVertex = null;
+                TileCanvas.Cursor = Cursors.Arrow;
+            }
+        }
 
         private void UpdateRectanglePositionFromStartPoint(ActivationZone zone)
         {
@@ -2779,6 +2984,25 @@ namespace V2XController
         private void TileCanvas_MouseMove(object sender, MouseEventArgs e)
         {
             var pos = e.GetPosition(TileCanvas);
+
+            if (_hoveredVertex != null && e.LeftButton == MouseButtonState.Released)
+            {
+                var hit = VisualTreeHelper.HitTest(TileCanvas, pos);
+
+                if (hit?.VisualHit is not Ellipse hitEllipse || !ReferenceEquals(hitEllipse, _hoveredVertex))
+                {
+                    var currentLeft = Canvas.GetLeft(_hoveredVertex);
+                    var currentTop = Canvas.GetTop(_hoveredVertex);
+
+                    _hoveredVertex.Width = 8;
+                    _hoveredVertex.Height = 8;
+                    _hoveredVertex.Fill = Brushes.Black;
+                    _hoveredVertex.StrokeThickness = 1;
+                    Canvas.SetLeft(_hoveredVertex, currentLeft + 2);
+                    Canvas.SetTop(_hoveredVertex, currentTop + 2);
+                    _hoveredVertex = null;
+                }
+            }
 
             if (rectPhase == RectangleDrawPhase.HeightDefinition && tempHeightLine != null)
             {
@@ -2957,14 +3181,52 @@ namespace V2XController
             var element = hit.VisualHit as UIElement;
             if (element == null) return;
 
-            // Ignore the SRV radius circle and any click-through visuals
-            if ((radiusEllipse != null && ReferenceEquals(element, radiusEllipse)) || element.IsHitTestVisible == false)
+            if (element.IsHitTestVisible == false)
+            {
+                if (element is not Ellipse || (element as Ellipse).Tag as string != "PolylineVertex")
+                    return;
+            }
+
+            if ((radiusEllipse != null && ReferenceEquals(element, radiusEllipse)))
                 return;
 
-            // Allow dragging only for intended types, but block SRV marker itself
+            if (element is Ellipse ellipse && ellipse.Tag is string tag && tag == "PolylineVertex")
+            {
+                if (_polylineVertexMap.TryGetValue(ellipse, out var info))
+                {
+                    if (_hoveredVertex == ellipse)
+                    {
+                        var currentLeft = Canvas.GetLeft(ellipse);
+                        var currentTop = Canvas.GetTop(ellipse);
+
+                        ellipse.Width = 8;
+                        ellipse.Height = 8;
+                        ellipse.Fill = Brushes.Black;
+                        ellipse.StrokeThickness = 1;
+                        Canvas.SetLeft(ellipse, currentLeft + 2);
+                        Canvas.SetTop(ellipse, currentTop + 2);
+                        _hoveredVertex = null;
+                    }
+
+                    selectedElement = ellipse;
+                    mouseOffset = position;
+                    TileCanvas.Cursor = Cursors.SizeAll;
+                    e.Handled = true;
+                    return;
+                }
+            }
+
+            if (element is Polyline polyline)
+            {
+                selectedElement = polyline;
+                mouseOffset = position;
+                TileCanvas.Cursor = Cursors.SizeAll;
+                e.Handled = true;
+                return;
+            }
+
             if (element is Rectangle || element is Ellipse || element is TextBlock || element is Line)
             {
-                // Do not allow dragging SRV point or its label
                 if (element is Shape sh && Equals(sh.Tag, "Srv"))
                     return;
                 if (element is TextBlock tb && Equals(tb.Tag, "Srv"))
@@ -2987,35 +3249,72 @@ namespace V2XController
             var dx = currentPos.X - mouseOffset.X;
             var dy = currentPos.Y - mouseOffset.Y;
 
+            if (selectedElement is Ellipse vertexDot &&
+                vertexDot.Tag is string vTag && vTag == "PolylineVertex" &&
+                _polylineVertexMap.TryGetValue(vertexDot, out var vertexInfo))
+            {
+                var newPos = new Point(currentPos.X, currentPos.Y);
+
+                Canvas.SetLeft(vertexDot, newPos.X - 4);
+                Canvas.SetTop(vertexDot, newPos.Y - 4);
+
+                UpdatePolylineSegmentsAroundVertex(vertexInfo.polyline, vertexInfo.pointIndex, newPos);
+
+                if (_polylineGeoPoints.TryGetValue(vertexInfo.polyline, out var geoList) &&
+                    vertexInfo.pointIndex < geoList.Count)
+                {
+                    var (newLat, newLon) = ConvertCanvasXYToLatLon(newPos.X, newPos.Y, zoom);
+                    geoList[vertexInfo.pointIndex] = (newLat, newLon);
+                }
+
+                mouseOffset = currentPos;
+                isDirty = true;
+                return;
+            }
+
             if (selectedElement is Polyline polyline)
             {
                 for (int i = 0; i < polyline.Points.Count; i++)
                 {
-                    polyline.Points[i] = new Point(
-                        polyline.Points[i].X + dx,
-                        polyline.Points[i].Y + dy
-                    );
-                }
+                    var oldPt = polyline.Points[i];
+                    var newPt = new Point(oldPt.X + dx, oldPt.Y + dy);
+                    polyline.Points[i] = newPt;
 
-                var dots = TileCanvas.Children.OfType<Ellipse>()
-                    .Where(e =>
+                    if (_polylineGeoPoints.TryGetValue(polyline, out var geoList) && i < geoList.Count)
                     {
-                        double left = Canvas.GetLeft(e);
-                        double top = Canvas.GetTop(e);
-                        return polyline.Points.Any(p =>
-                            Math.Abs(p.X - (left + 4)) < 5 &&
-                            Math.Abs(p.Y - (top + 4)) < 5);
-                    })
-                    .ToList();
+                        var (newLat, newLon) = ConvertCanvasXYToLatLon(newPt.X, newPt.Y, zoom);
+                        geoList[i] = (newLat, newLon);
+                    }
 
-                foreach (var dot in dots)
-                {
-                    Canvas.SetLeft(dot, Canvas.GetLeft(dot) + dx);
-                    Canvas.SetTop(dot, Canvas.GetTop(dot) + dy);
+                    foreach (var dotKv in _polylineVertexMap.Where(kv => kv.Value.polyline == polyline && kv.Value.pointIndex == i))
+                    {
+                        var dot = dotKv.Key;
+                        Canvas.SetLeft(dot, newPt.X - 4);
+                        Canvas.SetTop(dot, newPt.Y - 4);
+
+                        if (_polylineVertexToCircle.TryGetValue(dot, out var circle))
+                        {
+                            double mpp = MetersPerPixel(latitude, zoom);
+                            double halfWidthPx = (_polylineZoneWidthMeters / 2.0) / mpp;
+                            Canvas.SetLeft(circle, newPt.X - halfWidthPx);
+                            Canvas.SetTop(circle, newPt.Y - halfWidthPx);
+                        }
+                    }
                 }
 
-                isDirty = true;
+                if (_polylineToSegments.TryGetValue(polyline, out var segments))
+                {
+                    double mpp = MetersPerPixel(latitude, zoom);
+                    double halfWidthPx = (_polylineZoneWidthMeters / 2.0) / mpp;
+
+                    for (int i = 0; i < segments.Count && i < polyline.Points.Count - 1; i++)
+                    {
+                        UpdateSegmentGeometry(segments[i], polyline.Points[i], polyline.Points[i + 1], halfWidthPx);
+                    }
+                }
+
                 mouseOffset = currentPos;
+                isDirty = true;
                 return;
             }
 
@@ -3072,7 +3371,6 @@ namespace V2XController
                 {
                     isUpdatingActivationZone = false;
                 }
-
             }
         }
 
@@ -3146,6 +3444,27 @@ namespace V2XController
             if (e.Key == Key.Delete && selectedElement != null)
             {
                 var elementToDelete = selectedElement;
+
+                if (selectedElement is Ellipse selectedDot &&
+            selectedDot.Tag is string tag && tag == "PolylineVertex" &&
+            _polylineVertexMap.TryGetValue(selectedDot, out var vertexInfo))
+                {
+                    DeletePolylineVertex(vertexInfo.polyline, vertexInfo.pointIndex);
+                    selectedElement = null;
+                    isDirty = true;
+                    e.Handled = true;
+                    return;
+                }
+
+                // **NOVÉ: Delete celou polyline (RMB hold na čáře + Del)**
+                if (selectedElement is Polyline polyToDelete)
+                {
+                    DeleteEntirePolyline(polyToDelete);
+                    selectedElement = null;
+                    isDirty = true;
+                    e.Handled = true;
+                    return;
+                }
 
                 if (selectedElement is Ellipse ellipse)
                 {
@@ -3329,12 +3648,182 @@ namespace V2XController
             }
         }
 
+        private void DeletePolylineVertex(Polyline polyline, int vertexIndex)
+        {
+            if (polyline == null || vertexIndex < 0 || vertexIndex >= polyline.Points.Count)
+                return;
+
+            Console.WriteLine($"[POLYLINE] Deleting vertex {vertexIndex}/{polyline.Points.Count}");
+
+            Ellipse dotToRemove = null;
+            foreach (var kv in _polylineVertexMap.Where(kv => kv.Value.polyline == polyline && kv.Value.pointIndex == vertexIndex).ToList())
+            {
+                dotToRemove = kv.Key;
+                break;
+            }
+
+            if (dotToRemove != null)
+            {
+                TileCanvas.Children.Remove(dotToRemove);
+
+                if (_polylineVertexToCircle.TryGetValue(dotToRemove, out var circle))
+                {
+                    TileCanvas.Children.Remove(circle);
+                    _polylineVertexToCircle.Remove(dotToRemove);
+                }
+
+                _polylineVertexMap.Remove(dotToRemove);
+
+                if (_hoveredVertex == dotToRemove)
+                    _hoveredVertex = null;
+            }
+
+            if (_polylineToSegments.TryGetValue(polyline, out var segments))
+            {
+                List<int> segmentsToRemoveIndices = new List<int>();
+                if (vertexIndex == 0 && segments.Count > 0)
+                {
+                    segmentsToRemoveIndices.Add(0);
+                }
+                else if (vertexIndex == polyline.Points.Count - 1 && segments.Count > 0)
+                {
+                    segmentsToRemoveIndices.Add(segments.Count - 1);
+                }
+                else if (vertexIndex > 0 && vertexIndex < polyline.Points.Count - 1)
+                {
+                    if (vertexIndex - 1 < segments.Count)
+                        segmentsToRemoveIndices.Add(vertexIndex - 1);
+
+                    if (vertexIndex < segments.Count)
+                        segmentsToRemoveIndices.Add(vertexIndex);
+                }
+
+                foreach (var idx in segmentsToRemoveIndices.OrderByDescending(x => x).Distinct())
+                {
+                    if (idx >= 0 && idx < segments.Count)
+                    {
+                        TileCanvas.Children.Remove(segments[idx]);
+                        segments.RemoveAt(idx);
+                    }
+                }
+            }
+
+            polyline.Points.RemoveAt(vertexIndex);
+
+            if (_polylineGeoPoints.TryGetValue(polyline, out var geoList) && vertexIndex < geoList.Count)
+            {
+                geoList.RemoveAt(vertexIndex);
+            }
+
+            var toReindex = _polylineVertexMap.Where(kv => kv.Value.polyline == polyline && kv.Value.pointIndex > vertexIndex).ToList();
+            foreach (var kv in toReindex)
+            {
+                _polylineVertexMap[kv.Key] = (polyline, kv.Value.pointIndex - 1);
+            }
+
+            if (polyline.Points.Count >= 2 && vertexIndex > 0 && vertexIndex < polyline.Points.Count)
+            {
+                double mpp = MetersPerPixel(latitude, zoom);
+                double halfWidthPx = (_polylineZoneWidthMeters / 2.0) / mpp;
+
+                var p1 = polyline.Points[vertexIndex - 1];
+                var p2 = polyline.Points[vertexIndex];
+
+                var dir = p2 - p1;
+                if (dir.Length > 0.01)
+                {
+                    dir.Normalize();
+                    var perp = new Vector(-dir.Y, dir.X);
+
+                    var topLeft = p1 + perp * halfWidthPx;
+                    var topRight = p2 + perp * halfWidthPx;
+                    var bottomRight = p2 - perp * halfWidthPx;
+                    var bottomLeft = p1 - perp * halfWidthPx;
+
+                    var segmentGeometry = new PathGeometry();
+                    var segFigure = new PathFigure { StartPoint = topLeft, IsClosed = true };
+                    segFigure.Segments.Add(new LineSegment(topRight, true));
+                    segFigure.Segments.Add(new LineSegment(bottomRight, true));
+                    segFigure.Segments.Add(new LineSegment(bottomLeft, true));
+                    segmentGeometry.Figures.Add(segFigure);
+
+                    var newSegment = new System.Windows.Shapes.Path
+                    {
+                        Data = segmentGeometry,
+                        Fill = new SolidColorBrush(Color.FromArgb(50,
+                            ((SolidColorBrush)_strokeBrush).Color.R,
+                            ((SolidColorBrush)_strokeBrush).Color.G,
+                            ((SolidColorBrush)_strokeBrush).Color.B)),
+                        Stroke = null,
+                        StrokeThickness = 0,
+                        IsHitTestVisible = false,
+                        Tag = "PolylineZoneSegment"
+                    };
+                    TileCanvas.Children.Add(newSegment);
+                    Panel.SetZIndex(newSegment, 50);
+
+                    if (_polylineToSegments.TryGetValue(polyline, out var segs))
+                        segs.Insert(vertexIndex - 1, newSegment);
+                }
+            }
+
+            if (polyline.Points.Count < 2)
+            {
+                Console.WriteLine("[POLYLINE] <2 points - deleting entire polyline");
+                DeleteEntirePolyline(polyline);
+                return;
+            }
+
+            isDirty = true;
+            Console.WriteLine($"[POLYLINE] Vertex deleted. Remaining: {polyline.Points.Count}");
+        }
+
+        private void DeleteEntirePolyline(Polyline polyline)
+        {
+            if (polyline == null) return;
+
+            Console.WriteLine("[POLYLINE] Deleting entire polyline");
+
+            TileCanvas.Children.Remove(polyline);
+
+            foreach (var kv in _polylineVertexMap.Where(kv => kv.Value.polyline == polyline).ToList())
+            {
+                var dot = kv.Key;
+                TileCanvas.Children.Remove(dot);
+
+                if (_polylineVertexToCircle.TryGetValue(dot, out var circle))
+                {
+                    TileCanvas.Children.Remove(circle);
+                    _polylineVertexToCircle.Remove(dot);
+                }
+
+                _polylineVertexMap.Remove(dot);
+            }
+
+            if (_polylineToSegments.TryGetValue(polyline, out var segments))
+            {
+                foreach (var seg in segments)
+                    TileCanvas.Children.Remove(seg);
+                _polylineToSegments.Remove(polyline);
+            }
+
+            _polylineGeoPoints.Remove(polyline);
+
+            var mr = mapRectangles.FirstOrDefault(m => m.Shape == polyline);
+            if (mr != null)
+                mapRectangles.Remove(mr);
+
+            Console.WriteLine("[POLYLINE] Polyline deleted completely");
+        }
+
+
         private void FinalizePolyline()
         {
             if (currentPolyline == null || polylinePoints.Count < 2)
             {
                 Console.WriteLine("[POLYLINE] Not enough points to finalize (need at least 2)");
                 CancelAllDrawing();
+                _isDrawingPolyline = false; 
                 return;
             }
 
@@ -3351,9 +3840,15 @@ namespace V2XController
             var polylineToAdd = currentPolyline;
             var dotsToAdd = new List<Ellipse>(polylineVertexDots);
             var pointsToAdd = new List<Point>(polylinePoints);
-
-            var circlesToAdd = new List<Ellipse>(_currentPolylineCircles);       
+            var circlesToAdd = new List<Ellipse>(_currentPolylineCircles);
             var segmentsToAdd = new List<System.Windows.Shapes.Path>(_currentPolylineSegments);
+
+            var vertexMapSnapshot = new Dictionary<Ellipse, (Polyline, int)>();
+            foreach (var kv in _polylineVertexMap)
+            {
+                if (kv.Value.polyline == currentPolyline)
+                    vertexMapSnapshot[kv.Key] = kv.Value;
+            }
 
             AddUndoRedo(
                 undo: () =>
@@ -3365,6 +3860,8 @@ namespace V2XController
                     {
                         if (TileCanvas.Children.Contains(dot))
                             TileCanvas.Children.Remove(dot);
+                        _polylineVertexMap.Remove(dot);
+                        _polylineVertexToCircle.Remove(dot);
                     }
 
                     foreach (var circle in circlesToAdd)
@@ -3394,6 +3891,9 @@ namespace V2XController
                             TileCanvas.Children.Add(dot);
                     }
 
+                    foreach (var kv in vertexMapSnapshot)
+                        _polylineVertexMap[kv.Key] = kv.Value;
+
                     foreach (var circle in circlesToAdd)
                     {
                         if (!TileCanvas.Children.Contains(circle))
@@ -3419,11 +3919,149 @@ namespace V2XController
             currentPolyline = null;
             polylinePoints.Clear();
             polylineVertexDots.Clear();
-            _currentPolylineCircles.Clear();      
-            _currentPolylineSegments.Clear();     
+            _currentPolylineCircles.Clear();
+            _currentPolylineSegments.Clear();
             isDrawing = false;
+            _isDrawingPolyline = false;
 
             Console.WriteLine("[POLYLINE] Ready to draw next polyline");
+        }
+
+        private void UpdatePolylineSegmentsAroundVertex(Polyline polyline, int vertexIndex, Point newPosition)
+        {
+            if (polyline == null || vertexIndex < 0 || vertexIndex >= polyline.Points.Count)
+                return;
+
+            polyline.Points[vertexIndex] = newPosition;
+
+            double mpp = MetersPerPixel(latitude, zoom);
+            double halfWidthPx = (_polylineZoneWidthMeters / 2.0) / mpp;
+
+            Ellipse vertexDot = null;
+            foreach (var kv in _polylineVertexMap)
+            {
+                if (kv.Value.polyline == polyline && kv.Value.pointIndex == vertexIndex)
+                {
+                    vertexDot = kv.Key;
+                    break;
+                }
+            }
+
+            if (vertexDot != null && _polylineVertexToCircle.TryGetValue(vertexDot, out var circle))
+            {
+                Canvas.SetLeft(circle, newPosition.X - halfWidthPx);
+                Canvas.SetTop(circle, newPosition.Y - halfWidthPx);
+                circle.Width = halfWidthPx * 2;
+                circle.Height = halfWidthPx * 2;
+            }
+
+            if (!_polylineToSegments.TryGetValue(polyline, out var segments))
+                return;
+
+            if (vertexIndex > 0 && segments.Count >= vertexIndex)
+            {
+                var p1 = polyline.Points[vertexIndex - 1];
+                var p2 = newPosition;
+
+                int segIndex = vertexIndex - 1;
+                if (segIndex >= 0 && segIndex < segments.Count)
+                {
+                    UpdateSegmentGeometry(segments[segIndex], p1, p2, halfWidthPx);
+                }
+            }
+
+            if (vertexIndex < polyline.Points.Count - 1 && segments.Count > vertexIndex)
+            {
+                var p1 = newPosition;
+                var p2 = polyline.Points[vertexIndex + 1];
+
+                int segIndex = vertexIndex;
+                if (segIndex >= 0 && segIndex < segments.Count)
+                {
+                    UpdateSegmentGeometry(segments[segIndex], p1, p2, halfWidthPx);
+                }
+            }
+        }
+
+        private void UpdateSegmentGeometry(System.Windows.Shapes.Path segment, Point p1, Point p2, double halfWidthPx)
+        {
+            var dir = p2 - p1;
+            double len = dir.Length;
+            if (len < 0.01) return;
+
+            dir.Normalize();
+            var perp = new Vector(-dir.Y, dir.X);
+
+            var topLeft = p1 + perp * halfWidthPx;
+            var topRight = p2 + perp * halfWidthPx;
+            var bottomRight = p2 - perp * halfWidthPx;
+            var bottomLeft = p1 - perp * halfWidthPx;
+
+            var geometry = new PathGeometry();
+            var segFigure = new PathFigure { StartPoint = topLeft, IsClosed = true };
+            segFigure.Segments.Add(new LineSegment(topRight, true));
+            segFigure.Segments.Add(new LineSegment(bottomRight, true));
+            segFigure.Segments.Add(new LineSegment(bottomLeft, true));
+            geometry.Figures.Add(segFigure);
+
+            segment.Data = geometry;
+        }
+
+        private void UpdateOrCreateSegment(Point p1, Point p2, double halfWidthPx, List<System.Windows.Shapes.Path> existingSegments)
+        {
+            var dir = p2 - p1;
+            double len = dir.Length;
+            if (len < 0.01) return;
+
+            dir.Normalize();
+            var perp = new Vector(-dir.Y, dir.X);
+
+            var topLeft = p1 + perp * halfWidthPx;
+            var topRight = p2 + perp * halfWidthPx;
+            var bottomRight = p2 - perp * halfWidthPx;
+            var bottomLeft = p1 - perp * halfWidthPx;
+
+            var existingSegment = existingSegments.FirstOrDefault(seg =>
+            {
+                if (seg.Data is not PathGeometry geom || geom.Figures.Count == 0)
+                    return false;
+                var fig = geom.Figures[0];
+                return Math.Abs(fig.StartPoint.X - topLeft.X) < 5 &&
+                       Math.Abs(fig.StartPoint.Y - topLeft.Y) < 5;
+            });
+
+            PathGeometry geometry;
+            System.Windows.Shapes.Path segmentPath;
+
+            if (existingSegment != null)
+            {
+                segmentPath = existingSegment;
+                geometry = new PathGeometry();
+            }
+            else
+            {
+                geometry = new PathGeometry();
+                segmentPath = new System.Windows.Shapes.Path
+                {
+                    Fill = new SolidColorBrush(Color.FromArgb(50,
+                        ((SolidColorBrush)_strokeBrush).Color.R,
+                        ((SolidColorBrush)_strokeBrush).Color.G,
+                        ((SolidColorBrush)_strokeBrush).Color.B)),
+                    Stroke = null,
+                    StrokeThickness = 0,
+                    IsHitTestVisible = false,
+                    Tag = "PolylineZoneSegment"
+                };
+                TileCanvas.Children.Add(segmentPath);
+                Panel.SetZIndex(segmentPath, 50);
+            }
+
+            var segFigure = new PathFigure { StartPoint = topLeft, IsClosed = true };
+            segFigure.Segments.Add(new LineSegment(topRight, true));
+            segFigure.Segments.Add(new LineSegment(bottomRight, true));
+            segFigure.Segments.Add(new LineSegment(bottomLeft, true));
+            geometry.Figures.Add(segFigure);
+            segmentPath.Data = geometry;
         }
 
 
@@ -3445,33 +4083,50 @@ namespace V2XController
             {
                 Console.WriteLine($"[POLYLINE] Cancelled with {polylinePoints.Count} points");
 
-                if (TileCanvas.Children.Contains(currentPolyline))
-                    TileCanvas.Children.Remove(currentPolyline);
+                bool wasExistingPolyline = mapRectangles.Any(mr => mr.Shape == currentPolyline);
 
-                foreach (var dot in polylineVertexDots)
+                if (wasExistingPolyline)
                 {
-                    if (TileCanvas.Children.Contains(dot))
-                        TileCanvas.Children.Remove(dot);
+                    Console.WriteLine("[POLYLINE] Restoring previously finalized polyline");
+
+                    if (!mapRectangles.Any(mr => mr.Shape == currentPolyline))
+                        mapRectangles.Add(new MapRectangle(currentPolyline));
                 }
-
-                // **SMAŽ JEN ELEMENTY Z AKTUÁLNÍ SESSION**
-                foreach (var c in _currentPolylineCircles)
+                else
                 {
-                    if (TileCanvas.Children.Contains(c))
-                        TileCanvas.Children.Remove(c);
-                }
+                    if (TileCanvas.Children.Contains(currentPolyline))
+                        TileCanvas.Children.Remove(currentPolyline);
 
-                foreach (var seg in _currentPolylineSegments)
-                {
-                    if (TileCanvas.Children.Contains(seg))
-                        TileCanvas.Children.Remove(seg);
+                    foreach (var dot in polylineVertexDots)
+                    {
+                        if (TileCanvas.Children.Contains(dot))
+                            TileCanvas.Children.Remove(dot);
+                        _polylineVertexMap.Remove(dot);
+                        _polylineVertexToCircle.Remove(dot);
+                    }
+
+                    foreach (var c in _currentPolylineCircles)
+                    {
+                        if (TileCanvas.Children.Contains(c))
+                            TileCanvas.Children.Remove(c);
+                    }
+
+                    foreach (var seg in _currentPolylineSegments)
+                    {
+                        if (TileCanvas.Children.Contains(seg))
+                            TileCanvas.Children.Remove(seg);
+                    }
+
+                    _polylineToSegments.Remove(currentPolyline);
+                    _polylineGeoPoints.Remove(currentPolyline);
                 }
 
                 currentPolyline = null;
                 polylinePoints.Clear();
                 polylineVertexDots.Clear();
-                _currentPolylineCircles.Clear();      
-                _currentPolylineSegments.Clear();     
+                _currentPolylineCircles.Clear();
+                _currentPolylineSegments.Clear();
+                _isDrawingPolyline = false;
                 isDrawing = false;
                 didSomething = true;
             }
@@ -8247,6 +8902,11 @@ namespace V2XController
         {
             ReprojectActivationZonesOnMapChange();
             ReprojectSwitchZonesOnMapChange();
+            ReprojectActiveVehiclesOnMapChange();
+            ReprojectReplayOnMapChange();
+            ReprojectDrawnTramsOnMapChange();
+            ReprojectPolylines();
+            DrawStopsOnCanvasSafe();
             await BringAllOverlaysToFrontSafeAsync();
         }
 
@@ -8272,6 +8932,11 @@ namespace V2XController
 
             // Redraw current replay visuals at the same time index
             RedrawPlaybackToTime(playbackElapsedTime);
+        }
+
+        private void ReprojectPolylines()
+        {
+            UpdatePolylinePositions();
         }
 
         private void ReprojectDrawnTramsOnMapChange()
