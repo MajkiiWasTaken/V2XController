@@ -99,6 +99,14 @@ namespace V2XController
         private Ellipse startPointEllipse;
         private Ellipse secondPointEllipse;
 
+        private Polyline currentPolyline;
+        private List<Point> polylinePoints = new List<Point>();
+        private List<Ellipse> polylineVertexDots = new List<Ellipse>();
+        private double _polylineZoneWidthMeters = 50.0;
+
+        private List<Ellipse> _currentPolylineCircles = new List<Ellipse>();
+        private List<System.Windows.Shapes.Path> _currentPolylineSegments = new List<System.Windows.Shapes.Path>();
+
         private List<string> recordedCamMessages = new();
 
         private enum DrawingMode
@@ -484,7 +492,11 @@ namespace V2XController
 
             _heartbeatTimer.Start();
             Console.WriteLine("[HEARTBEAT] Started (interval: 3 seconds)");
-        
+
+            if (PolylineWidthTB != null)
+            {
+                PolylineWidthTB.TextChanged += PolylineWidthTB_TextChanged;
+            }
 
             // INIT TramTable BEFORE any timers or bindings use it
             TramTable = new ObservableCollection<TramInfo>();
@@ -2179,6 +2191,7 @@ namespace V2XController
             var pos = e.GetPosition(TileCanvas);
             Console.WriteLine($"[MOUSE] Left button down at ({pos.X:F1}, {pos.Y:F1})");
 
+
             if (currentDrawingMode == DrawingMode.Point)
             {
                 e.Handled = true;
@@ -2372,7 +2385,7 @@ namespace V2XController
                     _drawToSwitchZones = IsSwitchMode();
 
                     int currentZoneCount = ActivationZonesCollection.Count(z => z.IsSwitchZone == _drawToSwitchZones);
-                    int maxZones = _drawToSwitchZones ? 35 : 20; 
+                    int maxZones = _drawToSwitchZones ? 35 : 20;
 
                     if (currentZoneCount >= maxZones)
                     {
@@ -2635,12 +2648,118 @@ namespace V2XController
 
             if (currentDrawingMode == DrawingMode.Polyline)
             {
-                Console.WriteLine("[POLYLINE] Polyline drawing - placeholder");
-                // TODO: Implementovat polyline kreslení
                 e.Handled = true;
+                var position = e.GetPosition(TileCanvas);
+
+                Console.WriteLine($"[POLYLINE] Point added at ({position.X:F1}, {position.Y:F1})");
+
+                if (currentPolyline == null)
+                {
+                    currentPolyline = new Polyline
+                    {
+                        Stroke = _strokeBrush,
+                        StrokeThickness = 3,
+                        IsHitTestVisible = true
+                    };
+                    TileCanvas.Children.Add(currentPolyline);
+                    Panel.SetZIndex(currentPolyline, 100);
+
+                    polylinePoints.Clear();
+                    polylineVertexDots.Clear();
+                    _currentPolylineCircles.Clear();      
+                    _currentPolylineSegments.Clear();     
+                }
+
+                polylinePoints.Add(position);
+                currentPolyline.Points.Add(position);
+
+                double mpp = MetersPerPixel(latitude, zoom);
+                double halfWidthPx = (_polylineZoneWidthMeters / 2.0) / mpp;
+
+                // ===== KRUH =====
+                var circle = new Ellipse
+                {
+                    Width = halfWidthPx * 2,
+                    Height = halfWidthPx * 2,
+                    Fill = new SolidColorBrush(Color.FromArgb(50,
+                        ((SolidColorBrush)_strokeBrush).Color.R,
+                        ((SolidColorBrush)_strokeBrush).Color.G,
+                        ((SolidColorBrush)_strokeBrush).Color.B)),
+                    Stroke = null,
+                    StrokeThickness = 0,
+                    IsHitTestVisible = false,
+                    Tag = "PolylineZoneCircle"
+                };
+                Canvas.SetLeft(circle, position.X - halfWidthPx);
+                Canvas.SetTop(circle, position.Y - halfWidthPx);
+                TileCanvas.Children.Add(circle);
+                Panel.SetZIndex(circle, 50);
+                _currentPolylineCircles.Add(circle);
+
+                var dot = new Ellipse
+                {
+                    Width = 8,
+                    Height = 8,
+                    Fill = Brushes.Black,
+                    Stroke = Brushes.White,
+                    StrokeThickness = 1,
+                    IsHitTestVisible = false,
+                    Tag = "PolylineVertex"
+                };
+                Canvas.SetLeft(dot, position.X - 4);
+                Canvas.SetTop(dot, position.Y - 4);
+                TileCanvas.Children.Add(dot);
+                Panel.SetZIndex(dot, 101);
+                polylineVertexDots.Add(dot);
+
+                if (polylinePoints.Count >= 2)
+                {
+                    var p1 = polylinePoints[^2];
+                    var p2 = polylinePoints[^1];
+
+                    var dir = p2 - p1;
+                    double len = dir.Length;
+                    if (len > 0.01)
+                    {
+                        dir.Normalize();
+                        var perp = new Vector(-dir.Y, dir.X);
+
+                        var topLeft = p1 + perp * halfWidthPx;
+                        var topRight = p2 + perp * halfWidthPx;
+                        var bottomRight = p2 - perp * halfWidthPx;
+                        var bottomLeft = p1 - perp * halfWidthPx;
+
+                        var segmentGeometry = new PathGeometry();
+                        var segFigure = new PathFigure { StartPoint = topLeft, IsClosed = true };
+                        segFigure.Segments.Add(new LineSegment(topRight, true));
+                        segFigure.Segments.Add(new LineSegment(bottomRight, true));
+                        segFigure.Segments.Add(new LineSegment(bottomLeft, true));
+                        segmentGeometry.Figures.Add(segFigure);
+
+                        var segmentPath = new System.Windows.Shapes.Path
+                        {
+                            Data = segmentGeometry,
+                            Fill = new SolidColorBrush(Color.FromArgb(50,
+                                ((SolidColorBrush)_strokeBrush).Color.R,
+                                ((SolidColorBrush)_strokeBrush).Color.G,
+                                ((SolidColorBrush)_strokeBrush).Color.B)),
+                            Stroke = null,
+                            StrokeThickness = 0,
+                            IsHitTestVisible = false,
+                            Tag = "PolylineZoneSegment"
+                        };
+                        TileCanvas.Children.Add(segmentPath);
+                        Panel.SetZIndex(segmentPath, 50);
+                        _currentPolylineSegments.Add(segmentPath);
+                    }
+                }
+
+                Console.WriteLine($"[POLYLINE] Total points: {polylinePoints.Count}");
                 return;
             }
         }
+
+
 
         private void UpdateRectanglePositionFromStartPoint(ActivationZone zone)
         {
@@ -2707,7 +2826,28 @@ namespace V2XController
                 Canvas.SetLeft(dimensionTextBlock, pos.X + 10);
                 Canvas.SetTop(dimensionTextBlock, pos.Y + 10);
             }
+            else if (currentDrawingMode == DrawingMode.Polyline && currentPolyline != null && polylinePoints.Count > 0)
+            {
+                var lastPoint = polylinePoints[^1];
 
+                if (currentPolyline.Points.Count == polylinePoints.Count + 1)
+                {
+                    currentPolyline.Points[^1] = pos;
+                }
+                else
+                {
+                    currentPolyline.Points.Add(pos);
+                }
+
+                double segmentLengthPx = (pos - lastPoint).Length;
+                double mpp = MetersPerPixel(latitude, zoom);
+                double segmentMeters = segmentLengthPx * mpp;
+
+                dimensionTextBlock.Text = $"Segment: {segmentMeters:F1} m";
+                dimensionTextBlock.Visibility = Visibility.Visible;
+                Canvas.SetLeft(dimensionTextBlock, pos.X + 10);
+                Canvas.SetTop(dimensionTextBlock, pos.Y + 10);
+            }
             else
             {
                 dimensionTextBlock.Visibility = Visibility.Collapsed;
@@ -2846,7 +2986,39 @@ namespace V2XController
             var currentPos = e.GetPosition(TileCanvas);
             var dx = currentPos.X - mouseOffset.X;
             var dy = currentPos.Y - mouseOffset.Y;
-          
+
+            if (selectedElement is Polyline polyline)
+            {
+                for (int i = 0; i < polyline.Points.Count; i++)
+                {
+                    polyline.Points[i] = new Point(
+                        polyline.Points[i].X + dx,
+                        polyline.Points[i].Y + dy
+                    );
+                }
+
+                var dots = TileCanvas.Children.OfType<Ellipse>()
+                    .Where(e =>
+                    {
+                        double left = Canvas.GetLeft(e);
+                        double top = Canvas.GetTop(e);
+                        return polyline.Points.Any(p =>
+                            Math.Abs(p.X - (left + 4)) < 5 &&
+                            Math.Abs(p.Y - (top + 4)) < 5);
+                    })
+                    .ToList();
+
+                foreach (var dot in dots)
+                {
+                    Canvas.SetLeft(dot, Canvas.GetLeft(dot) + dx);
+                    Canvas.SetTop(dot, Canvas.GetTop(dot) + dy);
+                }
+
+                isDirty = true;
+                mouseOffset = currentPos;
+                return;
+            }
+
             if (selectedElement is FrameworkElement element)
             {
                 double left = Canvas.GetLeft(element);
@@ -2883,18 +3055,15 @@ namespace V2XController
 
             if (selectedElement is Rectangle rect && activationZones.TryGetValue(rect, out var zone))
             {
-                // Base center = left + width/2, top + height (pre-rotation)
                 double left = Canvas.GetLeft(rect);
                 double top = Canvas.GetTop(rect);
                 var baseCenter = new Point(left + rect.Width / 2.0, top + rect.Height);
 
-                // Avoid recursive reposition while syncing model
                 isUpdatingActivationZone = true;
                 try
                 {
                     zone.StartPoint = baseCenter;
 
-                    // Sync Lat/Lon from base center
                     var lonlat = CanvasPixelsToLatLon(baseCenter, latitude, longitude, zoom);
                     zone.Longitude = lonlat.X;
                     zone.Latitude = lonlat.Y;
@@ -2904,8 +3073,6 @@ namespace V2XController
                     isUpdatingActivationZone = false;
                 }
 
-                // Refresh bounds after move
-                UpdateActivationZoneBounds(zone);
             }
         }
 
@@ -2936,6 +3103,17 @@ namespace V2XController
                 }
 
                 // ignore Esc if not drawing
+                e.Handled = true;
+                return;
+            }
+
+            if (e.Key == Key.Enter && currentDrawingMode == DrawingMode.Polyline && currentPolyline != null)
+            {
+                FinalizePolyline();
+
+                currentDrawingMode = DrawingMode.Polyline;
+                isDrawing = false;
+
                 e.Handled = true;
                 return;
             }
@@ -3081,7 +3259,55 @@ namespace V2XController
 
                     TileCanvas.Children.Remove(rect);
                 }
-                
+                else if (selectedElement is Polyline polyline)
+                {
+                    var mapRect = mapRectangles.FirstOrDefault(r => r.Shape == polyline);
+
+                    var dots = TileCanvas.Children.OfType<Ellipse>()
+                        .Where(e =>
+                        {
+                            double left = Canvas.GetLeft(e);
+                            double top = Canvas.GetTop(e);
+                            return polyline.Points.Any(p =>
+                                Math.Abs(p.X - (left + 4)) < 1 &&
+                                Math.Abs(p.Y - (top + 4)) < 1);
+                        })
+                        .ToList();
+
+                    var polylineSnapshot = polyline;
+                    var mapRectSnapshot = mapRect;
+                    var dotsSnapshot = dots.ToList();
+
+                    AddUndoRedo(
+                        undo: () =>
+                        {
+                            TileCanvas.Children.Add(polylineSnapshot);
+                            foreach (var dot in dotsSnapshot)
+                                TileCanvas.Children.Add(dot);
+                            if (mapRectSnapshot != null && !mapRectangles.Contains(mapRectSnapshot))
+                                mapRectangles.Add(mapRectSnapshot);
+                            isDirty = true;
+                        },
+                        redo: () =>
+                        {
+                            TileCanvas.Children.Remove(polylineSnapshot);
+                            foreach (var dot in dotsSnapshot)
+                                TileCanvas.Children.Remove(dot);
+                            if (mapRectSnapshot != null)
+                                mapRectangles.Remove(mapRectSnapshot);
+                            isDirty = true;
+                        }
+                    );
+
+                    TileCanvas.Children.Remove(polyline);
+                    foreach (var dot in dots)
+                        TileCanvas.Children.Remove(dot);
+
+                    if (mapRect != null)
+                        mapRectangles.Remove(mapRect);
+
+                    Console.WriteLine($"[POLYLINE] Deleted polyline with {polyline.Points.Count} points");
+                }
 
                 selectedElement = null;
                 isDirty = true;
@@ -3103,13 +3329,108 @@ namespace V2XController
             }
         }
 
+        private void FinalizePolyline()
+        {
+            if (currentPolyline == null || polylinePoints.Count < 2)
+            {
+                Console.WriteLine("[POLYLINE] Not enough points to finalize (need at least 2)");
+                CancelAllDrawing();
+                return;
+            }
 
-        // Helper: cancel any in-progress drawing and switch to selection mode
+            if (currentPolyline.Points.Count > polylinePoints.Count)
+            {
+                currentPolyline.Points.RemoveAt(currentPolyline.Points.Count - 1);
+            }
+
+            Console.WriteLine($"[POLYLINE] Finalized with {polylinePoints.Count} points");
+
+            mapRectangles.Add(new MapRectangle(currentPolyline));
+            isDirty = true;
+
+            var polylineToAdd = currentPolyline;
+            var dotsToAdd = new List<Ellipse>(polylineVertexDots);
+            var pointsToAdd = new List<Point>(polylinePoints);
+
+            var circlesToAdd = new List<Ellipse>(_currentPolylineCircles);       
+            var segmentsToAdd = new List<System.Windows.Shapes.Path>(_currentPolylineSegments);
+
+            AddUndoRedo(
+                undo: () =>
+                {
+                    if (TileCanvas.Children.Contains(polylineToAdd))
+                        TileCanvas.Children.Remove(polylineToAdd);
+
+                    foreach (var dot in dotsToAdd)
+                    {
+                        if (TileCanvas.Children.Contains(dot))
+                            TileCanvas.Children.Remove(dot);
+                    }
+
+                    foreach (var circle in circlesToAdd)
+                    {
+                        if (TileCanvas.Children.Contains(circle))
+                            TileCanvas.Children.Remove(circle);
+                    }
+
+                    foreach (var seg in segmentsToAdd)
+                    {
+                        if (TileCanvas.Children.Contains(seg))
+                            TileCanvas.Children.Remove(seg);
+                    }
+
+                    var mr = mapRectangles.FirstOrDefault(m => m.Shape == polylineToAdd);
+                    if (mr != null) mapRectangles.Remove(mr);
+                    isDirty = true;
+                },
+                redo: () =>
+                {
+                    if (!TileCanvas.Children.Contains(polylineToAdd))
+                        TileCanvas.Children.Add(polylineToAdd);
+
+                    foreach (var dot in dotsToAdd)
+                    {
+                        if (!TileCanvas.Children.Contains(dot))
+                            TileCanvas.Children.Add(dot);
+                    }
+
+                    foreach (var circle in circlesToAdd)
+                    {
+                        if (!TileCanvas.Children.Contains(circle))
+                            TileCanvas.Children.Add(circle);
+                    }
+
+                    foreach (var seg in segmentsToAdd)
+                    {
+                        if (!TileCanvas.Children.Contains(seg))
+                            TileCanvas.Children.Add(seg);
+                    }
+
+                    if (!mapRectangles.Any(m => m.Shape == polylineToAdd))
+                        mapRectangles.Add(new MapRectangle(polylineToAdd));
+
+                    Panel.SetZIndex(polylineToAdd, 100);
+                    foreach (var c in circlesToAdd) Panel.SetZIndex(c, 50);
+                    foreach (var s in segmentsToAdd) Panel.SetZIndex(s, 50);
+                    isDirty = true;
+                }
+            );
+
+            currentPolyline = null;
+            polylinePoints.Clear();
+            polylineVertexDots.Clear();
+            _currentPolylineCircles.Clear();      
+            _currentPolylineSegments.Clear();     
+            isDrawing = false;
+
+            Console.WriteLine("[POLYLINE] Ready to draw next polyline");
+        }
+
+
         private bool CancelAllDrawing()
         {
             bool didSomething = false;
 
-            // Cancel rectangle drawing (activation zones)
             if (rectPhase != RectangleDrawPhase.None ||
                 tempHeightLine != null || tempWidthLine != null ||
                 previewRect != null || startPointEllipse != null || secondPointEllipse != null)
@@ -3120,10 +3441,42 @@ namespace V2XController
                 didSomething = true;
             }
 
-            // Cancel railway drawing
-            
+            if (currentDrawingMode == DrawingMode.Polyline && currentPolyline != null)
+            {
+                Console.WriteLine($"[POLYLINE] Cancelled with {polylinePoints.Count} points");
 
-            // Cancel point drawing session (bez mazání existujících bodů)
+                if (TileCanvas.Children.Contains(currentPolyline))
+                    TileCanvas.Children.Remove(currentPolyline);
+
+                foreach (var dot in polylineVertexDots)
+                {
+                    if (TileCanvas.Children.Contains(dot))
+                        TileCanvas.Children.Remove(dot);
+                }
+
+                // **SMAŽ JEN ELEMENTY Z AKTUÁLNÍ SESSION**
+                foreach (var c in _currentPolylineCircles)
+                {
+                    if (TileCanvas.Children.Contains(c))
+                        TileCanvas.Children.Remove(c);
+                }
+
+                foreach (var seg in _currentPolylineSegments)
+                {
+                    if (TileCanvas.Children.Contains(seg))
+                        TileCanvas.Children.Remove(seg);
+                }
+
+                currentPolyline = null;
+                polylinePoints.Clear();
+                polylineVertexDots.Clear();
+                _currentPolylineCircles.Clear();      
+                _currentPolylineSegments.Clear();     
+                isDrawing = false;
+                didSomething = true;
+            }
+
+            // Cancel point drawing session
             if (currentDrawingMode == DrawingMode.Point && isDrawing)
             {
                 isDrawing = false;
@@ -3154,9 +3507,14 @@ namespace V2XController
             }
             TileCanvas.Cursor = Cursors.Arrow;
 
-            // Switch to selection mode so further clicks nebudou kreslit
-            SetSelectionMode();
+            // Switch to selection mode so further clicks dont draw new elements
+            if (PolylineWidthPanel != null && PolylineWidthPanel.Visibility == Visibility.Visible)
+            {
+                PolylineWidthPanel.Visibility = Visibility.Collapsed;
+                didSomething = true;
+            }
 
+            SetSelectionMode();
             return didSomething;
         }
 
@@ -6286,26 +6644,48 @@ namespace V2XController
 
         private void rectButton_Click(object sender, RoutedEventArgs e)
         {
-            SetDrawingMode(DrawingMode.Rectangle);
+            Console.WriteLine("[RECTANGLE] Rectangle drawing mode activated");
+            isSelectionMode = false;
+            currentDrawingMode = DrawingMode.Rectangle;
+
+            if (PolylineWidthPanel != null)
+                PolylineWidthPanel.Visibility = Visibility.Collapsed;
+
             Keyboard.Focus(this);
         }
 
         private void StopDrawing_Click(object sender, RoutedEventArgs e)
         {
+            Console.WriteLine("[STOP DRAWING] Stop drawing clicked");
+
             SetSelectionMode();
             isSelectionMode = true;
+
+            if (PolylineWidthPanel != null)
+                PolylineWidthPanel.Visibility = Visibility.Collapsed;
         }
 
         private void PolylineButton_Click(object sender, RoutedEventArgs e)
         {
+            Console.WriteLine("[POLYLINE] Polyline drawing mode activated");
             isSelectionMode = false;
             currentDrawingMode = DrawingMode.Polyline;
+
+            if (PolylineWidthPanel != null)
+                PolylineWidthPanel.Visibility = Visibility.Visible;
+
             Keyboard.Focus(this);
         }
 
         private void DrawPoints_Click(object sender, RoutedEventArgs e)
         {
-            SetDrawingMode(DrawingMode.Point);
+            Console.WriteLine("[DRAW POINTS] Tram simulation mode activated");
+            isSelectionMode = false;
+            currentDrawingMode = DrawingMode.Point;
+
+            if (PolylineWidthPanel != null)
+                PolylineWidthPanel.Visibility = Visibility.Collapsed;
+
             Keyboard.Focus(this);
         }
 
@@ -7318,12 +7698,24 @@ namespace V2XController
                 {
                     elementsToRemove.Add(child);
                 }
+                else if (child is System.Windows.Shapes.Path path)
+                {
+                    var tag = path.Tag as string;
+                    if (tag == "PolylineZoneSegment")
+                        elementsToRemove.Add(child);
+                }
                 else if (child is Ellipse ellipse)
                 {
-                    if (ellipse.Tag == null ||
-                        (ellipse.Tag.ToString() != "Tram" &&
-                         ellipse.Tag.ToString() != "Srv" &&
-                         ellipse.Tag.ToString() != "Stop"))
+                    var tag = ellipse.Tag as string;
+
+                    if (tag == "PolylineZoneCircle" || tag == "PolylineVertex")
+                    {
+                        elementsToRemove.Add(child);
+                    }
+                    else if (ellipse.Tag == null ||
+                        (tag != "Tram" &&
+                         tag != "Srv" &&
+                         tag != "Stop"))
                     {
                         elementsToRemove.Add(child);
                     }
@@ -7388,15 +7780,15 @@ namespace V2XController
 
             isDirty = true;
 
-            // Reset drawing state so user can draw points again
             rectPhase = RectangleDrawPhase.None;
             isDrawing = false;
             isSelectionMode = true;
-            currentDrawingMode = DrawingMode.Point;
+            currentDrawingMode = DrawingMode.None;
             UpdateHitTestForSelectableElements();
+            CancelAllDrawing();
             Console.WriteLine($"[CLEAR] Complete - zones: {ActivationZonesCollection.Count}");
         }
-        
+
 
         private void Tram1TB_TextChanged(object sender, TextChangedEventArgs e)
         {
@@ -11048,6 +11440,18 @@ namespace V2XController
                 r += b;
             }
             return r;
+        }
+
+        private void PolylineWidthTB_TextChanged(object sender, TextChangedEventArgs e)
+        {
+            var text = PolylineWidthTB?.Text?.Trim() ?? "";
+            text = text.Replace(',', '.');
+
+            if (double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var width) && width > 0)
+            {
+                _polylineZoneWidthMeters = Math.Clamp(width, 1.0, 500.0);
+                Console.WriteLine($"[POLYLINE] Zone width set to {_polylineZoneWidthMeters:F1} m (±{_polylineZoneWidthMeters / 2:F1} m from line)");
+            }
         }
 
     }

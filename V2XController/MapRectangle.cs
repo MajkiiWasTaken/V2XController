@@ -7,7 +7,7 @@ namespace V2XController
 {
     internal class MapRectangle
     {
-        public Rectangle Shape { get; set; }
+        public Shape Shape { get; set; }
         public string Name { get; set; }
         public string Description { get; set; }
         public bool ContainsSomething { get; set; }
@@ -45,9 +45,9 @@ namespace V2XController
             canvas.Children.Add(rect);
         }
 
-        public MapRectangle(Rectangle rectangle)
+        public MapRectangle(Shape shape)
         {
-            Shape = rectangle;
+            Shape = shape;
             Name = "New object";
             Description = "";
             ContainsSomething = false;

@@ -314,14 +314,38 @@ Height="75" HorizontalScrollBarVisibility="Hidden" FontSize="9">
             </GroupBox>
 
             <!-- Map Canvas -->
-            <Border BorderBrush="Black" BorderThickness="2" Width="708" Height="862">
-                <StackPanel>
-                    <Canvas x:Name="TileCanvas" Width="708" Height="862" ClipToBounds="True"
+            <Border BorderBrush="Black" BorderThickness="2" Width="710" Height="864">
+                <Grid>
+                    <Canvas x:Name="TileCanvas" Width="706" Height="860" ClipToBounds="True"
                 Background="Transparent"
                 MouseLeftButtonDown="TileCanvas_MouseLeftButtonDown"
                 MouseMove="TileCanvas_MouseMove"
                 MouseLeftButtonUp="TileCanvas_MouseLeftButtonUp"/>
-                </StackPanel>
+
+                    <StackPanel x:Name="PolylineWidthPanel" 
+                    Visibility="Collapsed"
+                    Orientation="Horizontal" 
+                    HorizontalAlignment="Left" 
+                    VerticalAlignment="Top"
+                    Margin="5,5,0,0"
+                    Background="White"
+                    Panel.ZIndex="9999">
+                        <TextBlock Text="Polyline Width:" 
+                       VerticalAlignment="Center" 
+                       Margin="3,0,3,0"
+                       FontSize="10"/>
+                        <TextBox x:Name="PolylineWidthTB" 
+                     Width="40" 
+                     Height="18"
+                     VerticalContentAlignment="Center"
+                     FontSize="10"
+                     Text="50"/>
+                        <TextBlock Text="m" 
+                       VerticalAlignment="Center" 
+                       Margin="2,0,3,0"
+                       FontSize="10"/>
+                    </StackPanel>
+                </Grid>
             </Border>
 
             <!-- Map Controls -->
