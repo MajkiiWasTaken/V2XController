@@ -2987,7 +2987,7 @@ namespace V2XController
                         v1.Normalize();
                         v2.Normalize();
                         double dotProduct = v1 * v2;
-                        if (dotProduct < Math.Cos(15.0 * Math.PI / 180.0))
+                        if (dotProduct < Math.Cos(0.1 * Math.PI / 180.0))
                             needCap = true;
                     }
                 }
