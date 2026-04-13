@@ -22,10 +22,6 @@ using System.Xml.Linq;
 using System.Runtime.InteropServices;
 
 //TODO:
-//fix the map panning (now it works but its not as we wanted) !!!
-//modbus tcp
-//serial tunnel
-
 
 namespace V2XController
 {
@@ -453,6 +449,9 @@ namespace V2XController
         private readonly Dictionary<string, TextBlock> _liveAccuracyTextById = new();
 
         private readonly Dictionary<Polyline, List<ActivationZone>> _polylineToSegmentZones = new();
+        private readonly List<PolylineData> _drawnPolylines = new List<PolylineData>();
+        private List<(double lat, double lon)> _currentPolylineCircleGeoPoints = new List<(double, double)>();
+        private int _polylineCommittedPointsCount = 0;
 
 
         private ProtobufWindow _protobufWindow;
@@ -1294,39 +1293,95 @@ namespace V2XController
             {
                 var poly = kv.Key;
 
-                if (_isDrawingPolyline && poly == currentPolyline)
-                    continue;
-
-                if (selectedElement == poly)
-                    continue;
-
                 if (selectedElement is Ellipse selDot &&
                     _polylineVertexMap.TryGetValue(selDot, out var selInfo) &&
                     selInfo.polyline == poly)
                     continue;
 
-                var geoPoints = kv.Value;
+                var geoPointsList = kv.Value;
+                if (geoPointsList.Count == 0)
+                    continue;
 
+                bool isActiveDrawing = (_isDrawingPolyline && poly == currentPolyline);
                 double mpp = MetersPerPixel(latitude, zoom);
                 double halfWidthPx = (_polylineZoneWidthMeters / 2.0) / mpp;
 
-                for (int i = 0; i < geoPoints.Count && i < poly.Points.Count; i++)
+                // Update ALL points from geo
+                for (int i = 0; i < geoPointsList.Count; i++)
                 {
-                    var (gLat, gLon) = geoPoints[i];
+                    var (gLat, gLon) = geoPointsList[i];
                     var canvasPos = ConvertLatLonToCanvasXY(gLat, gLon);
-                    poly.Points[i] = new Point(canvasPos.x, canvasPos.y);
+                    var newCanvasPoint = new Point(canvasPos.x, canvasPos.y);
 
-                    // Update vertex dots
+                    if (i < poly.Points.Count)
+                        poly.Points[i] = newCanvasPoint;
+                    else
+                        poly.Points.Add(newCanvasPoint);
+
+                    if (poly == currentPolyline && i < polylinePoints.Count)
+                        polylinePoints[i] = newCanvasPoint;
+
                     foreach (var dotKv in _polylineVertexMap.Where(d => d.Value.polyline == poly && d.Value.pointIndex == i))
                     {
                         var dot = dotKv.Key;
                         Canvas.SetLeft(dot, canvasPos.x - 4);
                         Canvas.SetTop(dot, canvasPos.y - 4);
+
+                        if (_polylineVertexToCircle.TryGetValue(dot, out var circle))
+                        {
+                            Canvas.SetLeft(circle, canvasPos.x - halfWidthPx);
+                            Canvas.SetTop(circle, canvasPos.y - halfWidthPx);
+                            circle.Width = halfWidthPx * 2;
+                            circle.Height = halfWidthPx * 2;
+                        }
                     }
                 }
 
-                // Rebuild entire zone with merged geometry
-                RebuildPolylineZone(poly, poly.Points.ToList(), halfWidthPx);
+                var rebuildPoints = GetCommittedPolylinePoints(poly);
+
+                if (rebuildPoints.Count >= 2)
+                {
+                    if (isActiveDrawing)
+                    {
+                        RebuildPolylineZone(poly, rebuildPoints, halfWidthPx);
+                    }
+                    else if (_polylineToSegmentZones.ContainsKey(poly) && _polylineToSegmentZones[poly].Count > 0)
+                    {
+                        RebuildPolylineZoneWithVariableWidths(poly, rebuildPoints);
+                    }
+                    else
+                    {
+                        RebuildPolylineZone(poly, rebuildPoints, halfWidthPx);
+                    }
+                }
+            }
+        }
+
+        private List<Point> GetCommittedPolylinePoints(Polyline poly)
+        {
+            var points = poly.Points.ToList();
+
+            if (_isDrawingPolyline &&
+                poly == currentPolyline &&
+                points.Count > polylinePoints.Count)
+            {
+                points.RemoveAt(points.Count - 1);
+            }
+
+            return points;
+        }
+
+        private void CollapsePolylinePreview()
+        {
+            if (currentPolyline == null)
+                return;
+
+            if (polylinePoints.Count == 0)
+                return;
+
+            if (currentPolyline.Points.Count == polylinePoints.Count + 1)
+            {
+                currentPolyline.Points[^1] = polylinePoints[^1];
             }
         }
 
@@ -2725,6 +2780,7 @@ namespace V2XController
                         var idx = vertexInfo.pointIndex;
 
                         bool isEndpoint = (idx == 0 || idx == poly.Points.Count - 1);
+                        // In TileCanvas_MouseLeftButtonDown, in the section where you continue from existing polyline:
                         if (isEndpoint)
                         {
                             Console.WriteLine($"[POLYLINE] Continuing from existing polyline (point {idx})");
@@ -2766,7 +2822,7 @@ namespace V2XController
                                 for (int i = 0; i < polylineVertexDots.Count; i++)
                                     _polylineVertexMap[polylineVertexDots[i]] = (poly, i);
                             }
-                            else 
+                            else
                             {
                                 polylinePoints.AddRange(poly.Points);
 
@@ -2779,15 +2835,30 @@ namespace V2XController
                                 }
                             }
 
+                            // REMEMBER how many points were already committed
+                            _polylineCommittedPointsCount = polylinePoints.Count;
+
+                            // Load existing segments into _currentPolylineSegments
                             if (_polylineToSegments.TryGetValue(poly, out var segs))
+                            {
+                                _currentPolylineSegments.Clear();
                                 _currentPolylineSegments.AddRange(segs);
+                            }
+                            else
+                            {
+                                // If no segments exist yet, create the dictionary entry
+                                if (!_polylineToSegments.ContainsKey(poly))
+                                    _polylineToSegments[poly] = new List<System.Windows.Shapes.Path>();
+                                _currentPolylineSegments.Clear();
+                            }
 
                             var mr = mapRectangles.FirstOrDefault(m => m.Shape == poly);
                             if (mr != null)
                                 mapRectangles.Remove(mr);
 
-                            Console.WriteLine($"[POLYLINE] Resuming with {polylinePoints.Count} existing points");
-                            return; 
+                            Console.WriteLine($"[POLYLINE] Resuming with {polylinePoints.Count} existing points (committed: {_polylineCommittedPointsCount})");
+                            Console.WriteLine($"[POLYLINE] Loaded {_currentPolylineSegments.Count} existing zone segments");
+                            return;
                         }
                     }
 
@@ -2804,19 +2875,33 @@ namespace V2XController
                     polylineVertexDots.Clear();
                     _currentPolylineCircles.Clear();
                     _currentPolylineSegments.Clear();
+                    _polylineCommittedPointsCount = 0;
 
                     _polylineToSegments[currentPolyline] = new List<System.Windows.Shapes.Path>();
+
+                    // Initialize geo points list
+                    if (!_polylineGeoPoints.ContainsKey(currentPolyline))
+                        _polylineGeoPoints[currentPolyline] = new List<(double, double)>();
                 }
 
-                Console.WriteLine($"[POLYLINE] Point added at ({position.X:F1}, {position.Y:F1})");
-
-                polylinePoints.Add(position);
-                currentPolyline.Points.Add(position);
-
                 var (geoLat, geoLon) = ConvertCanvasXYToLatLon(position.X, position.Y, zoom);
+
+                // Add to geo storage
                 if (!_polylineGeoPoints.ContainsKey(currentPolyline))
                     _polylineGeoPoints[currentPolyline] = new List<(double, double)>();
                 _polylineGeoPoints[currentPolyline].Add((geoLat, geoLon));
+
+                // ALSO store geo for circle
+                _currentPolylineCircleGeoPoints.Add((geoLat, geoLon));
+
+                // Convert back to canvas
+                var canvasPos = ConvertLatLonToCanvasXY(geoLat, geoLon);
+                var canvasPoint = new Point(canvasPos.x, canvasPos.y);
+
+                Console.WriteLine($"[POLYLINE] Point {polylinePoints.Count + 1}: Geo({geoLat:F7}, {geoLon:F7})");
+
+                polylinePoints.Add(canvasPoint);
+                currentPolyline.Points.Add(canvasPoint);
 
                 double mpp = MetersPerPixel(latitude, zoom);
                 double halfWidthPx = (_polylineZoneWidthMeters / 2.0) / mpp;
@@ -2834,8 +2919,8 @@ namespace V2XController
                     IsHitTestVisible = false,
                     Tag = "PolylineZoneCircle"
                 };
-                Canvas.SetLeft(circle, position.X - halfWidthPx);
-                Canvas.SetTop(circle, position.Y - halfWidthPx);
+                Canvas.SetLeft(circle, canvasPoint.X - halfWidthPx);
+                Canvas.SetTop(circle, canvasPoint.Y - halfWidthPx);
                 TileCanvas.Children.Add(circle);
                 Panel.SetZIndex(circle, 50);
                 _currentPolylineCircles.Add(circle);
@@ -2850,8 +2935,8 @@ namespace V2XController
                     IsHitTestVisible = true,
                     Tag = "PolylineVertex"
                 };
-                Canvas.SetLeft(dot, position.X - 4);
-                Canvas.SetTop(dot, position.Y - 4);
+                Canvas.SetLeft(dot, canvasPoint.X - 4);
+                Canvas.SetTop(dot, canvasPoint.Y - 4);
 
                 dot.MouseEnter += PolylineVertex_MouseEnter;
                 dot.MouseLeave += PolylineVertex_MouseLeave;
@@ -2865,7 +2950,7 @@ namespace V2XController
 
                 if (polylinePoints.Count >= 2)
                 {
-                    // Rebuild entire zone as single merged geometry
+                    // Use simple rebuild during drawing (no segments created yet)
                     RebuildPolylineZone(currentPolyline, polylinePoints, halfWidthPx);
                 }
 
@@ -2876,15 +2961,19 @@ namespace V2XController
 
         private void RebuildPolylineZone(Polyline polyline, List<Point> points, double halfWidthPx)
         {
-            // Remove old zone shapes
-            var oldSegments = _polylineToSegments.ContainsKey(polyline)
-                ? _polylineToSegments[polyline].ToList()
-                : new List<System.Windows.Shapes.Path>();
-
-            foreach (var seg in oldSegments)
+            // Remove old zone shapes AND center lines
+            if (_polylineToSegments.ContainsKey(polyline))
             {
-                if (TileCanvas.Children.Contains(seg))
-                    TileCanvas.Children.Remove(seg);
+                foreach (var shape in _polylineToSegments[polyline])
+                {
+                    if (TileCanvas.Children.Contains(shape))
+                        TileCanvas.Children.Remove(shape);
+                }
+                _polylineToSegments[polyline].Clear();
+            }
+            else
+            {
+                _polylineToSegments[polyline] = new List<System.Windows.Shapes.Path>();
             }
 
             var oldCircles = _currentPolylineCircles.ToList();
@@ -2893,41 +2982,34 @@ namespace V2XController
                 if (TileCanvas.Children.Contains(circle))
                     TileCanvas.Children.Remove(circle);
             }
-
-            if (_polylineToSegments.ContainsKey(polyline))
-                _polylineToSegments[polyline].Clear();
-            else
-                _polylineToSegments[polyline] = new List<System.Windows.Shapes.Path>();
-
             _currentPolylineCircles.Clear();
 
             if (points.Count < 1) return;
 
-            SolidColorBrush zoneBrush = _strokeBrush as SolidColorBrush ?? new SolidColorBrush(Colors.Red);
-
-            if (_polylineToSegmentZones.TryGetValue(polyline, out var segmentZones) && segmentZones.Count > 0)
+            // Get all segments for this polyline to access individual colors
+            List<ActivationZone> segmentZones = null;
+            if (_polylineToSegmentZones.TryGetValue(polyline, out segmentZones))
             {
-                var firstZone = segmentZones[0];
-                if (!string.IsNullOrWhiteSpace(firstZone.Color))
-                {
-                    var colorBrush = TryBrushFromColor(firstZone.Color);
-                    if (colorBrush != null)
-                    {
-                        zoneBrush = colorBrush;
-                    }
-                }
+                segmentZones = segmentZones.OrderBy(s => s.SegmentIndex).ToList();
             }
+
+            // Default brush
+            SolidColorBrush defaultBrush = _strokeBrush as SolidColorBrush ?? new SolidColorBrush(Colors.Red);
 
             if (points.Count == 1)
             {
+                SolidColorBrush zoneBrush = defaultBrush;
+                if (segmentZones != null && segmentZones.Count > 0)
+                {
+                    var colorBrush = TryBrushFromColor(segmentZones[0].Color);
+                    if (colorBrush != null) zoneBrush = colorBrush;
+                }
+
                 var circle = new Ellipse
                 {
                     Width = halfWidthPx * 2,
                     Height = halfWidthPx * 2,
-                    Fill = new SolidColorBrush(Color.FromArgb(50,
-                        zoneBrush.Color.R,
-                        zoneBrush.Color.G,
-                        zoneBrush.Color.B)),
+                    Fill = MakeAlphaBrush(zoneBrush, 60),
                     Stroke = null,
                     IsHitTestVisible = false,
                     Tag = "PolylineZoneCircle"
@@ -2940,77 +3022,147 @@ namespace V2XController
                 return;
             }
 
-            var pathGeometry = new PathGeometry
+            // Group consecutive segments with the same color
+            var colorGroups = new List<(int startIndex, int endIndex, string color)>();
+
+            if (segmentZones != null && segmentZones.Count > 0)
             {
-                FillRule = FillRule.Nonzero
-            };
+                string currentColor = segmentZones[0].Color;
+                int startIdx = 0;
 
-            for (int i = 0; i < points.Count - 1; i++)
+                for (int i = 1; i < segmentZones.Count; i++)
+                {
+                    if (segmentZones[i].Color != currentColor)
+                    {
+                        colorGroups.Add((startIdx, i - 1, currentColor));
+                        currentColor = segmentZones[i].Color;
+                        startIdx = i;
+                    }
+                }
+                colorGroups.Add((startIdx, segmentZones.Count - 1, currentColor));
+            }
+            else
             {
-                var p1 = points[i];
-                var p2 = points[i + 1];
-
-                var dir = p2 - p1;
-                double len = dir.Length;
-                if (len < 0.01) continue;
-
-                dir.Normalize();
-                var perp = new Vector(-dir.Y, dir.X);
-
-                var topLeft = p1 + perp * halfWidthPx;
-                var topRight = p2 + perp * halfWidthPx;
-                var bottomRight = p2 - perp * halfWidthPx;
-                var bottomLeft = p1 - perp * halfWidthPx;
-
-                var figure = new PathFigure { StartPoint = topLeft, IsClosed = true };
-                figure.Segments.Add(new LineSegment(topRight, true));
-                figure.Segments.Add(new LineSegment(bottomRight, true));
-                figure.Segments.Add(new LineSegment(bottomLeft, true));
-                pathGeometry.Figures.Add(figure);
+                colorGroups.Add((0, points.Count - 2, defaultBrush.Color.ToString()));
             }
 
-            for (int i = 0; i < points.Count; i++)
+            // Draw zone areas
+            foreach (var group in colorGroups)
             {
-                bool needCap = false;
+                var pathGeometry = new PathGeometry { FillRule = FillRule.Nonzero };
 
-                if (i == 0 || i == points.Count - 1)
+                for (int i = group.startIndex; i <= group.endIndex && i < points.Count - 1; i++)
                 {
-                    needCap = true;
+                    var p1 = points[i];
+                    var p2 = points[i + 1];
+
+                    var dir = p2 - p1;
+                    double len = dir.Length;
+                    if (len < 0.01) continue;
+
+                    dir.Normalize();
+                    var perp = new Vector(-dir.Y, dir.X);
+
+                    var topLeft = p1 + perp * halfWidthPx;
+                    var topRight = p2 + perp * halfWidthPx;
+                    var bottomRight = p2 - perp * halfWidthPx;
+                    var bottomLeft = p1 - perp * halfWidthPx;
+
+                    var figure = new PathFigure { StartPoint = topLeft, IsClosed = true };
+                    figure.Segments.Add(new LineSegment(topRight, true));
+                    figure.Segments.Add(new LineSegment(bottomRight, true));
+                    figure.Segments.Add(new LineSegment(bottomLeft, true));
+                    pathGeometry.Figures.Add(figure);
                 }
-                else
-                {
-                    var v1 = points[i] - points[i - 1];
-                    var v2 = points[i + 1] - points[i];
 
-                    if (v1.Length > 0.01 && v2.Length > 0.01)
+                for (int i = group.startIndex; i <= group.endIndex + 1 && i < points.Count; i++)
+                {
+                    bool needCap = false;
+
+                    if (i == 0 || i == points.Count - 1)
                     {
-                        v1.Normalize();
-                        v2.Normalize();
-                        double dotProduct = v1 * v2;
-                        if (dotProduct < Math.Cos(0.1 * Math.PI / 180.0))
-                            needCap = true;
+                        needCap = true;
+                    }
+                    else if (i == group.startIndex && i > 0)
+                    {
+                        needCap = true;
+                    }
+                    else if (i == group.endIndex + 1 && i < points.Count - 1)
+                    {
+                        needCap = true;
+                    }
+                    else if (i > 0 && i < points.Count - 1)
+                    {
+                        var v1 = points[i] - points[i - 1];
+                        var v2 = points[i + 1] - points[i];
+
+                        if (v1.Length > 0.01 && v2.Length > 0.01)
+                        {
+                            v1.Normalize();
+                            v2.Normalize();
+                            double dotProduct = v1 * v2;
+                            if (dotProduct < Math.Cos(0.1 * Math.PI / 180.0))
+                                needCap = true;
+                        }
+                    }
+
+                    if (needCap)
+                    {
+                        var capGeometry = new EllipseGeometry(points[i], halfWidthPx, halfWidthPx);
+                        pathGeometry = Geometry.Combine(pathGeometry, capGeometry, GeometryCombineMode.Union, null);
                     }
                 }
 
-                if (needCap)
+                SolidColorBrush groupBrush = TryBrushFromColor(group.color) ?? defaultBrush;
+
+                var groupPath = new System.Windows.Shapes.Path
                 {
-                    var capGeometry = new EllipseGeometry(points[i], halfWidthPx, halfWidthPx);
-                    pathGeometry = Geometry.Combine(pathGeometry, capGeometry, GeometryCombineMode.Union, null);
-                }
+                    Data = pathGeometry,
+                    Fill = MakeAlphaBrush(groupBrush, 60),
+                    Stroke = null,
+                    IsHitTestVisible = false,
+                    Tag = $"PolylineZone_{group.startIndex}_{group.endIndex}"
+                };
+
+                TileCanvas.Children.Add(groupPath);
+                Panel.SetZIndex(groupPath, 50);
+                _polylineToSegments[polyline].Add(groupPath);
             }
 
-            var zonePath = new System.Windows.Shapes.Path
+            // Draw center lines with matching colors
+            foreach (var group in colorGroups)
             {
-                Data = pathGeometry,
-                Fill = MakeAlphaBrush(zoneBrush, 60),
-                Stroke = null,
-                IsHitTestVisible = false,
-                Tag = "PolylineZoneMerged"
-            };
+                SolidColorBrush groupBrush = TryBrushFromColor(group.color) ?? defaultBrush;
 
-            TileCanvas.Children.Add(zonePath);
-            Panel.SetZIndex(zonePath, 50);
-            _polylineToSegments[polyline].Add(zonePath);
+                // Create path for center line
+                var lineGeometry = new PathGeometry();
+                var lineFigure = new PathFigure
+                {
+                    StartPoint = points[group.startIndex],
+                    IsClosed = false
+                };
+
+                for (int i = group.startIndex + 1; i <= group.endIndex + 1 && i < points.Count; i++)
+                {
+                    lineFigure.Segments.Add(new LineSegment(points[i], true));
+                }
+
+                lineGeometry.Figures.Add(lineFigure);
+
+                var centerLinePath = new System.Windows.Shapes.Path
+                {
+                    Data = lineGeometry,
+                    Stroke = groupBrush,
+                    StrokeThickness = 2,
+                    Fill = null,
+                    IsHitTestVisible = false,
+                    Tag = $"PolylineCenterLine_{group.startIndex}_{group.endIndex}"
+                };
+
+                TileCanvas.Children.Add(centerLinePath);
+                Panel.SetZIndex(centerLinePath, 100);
+                _polylineToSegments[polyline].Add(centerLinePath);
+            }
         }
 
         private void PolylineVertex_MouseEnter(object sender, MouseEventArgs e)
@@ -3152,11 +3304,17 @@ namespace V2XController
             }
             else if (currentDrawingMode == DrawingMode.Polyline && _isDrawingPolyline)
             {
+                if (e.MiddleButton == MouseButtonState.Pressed || isMiddleMousePanning)
+                {
+                    CollapsePolylinePreview();
+                    dimensionTextBlock.Visibility = Visibility.Collapsed;
+                    return;
+                }
+
                 if (currentPolyline != null && polylinePoints.Count > 0)
                 {
                     var lastPoint = polylinePoints[^1];
 
-                    // Update preview line
                     if (currentPolyline.Points.Count == polylinePoints.Count + 1)
                     {
                         currentPolyline.Points[^1] = pos;
@@ -3166,7 +3324,6 @@ namespace V2XController
                         currentPolyline.Points.Add(pos);
                     }
 
-                    // Calculate and display segment length
                     double segmentLengthPx = (pos - lastPoint).Length;
                     double mpp = MetersPerPixel(latitude, zoom);
                     double segmentMeters = segmentLengthPx * mpp;
@@ -3178,16 +3335,11 @@ namespace V2XController
                 }
                 else
                 {
-                    // First point - show coordinates or waiting message
                     dimensionTextBlock.Text = "Click to place first point";
                     dimensionTextBlock.Visibility = Visibility.Visible;
                     Canvas.SetLeft(dimensionTextBlock, pos.X + 10);
                     Canvas.SetTop(dimensionTextBlock, pos.Y + 10);
                 }
-            }
-            else
-            {
-                dimensionTextBlock.Visibility = Visibility.Collapsed;
             }
         }
 
@@ -3714,55 +3866,118 @@ namespace V2XController
 
             Console.WriteLine($"[POLYLINE] Deleting vertex {vertexIndex}/{polyline.Points.Count}");
 
-            // Find and remove vertex dot
-            Ellipse dotToRemove = null;
-            foreach (var kv in _polylineVertexMap.Where(kv => kv.Value.polyline == polyline && kv.Value.pointIndex == vertexIndex).ToList())
+            // CRITICAL: Suspend property change handling during deletion
+            var wasUpdating = isUpdatingActivationZone;
+            isUpdatingActivationZone = true;
+
+            try
             {
-                dotToRemove = kv.Key;
-                break;
-            }
+                // Find and remove vertex dot
+                Ellipse dotToRemove = null;
+                foreach (var kv in _polylineVertexMap.Where(kv => kv.Value.polyline == polyline && kv.Value.pointIndex == vertexIndex).ToList())
+                {
+                    dotToRemove = kv.Key;
+                    break;
+                }
 
-            if (dotToRemove != null)
+                if (dotToRemove != null)
+                {
+                    TileCanvas.Children.Remove(dotToRemove);
+                    _polylineVertexMap.Remove(dotToRemove);
+                    _polylineVertexToCircle.Remove(dotToRemove);
+
+                    if (_hoveredVertex == dotToRemove)
+                        _hoveredVertex = null;
+                }
+
+                // Remove point from polyline
+                polyline.Points.RemoveAt(vertexIndex);
+
+                // Remove geo point
+                if (_polylineGeoPoints.TryGetValue(polyline, out var geoList) && vertexIndex < geoList.Count)
+                {
+                    geoList.RemoveAt(vertexIndex);
+                }
+
+                // Reindex remaining vertex mappings
+                var toReindex = _polylineVertexMap.Where(kv => kv.Value.polyline == polyline && kv.Value.pointIndex > vertexIndex).ToList();
+                foreach (var kv in toReindex)
+                {
+                    _polylineVertexMap[kv.Key] = (polyline, kv.Value.pointIndex - 1);
+                }
+
+                // Remove corresponding segment from table and reindex
+                if (_polylineToSegmentZones.TryGetValue(polyline, out var segments))
+                {
+                    int segmentIndexToRemove = vertexIndex == 0 ? 0 : vertexIndex - 1;
+
+                    if (segmentIndexToRemove < segments.Count)
+                    {
+                        var segmentToRemove = segments.FirstOrDefault(s => s.SegmentIndex == segmentIndexToRemove);
+                        if (segmentToRemove != null)
+                        {
+                            Console.WriteLine($"[POLYLINE] Removing segment {segmentIndexToRemove} from table");
+
+                            // Unsubscribe from property changed to avoid cascading events
+                            segmentToRemove.PropertyChanged -= ActivationZone_PropertyChanged;
+
+                            ActivationZonesCollection.Remove(segmentToRemove);
+                            _polylineRows.Remove(segmentToRemove);
+                            segments.Remove(segmentToRemove);
+                        }
+                    }
+
+                    // Reindex all segments after the deleted one
+                    var segmentsToReindex = segments.Where(s => s.SegmentIndex > segmentIndexToRemove).OrderBy(s => s.SegmentIndex).ToList();
+                    foreach (var seg in segmentsToReindex)
+                    {
+                        int oldIndex = seg.SegmentIndex;
+                        seg.SegmentIndex = oldIndex - 1;
+
+                        // Update segment properties WITHOUT triggering PropertyChanged
+                        if (seg.SegmentIndex >= 0 && seg.SegmentIndex < polyline.Points.Count - 1)
+                        {
+                            var p1Canvas = polyline.Points[seg.SegmentIndex];
+                            var p2Canvas = polyline.Points[seg.SegmentIndex + 1];
+
+                            var (lat1, lon1) = ConvertCanvasXYToLatLon(p1Canvas.X, p1Canvas.Y, zoom);
+                            var (lat2, lon2) = ConvertCanvasXYToLatLon(p2Canvas.X, p2Canvas.Y, zoom);
+
+                            // Directly update backing fields to avoid PropertyChanged
+                            seg.Latitude = (lat1 + lat2) / 2;
+                            seg.Longitude = (lon1 + lon2) / 2;
+                            seg.Height = HaversineMeters(lat1, lon1, lat2, lon2);
+                            seg.Azimuth = CalculateAzimuth(p1Canvas, p2Canvas);
+
+                            // Update name
+                            seg.UpdateName();
+                        }
+
+                        Console.WriteLine($"[POLYLINE] Reindexed segment {oldIndex} -> {seg.SegmentIndex}");
+                    }
+                }
+
+                // Check if polyline still valid
+                if (polyline.Points.Count <= 1)
+                {
+                    Console.WriteLine("[POLYLINE] <2 points - deleting entire polyline");
+                    DeleteEntirePolyline(polyline);
+                    return;
+                }
+
+                // Rebuild zone with merged geometry
+                double mpp = MetersPerPixel(latitude, zoom);
+                double halfWidthPx = (_polylineZoneWidthMeters / 2.0) / mpp;
+                RebuildPolylineZone(polyline, polyline.Points.ToList(), halfWidthPx);
+
+                isDirty = true;
+                Console.WriteLine($"[POLYLINE] Vertex deleted. Remaining: {polyline.Points.Count}");
+            }
+            finally
             {
-                TileCanvas.Children.Remove(dotToRemove);
-                _polylineVertexMap.Remove(dotToRemove);
-                _polylineVertexToCircle.Remove(dotToRemove);
-
-                if (_hoveredVertex == dotToRemove)
-                    _hoveredVertex = null;
+                // Restore original state
+                isUpdatingActivationZone = wasUpdating;
             }
-
-            // Remove point from polyline
-            polyline.Points.RemoveAt(vertexIndex);
-
-            // Remove geo point
-            if (_polylineGeoPoints.TryGetValue(polyline, out var geoList) && vertexIndex < geoList.Count)
-            {
-                geoList.RemoveAt(vertexIndex);
-            }
-
-            // Reindex remaining vertex mappings
-            var toReindex = _polylineVertexMap.Where(kv => kv.Value.polyline == polyline && kv.Value.pointIndex > vertexIndex).ToList();
-            foreach (var kv in toReindex)
-            {
-                _polylineVertexMap[kv.Key] = (polyline, kv.Value.pointIndex - 1);
-            }
-
-            // Check if polyline still valid
-            if (polyline.Points.Count < 2)
-            {
-                Console.WriteLine("[POLYLINE] <2 points - deleting entire polyline");
-                DeleteEntirePolyline(polyline);
-                return;
-            }
-
-            // Rebuild zone with merged geometry
-            double mpp = MetersPerPixel(latitude, zoom);
-            double halfWidthPx = (_polylineZoneWidthMeters / 2.0) / mpp;
-            RebuildPolylineZone(polyline, polyline.Points.ToList(), halfWidthPx);
-
-            isDirty = true;
-            Console.WriteLine($"[POLYLINE] Vertex deleted. Remaining: {polyline.Points.Count}");
         }
 
         private void DeleteEntirePolyline(Polyline polyline)
@@ -3819,13 +4034,47 @@ namespace V2XController
                 currentPolyline.Points.RemoveAt(currentPolyline.Points.Count - 1);
             }
 
-            Console.WriteLine($"[POLYLINE] Finalized with {polylinePoints.Count} points");
+            Console.WriteLine($"[POLYLINE] ========== FINALIZING POLYLINE ==========");
+            Console.WriteLine($"[POLYLINE] Total vertices: {polylinePoints.Count}");
+
+            // Generate unique ID for this polyline
+            var polylineId = Guid.NewGuid();
+            var createdAt = DateTime.Now;
+
+            var polylineData = new PolylineData
+            {
+                PolylineId = polylineId,
+                CreatedAt = createdAt,
+                ColorHex = ((SolidColorBrush)_strokeBrush).Color.ToString()
+            };
+
+            // Log and store all vertices with canvas and geo coordinates
+            for (int i = 0; i < polylinePoints.Count; i++)
+            {
+                var canvasPoint = polylinePoints[i];
+                var (lat, lon) = ConvertCanvasXYToLatLon(canvasPoint.X, canvasPoint.Y, zoom);
+
+                var vertexData = new PolylinePointData
+                {
+                    VertexIndex = i,
+                    CanvasPosition = canvasPoint,
+                    Latitude = lat,
+                    Longitude = lon,
+                    Timestamp = createdAt
+                };
+
+                polylineData.Vertices.Add(vertexData);
+
+                Console.WriteLine($"[POLYLINE] Vertex {i + 1}: Canvas({canvasPoint.X:F2}, {canvasPoint.Y:F2}) → Geo({lat:F7}, {lon:F7})");
+            }
 
             mapRectangles.Add(new MapRectangle(currentPolyline));
             isDirty = true;
 
             var addedSegments = new List<ActivationZone>();
+            double totalPolylineLength = 0;
 
+            // Create individual segment for each edge
             for (int i = 0; i < polylinePoints.Count - 1; i++)
             {
                 Point p1 = polylinePoints[i];
@@ -3838,16 +4087,40 @@ namespace V2XController
                 double centerLon = (lon1 + lon2) / 2;
 
                 double lengthMeters = HaversineMeters(lat1, lon1, lat2, lon2);
+                totalPolylineLength += lengthMeters;
                 int azimuth = CalculateAzimuth(p1, p2);
 
-                var polylineSegments = ActivationZonesCollection.Where(z => _polylineRows.Contains(z)).ToList();
-                var nextId = polylineSegments.Count > 0
-                    ? polylineSegments.Max(z => z.SubZone) + 1
-                    : 1;
+                // Determine segment type based on position in polyline
+                string segmentType = "";
+                if (polylinePoints.Count >= 3)
+                {
+                    int totalSegments = polylinePoints.Count - 1;
+                    if (i == 0)
+                        segmentType = "P";
+                    else if (i == totalSegments - 1)
+                        segmentType = "V";
+                    else
+                        segmentType = "B";
+                }
+
+                var segmentData = new PolylineSegmentData
+                {
+                    SegmentIndex = i,
+                    StartPoint = polylineData.Vertices[i],
+                    EndPoint = polylineData.Vertices[i + 1],
+                    LengthMeters = lengthMeters,
+                    AzimuthDegrees = azimuth,
+                    WidthMeters = _polylineZoneWidthMeters,
+                    SegmentType = segmentType
+                };
+
+                polylineData.Segments.Add(segmentData);
 
                 var segment = new ActivationZone
                 {
-                    Name = $"Segment {nextId}",
+                    PolylineId = polylineId,
+                    SegmentIndex = i,
+                    SegmentType = segmentType,
                     Latitude = centerLat,
                     Longitude = centerLon,
                     Width = _polylineZoneWidthMeters,
@@ -3855,30 +4128,61 @@ namespace V2XController
                     Azimuth = azimuth,
                     Color = ((SolidColorBrush)_strokeBrush).Color.ToString(),
                     MainZone = 0,
-                    SubZone = nextId,
+                    SubZone = i,
                     IsSwitchZone = false
                 };
 
-                _polylineRows.Add(segment);
+                segment.UpdateName();
 
+                _polylineRows.Add(segment);
                 ActivationZonesCollection.Add(segment);
                 addedSegments.Add(segment);
 
-                Console.WriteLine($"[POLYLINE] Segment {nextId}: Len={lengthMeters:F2}m, Az={azimuth}°, Lat={centerLat:F6}, Lon={centerLon:F6}");
+                Console.WriteLine($"[POLYLINE] Segment {i + 1}/{polylinePoints.Count - 1}: '{segment.Name}'");
+                Console.WriteLine($"           From: ({lat1:F7}, {lon1:F7})");
+                Console.WriteLine($"           To:   ({lat2:F7}, {lon2:F7})");
+                Console.WriteLine($"           Center: ({centerLat:F7}, {centerLon:F7})");
+                Console.WriteLine($"           Length: {lengthMeters:F2}m, Azimuth: {azimuth}°, Width: {_polylineZoneWidthMeters:F2}m");
+                Console.WriteLine($"           Type: {segmentType}");
             }
 
+            // Store total length in polyline data
+            polylineData.TotalLengthMeters = totalPolylineLength;
+
+            _drawnPolylines.Add(polylineData);
+
+            Console.WriteLine($"[POLYLINE] ==========================================");
+            Console.WriteLine($"[POLYLINE] Created polyline with {polylinePoints.Count - 1} segments");
+            Console.WriteLine($"[POLYLINE] Total polyline length: {totalPolylineLength:F2} meters");
+            Console.WriteLine($"[POLYLINE] Polyline ID: {polylineId}");
+            Console.WriteLine($"[POLYLINE] Stored in _drawnPolylines list (total: {_drawnPolylines.Count})");
+            Console.WriteLine($"[POLYLINE] ==========================================");
+
+            // Store mapping
             if (!_polylineToSegmentZones.ContainsKey(currentPolyline))
             {
                 _polylineToSegmentZones[currentPolyline] = new List<ActivationZone>();
             }
             _polylineToSegmentZones[currentPolyline].AddRange(addedSegments);
 
+            // Store geo points for this polyline
+            var geoPoints = new List<(double lat, double lon)>();
+            foreach (var pt in polylinePoints)
+            {
+                var (lat, lon) = ConvertCanvasXYToLatLon(pt.X, pt.Y, zoom);
+                geoPoints.Add((lat, lon));
+            }
+            _polylineGeoPoints[currentPolyline] = geoPoints;
+
+            // Snapshot for undo/redo
             var polylineToAdd = currentPolyline;
             var dotsToAdd = new List<Ellipse>(polylineVertexDots);
             var pointsToAdd = new List<Point>(polylinePoints);
             var circlesToAdd = new List<Ellipse>(_currentPolylineCircles);
             var segmentsToAdd = new List<System.Windows.Shapes.Path>(_currentPolylineSegments);
             var tableSegmentsToAdd = new List<ActivationZone>(addedSegments);
+            var geoPointsToAdd = new List<(double, double)>(geoPoints);
+            var polylineDataToAdd = polylineData; // Store reference for undo/redo
 
             var vertexMapSnapshot = new Dictionary<Ellipse, (Polyline, int)>();
             foreach (var kv in _polylineVertexMap)
@@ -3924,6 +4228,10 @@ namespace V2XController
                         _polylineToSegmentZones.Remove(polylineToAdd);
                     }
 
+                    _polylineGeoPoints.Remove(polylineToAdd);
+
+                    _drawnPolylines.Remove(polylineDataToAdd);
+
                     var mr = mapRectangles.FirstOrDefault(m => m.Shape == polylineToAdd);
                     if (mr != null) mapRectangles.Remove(mr);
                     isDirty = true;
@@ -3958,7 +4266,7 @@ namespace V2XController
                     {
                         if (!ActivationZonesCollection.Contains(tableSeg))
                         {
-                            _polylineRows.Add(tableSeg); 
+                            _polylineRows.Add(tableSeg);
                             ActivationZonesCollection.Add(tableSeg);
                         }
                     }
@@ -3967,7 +4275,13 @@ namespace V2XController
                     {
                         _polylineToSegmentZones[polylineToAdd] = new List<ActivationZone>();
                     }
+                    _polylineToSegmentZones[polylineToAdd].Clear();
                     _polylineToSegmentZones[polylineToAdd].AddRange(tableSegmentsToAdd);
+
+                    _polylineGeoPoints[polylineToAdd] = geoPointsToAdd;
+
+                    if (!_drawnPolylines.Contains(polylineDataToAdd))
+                        _drawnPolylines.Add(polylineDataToAdd);
 
                     if (!mapRectangles.Any(m => m.Shape == polylineToAdd))
                         mapRectangles.Add(new MapRectangle(polylineToAdd));
@@ -3986,6 +4300,7 @@ namespace V2XController
             _currentPolylineSegments.Clear();
             isDrawing = false;
             _isDrawingPolyline = false;
+            _currentPolylineCircleGeoPoints.Clear();
 
             Console.WriteLine("[POLYLINE] Ready to draw next polyline");
         }
@@ -3995,20 +4310,324 @@ namespace V2XController
             if (polyline == null || vertexIndex < 0 || vertexIndex >= polyline.Points.Count)
                 return;
 
-            polyline.Points[vertexIndex] = newPosition;
+            // Temporarily disable PropertyChanged to avoid cascade
+            var wasUpdating = isUpdatingActivationZone;
+            isUpdatingActivationZone = true;
 
-            // Update geo points
-            if (_polylineGeoPoints.TryGetValue(polyline, out var geoList) && vertexIndex < geoList.Count)
+            try
             {
+                polyline.Points[vertexIndex] = newPosition;
+
+                // Update geo points
                 var (geoLat, geoLon) = ConvertCanvasXYToLatLon(newPosition.X, newPosition.Y, zoom);
-                geoList[vertexIndex] = (geoLat, geoLon);
+
+                if (_polylineGeoPoints.TryGetValue(polyline, out var geoList) && vertexIndex < geoList.Count)
+                {
+                    geoList[vertexIndex] = (geoLat, geoLon);
+                }
+
+                // Update segments in table that are affected by this vertex movement
+                if (_polylineToSegmentZones.TryGetValue(polyline, out var segments))
+                {
+                    // Update segment BEFORE this vertex (if exists)
+                    if (vertexIndex > 0)
+                    {
+                        int prevSegmentIndex = vertexIndex - 1;
+                        var prevSegment = segments.FirstOrDefault(s => s.SegmentIndex == prevSegmentIndex);
+
+                        if (prevSegment != null && geoList != null && prevSegmentIndex < geoList.Count - 1)
+                        {
+                            var (lat1, lon1) = geoList[prevSegmentIndex];
+                            var (lat2, lon2) = geoList[prevSegmentIndex + 1];
+
+                            // Update segment properties (keep Width unchanged - it's per-segment now)
+                            prevSegment.Latitude = (lat1 + lat2) / 2;
+                            prevSegment.Longitude = (lon1 + lon2) / 2;
+                            prevSegment.Height = HaversineMeters(lat1, lon1, lat2, lon2);
+                            prevSegment.Azimuth = CalculateAzimuth(
+                                polyline.Points[prevSegmentIndex],
+                                polyline.Points[prevSegmentIndex + 1]
+                            );
+
+                            Console.WriteLine($"[DRAG] Segment {prevSegmentIndex}: Len={prevSegment.Height:F2}m, Az={prevSegment.Azimuth}°, Width={prevSegment.Width:F2}m");
+                        }
+                    }
+
+                    // Update segment AFTER this vertex (if exists)
+                    if (vertexIndex < polyline.Points.Count - 1)
+                    {
+                        int nextSegmentIndex = vertexIndex;
+                        var nextSegment = segments.FirstOrDefault(s => s.SegmentIndex == nextSegmentIndex);
+
+                        if (nextSegment != null && geoList != null && nextSegmentIndex < geoList.Count - 1)
+                        {
+                            var (lat1, lon1) = geoList[nextSegmentIndex];
+                            var (lat2, lon2) = geoList[nextSegmentIndex + 1];
+
+                            // Update segment properties (keep Width unchanged)
+                            nextSegment.Latitude = (lat1 + lat2) / 2;
+                            nextSegment.Longitude = (lon1 + lon2) / 2;
+                            nextSegment.Height = HaversineMeters(lat1, lon1, lat2, lon2);
+                            nextSegment.Azimuth = CalculateAzimuth(
+                                polyline.Points[nextSegmentIndex],
+                                polyline.Points[nextSegmentIndex + 1]
+                            );
+
+                            Console.WriteLine($"[DRAG] Segment {nextSegmentIndex}: Len={nextSegment.Height:F2}m, Az={nextSegment.Azimuth}°, Width={nextSegment.Width:F2}m");
+                        }
+                    }
+
+                    // Also update PolylineData in _drawnPolylines list
+                    var polylineData = _drawnPolylines.FirstOrDefault(pd =>
+                        segments.Any(s => s.PolylineId == pd.PolylineId));
+
+                    if (polylineData != null)
+                    {
+                        // Update vertex data
+                        if (vertexIndex < polylineData.Vertices.Count)
+                        {
+                            polylineData.Vertices[vertexIndex].CanvasPosition = newPosition;
+                            polylineData.Vertices[vertexIndex].Latitude = geoLat;
+                            polylineData.Vertices[vertexIndex].Longitude = geoLon;
+                        }
+
+                        // Update affected segment data
+                        if (vertexIndex > 0 && vertexIndex - 1 < polylineData.Segments.Count)
+                        {
+                            var prevSegData = polylineData.Segments[vertexIndex - 1];
+                            var prevSeg = segments.FirstOrDefault(s => s.SegmentIndex == vertexIndex - 1);
+                            if (prevSeg != null)
+                            {
+                                prevSegData.LengthMeters = prevSeg.Height;
+                                prevSegData.AzimuthDegrees = prevSeg.Azimuth;
+                                // Width stays as is - per segment
+                            }
+                        }
+
+                        if (vertexIndex < polylineData.Segments.Count)
+                        {
+                            var nextSegData = polylineData.Segments[vertexIndex];
+                            var nextSeg = segments.FirstOrDefault(s => s.SegmentIndex == vertexIndex);
+                            if (nextSeg != null)
+                            {
+                                nextSegData.LengthMeters = nextSeg.Height;
+                                nextSegData.AzimuthDegrees = nextSeg.Azimuth;
+                                // Width stays as is - per segment
+                            }
+                        }
+
+                        // Recalculate total length
+                        polylineData.TotalLengthMeters = polylineData.Segments.Sum(s => s.LengthMeters);
+                    }
+                }
+
+                // Rebuild with per-segment widths
+                RebuildPolylineZoneWithVariableWidths(polyline, polyline.Points.ToList());
+
+                // Update vertex positions (dots and circles)
+                UpdatePolylineVertexPositions(polyline, polyline.Points.ToList());
+            }
+            finally
+            {
+                isUpdatingActivationZone = wasUpdating;
+            }
+        }
+
+        private void RebuildPolylineZoneWithVariableWidths(Polyline polyline, List<Point> points)
+        {
+            // Remove old shapes
+            if (_polylineToSegments.ContainsKey(polyline))
+            {
+                foreach (var shape in _polylineToSegments[polyline])
+                {
+                    if (TileCanvas.Children.Contains(shape))
+                        TileCanvas.Children.Remove(shape);
+                }
+                _polylineToSegments[polyline].Clear();
+            }
+            else
+            {
+                _polylineToSegments[polyline] = new List<System.Windows.Shapes.Path>();
             }
 
-            double mpp = MetersPerPixel(latitude, zoom);
-            double halfWidthPx = (_polylineZoneWidthMeters / 2.0) / mpp;
+            if (points.Count < 1) return;
 
-            // Rebuild entire zone with merged geometry
-            RebuildPolylineZone(polyline, polyline.Points.ToList(), halfWidthPx);
+            // Get segments
+            if (!_polylineToSegmentZones.TryGetValue(polyline, out var segmentZones) || segmentZones.Count == 0)
+            {
+                // No segments - fallback to simple
+                double mppx = MetersPerPixel(latitude, zoom);
+                double halfWidthPx = (_polylineZoneWidthMeters / 2.0) / mppx;
+                RebuildPolylineZone(polyline, points, halfWidthPx);
+                return;
+            }
+
+            segmentZones = segmentZones.OrderBy(s => s.SegmentIndex).ToList();
+            double mpp = MetersPerPixel(latitude, zoom);
+            SolidColorBrush defaultBrush = _strokeBrush as SolidColorBrush ?? new SolidColorBrush(Colors.Red);
+
+            // Single point
+            if (points.Count == 1)
+            {
+                SolidColorBrush zoneBrush = defaultBrush;
+                double widthMeters = segmentZones[0].Width;
+
+                var colorBrush = TryBrushFromColor(segmentZones[0].Color);
+                if (colorBrush != null) zoneBrush = colorBrush;
+
+                double halfWidthPx = (widthMeters / 2.0) / mpp;
+                var circle = new Ellipse
+                {
+                    Width = halfWidthPx * 2,
+                    Height = halfWidthPx * 2,
+                    Fill = MakeAlphaBrush(zoneBrush, 60),
+                    Stroke = null,
+                    IsHitTestVisible = false,
+                    Tag = "PolylineZoneCircle"
+                };
+                Canvas.SetLeft(circle, points[0].X - halfWidthPx);
+                Canvas.SetTop(circle, points[0].Y - halfWidthPx);
+                TileCanvas.Children.Add(circle);
+                Panel.SetZIndex(circle, 50);
+                return;
+            }
+
+            var groups = new List<(int startIndex, int endIndex, string color, double widthMeters)>();
+
+            string currentColor = segmentZones[0].Color;
+            double currentWidth = segmentZones[0].Width;
+            int startIdx = 0;
+
+            for (int i = 1; i < segmentZones.Count; i++)
+            {
+                bool colorChanged = segmentZones[i].Color != currentColor;
+                bool widthChanged = Math.Abs(segmentZones[i].Width - currentWidth) > 0.01;
+
+                if (colorChanged || widthChanged)
+                {
+                    groups.Add((startIdx, i - 1, currentColor, currentWidth));
+                    currentColor = segmentZones[i].Color;
+                    currentWidth = segmentZones[i].Width;
+                    startIdx = i;
+                }
+            }
+            groups.Add((startIdx, segmentZones.Count - 1, currentColor, currentWidth));
+
+            foreach (var group in groups)
+            {
+                double halfWidthPx = (group.widthMeters / 2.0) / mpp;
+                var pathGeometry = new PathGeometry { FillRule = FillRule.Nonzero };
+
+                for (int i = group.startIndex; i <= group.endIndex && i < points.Count - 1; i++)
+                {
+                    var p1 = points[i];
+                    var p2 = points[i + 1];
+
+                    var dir = p2 - p1;
+                    double len = dir.Length;
+                    if (len < 0.01) continue;
+
+                    dir.Normalize();
+                    var perp = new Vector(-dir.Y, dir.X);
+
+                    var topLeft = p1 + perp * halfWidthPx;
+                    var topRight = p2 + perp * halfWidthPx;
+                    var bottomRight = p2 - perp * halfWidthPx;
+                    var bottomLeft = p1 - perp * halfWidthPx;
+
+                    var figure = new PathFigure { StartPoint = topLeft, IsClosed = true };
+                    figure.Segments.Add(new LineSegment(topRight, true));
+                    figure.Segments.Add(new LineSegment(bottomRight, true));
+                    figure.Segments.Add(new LineSegment(bottomLeft, true));
+                    pathGeometry.Figures.Add(figure);
+                }
+
+                for (int i = group.startIndex; i <= group.endIndex + 1 && i < points.Count; i++)
+                {
+                    bool needCap = false;
+
+                    if (i == 0 || i == points.Count - 1)
+                    {
+                        needCap = true;
+                    }
+                    else if (i == group.startIndex && i > 0)
+                    {
+                        needCap = true;
+                    }
+                    else if (i == group.endIndex + 1 && i < points.Count - 1)
+                    {
+                        needCap = true;
+                    }
+                    else if (i > 0 && i < points.Count - 1)
+                    {
+                        var v1 = points[i] - points[i - 1];
+                        var v2 = points[i + 1] - points[i];
+
+                        if (v1.Length > 0.01 && v2.Length > 0.01)
+                        {
+                            v1.Normalize();
+                            v2.Normalize();
+                            double dotProduct = v1 * v2;
+                            if (dotProduct < Math.Cos(0.1 * Math.PI / 180.0))
+                                needCap = true;
+                        }
+                    }
+
+                    if (needCap)
+                    {
+                        var capGeometry = new EllipseGeometry(points[i], halfWidthPx, halfWidthPx);
+                        pathGeometry = Geometry.Combine(pathGeometry, capGeometry, GeometryCombineMode.Union, null);
+                    }
+                }
+
+                SolidColorBrush groupBrush = TryBrushFromColor(group.color) ?? defaultBrush;
+
+                var groupPath = new System.Windows.Shapes.Path
+                {
+                    Data = pathGeometry,
+                    Fill = MakeAlphaBrush(groupBrush, 60),
+                    Stroke = null,
+                    IsHitTestVisible = false,
+                    Tag = $"PolylineZone_{group.startIndex}_{group.endIndex}"
+                };
+
+                TileCanvas.Children.Add(groupPath);
+                Panel.SetZIndex(groupPath, 50);
+                _polylineToSegments[polyline].Add(groupPath);
+            }
+
+            foreach (var group in groups)
+            {
+                SolidColorBrush groupBrush = TryBrushFromColor(group.color) ?? defaultBrush;
+
+                var lineGeometry = new PathGeometry();
+                var lineFigure = new PathFigure
+                {
+                    StartPoint = points[group.startIndex],
+                    IsClosed = false
+                };
+
+                for (int i = group.startIndex + 1; i <= group.endIndex + 1 && i < points.Count; i++)
+                {
+                    lineFigure.Segments.Add(new LineSegment(points[i], true));
+                }
+
+                lineGeometry.Figures.Add(lineFigure);
+
+                var centerLinePath = new System.Windows.Shapes.Path
+                {
+                    Data = lineGeometry,
+                    Stroke = groupBrush,
+                    StrokeThickness = 2,
+                    Fill = null,
+                    IsHitTestVisible = false,
+                    Tag = $"PolylineCenterLine_{group.startIndex}_{group.endIndex}"
+                };
+
+                TileCanvas.Children.Add(centerLinePath);
+                Panel.SetZIndex(centerLinePath, 100);
+                _polylineToSegments[polyline].Add(centerLinePath);
+            }
         }
 
         private void UpdateSegmentGeometry(System.Windows.Shapes.Path segment, Point p1, Point p2, double halfWidthPx)
@@ -4113,17 +4732,68 @@ namespace V2XController
             {
                 Console.WriteLine($"[POLYLINE] Cancelled with {polylinePoints.Count} points");
 
-                bool wasExistingPolyline = mapRectangles.Any(mr => mr.Shape == currentPolyline);
+                // Check if this is a continuation of an existing polyline
+                bool wasContinuation = _polylineCommittedPointsCount > 0;
 
-                if (wasExistingPolyline)
+                if (wasContinuation)
                 {
-                    Console.WriteLine("[POLYLINE] Restoring previously finalized polyline");
+                    Console.WriteLine($"[POLYLINE] Restoring previously finalized polyline with {_polylineCommittedPointsCount} committed points");
 
+                    // Remove only the NEW dots and circles added after continuation
+                    for (int i = _polylineCommittedPointsCount; i < polylineVertexDots.Count; i++)
+                    {
+                        var dot = polylineVertexDots[i];
+                        if (TileCanvas.Children.Contains(dot))
+                            TileCanvas.Children.Remove(dot);
+
+                        _polylineVertexMap.Remove(dot);
+
+                        if (_polylineVertexToCircle.TryGetValue(dot, out var circle))
+                        {
+                            if (TileCanvas.Children.Contains(circle))
+                                TileCanvas.Children.Remove(circle);
+                            _polylineVertexToCircle.Remove(dot);
+                        }
+                    }
+
+                    // Remove new circles that were added AFTER continuation
+                    for (int i = _polylineCommittedPointsCount; i < _currentPolylineCircles.Count; i++)
+                    {
+                        var circle = _currentPolylineCircles[i];
+                        if (TileCanvas.Children.Contains(circle))
+                            TileCanvas.Children.Remove(circle);
+                    }
+
+                    // Rebuild zone with only committed points to restore proper zone shapes
+                    currentPolyline.Points.Clear();
+                    var committedPoints = new List<Point>();
+                    for (int i = 0; i < _polylineCommittedPointsCount; i++)
+                    {
+                        currentPolyline.Points.Add(polylinePoints[i]);
+                        committedPoints.Add(polylinePoints[i]);
+                    }
+
+                    // Rebuild the zone with the committed points only
+                    double mpp = MetersPerPixel(latitude, zoom);
+                    double halfWidthPx = (_polylineZoneWidthMeters / 2.0) / mpp;
+
+                    // This will recreate the zone segments for the committed portion
+                    if (committedPoints.Count >= 2)
+                    {
+                        RebuildPolylineZone(currentPolyline, committedPoints, halfWidthPx);
+                    }
+
+                    // Restore it as finalized
                     if (!mapRectangles.Any(mr => mr.Shape == currentPolyline))
                         mapRectangles.Add(new MapRectangle(currentPolyline));
+
+                    Console.WriteLine($"[POLYLINE] Restored polyline with {currentPolyline.Points.Count} points and zone shapes");
                 }
                 else
                 {
+                    // This was a NEW polyline (not a continuation) - delete everything
+                    Console.WriteLine("[POLYLINE] Deleting new polyline completely");
+
                     // Remove the polyline itself
                     if (TileCanvas.Children.Contains(currentPolyline))
                         TileCanvas.Children.Remove(currentPolyline);
@@ -4172,6 +4842,7 @@ namespace V2XController
                 _currentPolylineSegments.Clear();
                 _isDrawingPolyline = false;
                 isDrawing = false;
+                _polylineCommittedPointsCount = 0; // Reset
                 didSomething = true;
             }
 
@@ -7117,48 +7788,15 @@ namespace V2XController
                 var zone = sender as ActivationZone;
                 if (zone == null) return;
 
-                if (_polylineRows.Contains(zone))
+                // Handle polyline segment changes
+                if (zone.IsPolylineSegment)
                 {
-                    var polyline = FindPolylineContainingSegment(zone);
-                    if (polyline != null)
-                    {
-                        if (e.PropertyName == nameof(ActivationZone.Color))
-                        {
-                            var brush = TryBrushFromColor(zone.Color) ?? Brushes.Black;
-                            polyline.Stroke = brush;
-
-                            if (_polylineToSegments.TryGetValue(polyline, out var segments))
-                            {
-                                foreach (var seg in segments)
-                                {
-                                    seg.Fill = MakeAlphaBrush(brush as SolidColorBrush ?? new SolidColorBrush(Colors.Black), 60);
-                                }
-                            }
-                        }
-                        else if (e.PropertyName == nameof(ActivationZone.Width))
-                        {
-                            _polylineZoneWidthMeters = zone.Width;
-
-                            if (_polylineGeoPoints.TryGetValue(polyline, out var geoPoints))
-                            {
-                                var points = geoPoints.Select(gp =>
-                                {
-                                    var (x, y) = ConvertLatLonToCanvasXY(gp.lat, gp.lon);
-                                    return new Point(x, y);
-                                }).ToList();
-
-                                double mppx = MetersPerPixel(latitude, zoom);
-                                double halfWidthPx = (zone.Width / 2.0) / mppx;
-
-                                RebuildPolylineZone(polyline, points, halfWidthPx);
-                            }
-                        }
-                    }
-
+                    HandlePolylineSegmentPropertyChange(zone, e.PropertyName);
                     isUpdatingActivationZone = false;
                     return;
                 }
 
+                // Original rectangle zone handling
                 if (zone.Rectangle == null) return;
 
                 double mpp = MetersPerPixel(latitude, zoom);
@@ -7212,6 +7850,218 @@ namespace V2XController
             {
                 isUpdatingActivationZone = false;
             }
+        }
+
+        private void HandlePolylineSegmentPropertyChange(ActivationZone segment, string propertyName)
+        {
+            if (!segment.PolylineId.HasValue) return;
+
+            var polyline = _polylineToSegmentZones
+                .FirstOrDefault(kvp => kvp.Value.Any(z => z.PolylineId == segment.PolylineId))
+                .Key;
+
+            if (polyline == null) return;
+
+            var allSegments = _polylineToSegmentZones[polyline]
+                .OrderBy(s => s.SegmentIndex)
+                .ToList();
+
+            if (propertyName == nameof(ActivationZone.Color))
+            {
+                if (_polylineGeoPoints.TryGetValue(polyline, out var geoPoints))
+                {
+                    var points = geoPoints.Select(gp =>
+                    {
+                        var (x, y) = ConvertLatLonToCanvasXY(gp.lat, gp.lon);
+                        return new Point(x, y);
+                    }).ToList();
+
+                    RebuildPolylineZoneWithVariableWidths(polyline, points);
+                    UpdatePolylineVertexPositions(polyline, points);
+                }
+
+                Console.WriteLine($"[POLYLINE] Color changed to {segment.Color} for segment {segment.SegmentIndex}");
+            }
+            else if (propertyName == nameof(ActivationZone.Width))
+            {
+                if (_polylineGeoPoints.TryGetValue(polyline, out var geoPoints))
+                {
+                    var points = geoPoints.Select(gp =>
+                    {
+                        var (x, y) = ConvertLatLonToCanvasXY(gp.lat, gp.lon);
+                        return new Point(x, y);
+                    }).ToList();
+
+                    // This will re-calculate groups based on new widths
+                    RebuildPolylineZoneWithVariableWidths(polyline, points);
+                    UpdatePolylineVertexPositions(polyline, points);
+                }
+
+                Console.WriteLine($"[POLYLINE] Width changed to {segment.Width}m for segment {segment.SegmentIndex}");
+            }
+            else if (propertyName == nameof(ActivationZone.Height))
+            {
+                if (_polylineGeoPoints.TryGetValue(polyline, out var geoPoints) &&
+                    segment.SegmentIndex >= 0 &&
+                    segment.SegmentIndex < geoPoints.Count - 1)
+                {
+                    var (lat1, lon1) = geoPoints[segment.SegmentIndex];
+                    var newEndPoint = CalculateEndPoint(lat1, lon1, segment.Azimuth, segment.Height);
+                    geoPoints[segment.SegmentIndex + 1] = newEndPoint;
+
+                    for (int i = segment.SegmentIndex + 1; i < allSegments.Count; i++)
+                    {
+                        var seg = allSegments[i];
+                        var (startLat, startLon) = geoPoints[i];
+                        var (endLat, endLon) = geoPoints[i + 1];
+
+                        seg.Latitude = (startLat + endLat) / 2;
+                        seg.Longitude = (startLon + endLon) / 2;
+                        seg.Height = HaversineMeters(startLat, startLon, endLat, endLon);
+                    }
+
+                    var points = geoPoints.Select(gp =>
+                    {
+                        var (x, y) = ConvertLatLonToCanvasXY(gp.lat, gp.lon);
+                        return new Point(x, y);
+                    }).ToList();
+
+                    RebuildPolylineZoneWithVariableWidths(polyline, points);
+
+                    polyline.Points.Clear();
+                    foreach (var pt in points)
+                        polyline.Points.Add(pt);
+
+                    UpdatePolylineVertexPositions(polyline, points);
+                }
+
+                Console.WriteLine($"[POLYLINE] Height changed to {segment.Height}m for segment {segment.SegmentIndex}");
+            }
+            else if (propertyName == nameof(ActivationZone.Azimuth))
+            {
+                if (_polylineGeoPoints.TryGetValue(polyline, out var geoPoints) &&
+                    segment.SegmentIndex >= 0 &&
+                    segment.SegmentIndex < geoPoints.Count - 1)
+                {
+                    var (lat1, lon1) = geoPoints[segment.SegmentIndex];
+                    var newEndPoint = CalculateEndPoint(lat1, lon1, segment.Azimuth, segment.Height);
+                    geoPoints[segment.SegmentIndex + 1] = newEndPoint;
+
+                    segment.Latitude = (lat1 + newEndPoint.lat) / 2;
+                    segment.Longitude = (lon1 + newEndPoint.lon) / 2;
+
+                    var points = geoPoints.Select(gp =>
+                    {
+                        var (x, y) = ConvertLatLonToCanvasXY(gp.lat, gp.lon);
+                        return new Point(x, y);
+                    }).ToList();
+
+                    RebuildPolylineZoneWithVariableWidths(polyline, points);
+
+                    polyline.Points.Clear();
+                    foreach (var pt in points)
+                        polyline.Points.Add(pt);
+
+                    UpdatePolylineVertexPositions(polyline, points);
+                }
+
+                Console.WriteLine($"[POLYLINE] Azimuth changed to {segment.Azimuth}° for segment {segment.SegmentIndex}");
+            }
+            else if (propertyName == nameof(ActivationZone.Latitude) ||
+                     propertyName == nameof(ActivationZone.Longitude))
+            {
+                if (_polylineGeoPoints.TryGetValue(polyline, out var geoPoints) &&
+                    segment.SegmentIndex >= 0)
+                {
+                    double halfLength = segment.Height / 2.0;
+
+                    var startPoint = CalculateEndPoint(segment.Latitude, segment.Longitude,
+                        (segment.Azimuth + 180) % 360, halfLength);
+                    var endPoint = CalculateEndPoint(segment.Latitude, segment.Longitude,
+                        segment.Azimuth, halfLength);
+
+                    geoPoints[segment.SegmentIndex] = startPoint;
+                    if (segment.SegmentIndex + 1 < geoPoints.Count)
+                    {
+                        geoPoints[segment.SegmentIndex + 1] = endPoint;
+                    }
+
+                    var points = geoPoints.Select(gp =>
+                    {
+                        var (x, y) = ConvertLatLonToCanvasXY(gp.lat, gp.lon);
+                        return new Point(x, y);
+                    }).ToList();
+
+                    RebuildPolylineZoneWithVariableWidths(polyline, points);
+
+                    polyline.Points.Clear();
+                    foreach (var pt in points)
+                        polyline.Points.Add(pt);
+
+                    UpdatePolylineVertexPositions(polyline, points);
+                }
+
+                Console.WriteLine($"[POLYLINE] Position changed to ({segment.Latitude}, {segment.Longitude}) for segment {segment.SegmentIndex}");
+            }
+
+            isDirty = true;
+        }
+
+        private void UpdatePolylineVertexPositions(Polyline polyline, List<Point> points)
+        {
+            // Find all vertex dots belonging to this polyline
+            var vertexDots = _polylineVertexMap
+                .Where(kvp => kvp.Value.polyline == polyline)
+                .OrderBy(kvp => kvp.Value.pointIndex)
+                .ToList();
+
+            foreach (var kvp in vertexDots)
+            {
+                var dot = kvp.Key;
+                var pointIndex = kvp.Value.pointIndex;
+
+                if (pointIndex >= 0 && pointIndex < points.Count)
+                {
+                    var newPos = points[pointIndex];
+
+                    // Update vertex dot position
+                    Canvas.SetLeft(dot, newPos.X - dot.Width / 2);
+                    Canvas.SetTop(dot, newPos.Y - dot.Height / 2);
+
+                    // Update associated circle if exists
+                    if (_polylineVertexToCircle.TryGetValue(dot, out var circle))
+                    {
+                        Canvas.SetLeft(circle, newPos.X - circle.Width / 2);
+                        Canvas.SetTop(circle, newPos.Y - circle.Height / 2);
+                    }
+                }
+            }
+        }
+
+        private (double lat, double lon) CalculateEndPoint(double startLat, double startLon, int azimuthDeg, double distanceMeters)
+        {
+            const double EarthRadiusMeters = 6371000.0;
+
+            double azimuthRad = azimuthDeg * Math.PI / 180.0;
+            double latRad = startLat * Math.PI / 180.0;
+            double lonRad = startLon * Math.PI / 180.0;
+
+            double angularDistance = distanceMeters / EarthRadiusMeters;
+
+            double newLatRad = Math.Asin(
+                Math.Sin(latRad) * Math.Cos(angularDistance) +
+                Math.Cos(latRad) * Math.Sin(angularDistance) * Math.Cos(azimuthRad)
+            );
+
+            double newLonRad = lonRad + Math.Atan2(
+                Math.Sin(azimuthRad) * Math.Sin(angularDistance) * Math.Cos(latRad),
+                Math.Cos(angularDistance) - Math.Sin(latRad) * Math.Sin(newLatRad)
+            );
+
+            double newLat = newLatRad * 180.0 / Math.PI;
+            double newLon = newLonRad * 180.0 / Math.PI;
+
+            return (newLat, newLon);
         }
 
         private Polyline FindPolylineContainingSegment(ActivationZone segment)
@@ -8507,9 +9357,14 @@ namespace V2XController
                 else if (child is System.Windows.Shapes.Path path)
                 {
                     var tag = path.Tag as string;
-                    // Support both old and new tags
-                    if (tag == "PolylineZoneSegment" || tag == "PolylineZoneMerged")
+                    // Support all polyline-related tags
+                    if (tag != null && (tag.StartsWith("PolylineZone") ||
+                                        tag.StartsWith("PolylineSegment") ||
+                                        tag.StartsWith("PolylineCenterLine") ||
+                                        tag == "PolylineZoneMerged"))
+                    {
                         elementsToRemove.Add(child);
+                    }
                 }
                 else if (child is Ellipse ellipse)
                 {
@@ -8551,17 +9406,37 @@ namespace V2XController
 
             mapRectangles.Clear();
             activationZones.Clear();
+
+            // Clear polyline segments from ActivationZonesCollection
+            var polylineSegmentsToRemove = ActivationZonesCollection.Where(z => z.PolylineId.HasValue).ToList();
+            foreach (var seg in polylineSegmentsToRemove)
+            {
+                ActivationZonesCollection.Remove(seg);
+            }
+
+            _polylineRows.Clear();
+            _polylineToSegmentZones.Clear();
+
+            // Clear remaining activation zones
             ActivationZonesCollection.Clear();
+
             connectionLine.Points.Clear();
             TramTable.Clear();
 
-            // Clear polyline data structures
+            // Clear ALL polyline data structures
             _polylineVertexMap.Clear();
             _polylineVertexToCircle.Clear();
             _polylineToSegments.Clear();
             _polylineGeoPoints.Clear();
             _currentPolylineCircles.Clear();
             _currentPolylineSegments.Clear();
+            _drawnPolylines.Clear();
+
+            // Clear active drawing state
+            currentPolyline = null;
+            polylinePoints.Clear();
+            polylineVertexDots.Clear();
+            _isDrawingPolyline = false;
 
             for (int i = 0; i < drawnTrams.Length; i++)
             {
@@ -8601,7 +9476,8 @@ namespace V2XController
             currentDrawingMode = DrawingMode.None;
             UpdateHitTestForSelectableElements();
             CancelAllDrawing();
-            Console.WriteLine($"[CLEAR] Complete - zones: {ActivationZonesCollection.Count}");
+
+            Console.WriteLine($"[CLEAR] Complete - all polylines and zones cleared");
         }
 
 
@@ -9066,6 +9942,7 @@ namespace V2XController
             ReprojectReplayOnMapChange();
             ReprojectDrawnTramsOnMapChange();
             ReprojectPolylines();
+            UpdatePolylinePositions();
             DrawStopsOnCanvasSafe();
             await BringAllOverlaysToFrontSafeAsync();
         }
@@ -12329,6 +13206,36 @@ namespace V2XController
         }
 
     }
+}
+
+public class PolylinePointData
+{
+    public int VertexIndex { get; set; }
+    public Point CanvasPosition { get; set; }
+    public double Latitude { get; set; }
+    public double Longitude { get; set; }
+    public DateTime Timestamp { get; set; }
+}
+
+public class PolylineData
+{
+    public Guid PolylineId { get; set; }
+    public List<PolylinePointData> Vertices { get; set; } = new List<PolylinePointData>();
+    public List<PolylineSegmentData> Segments { get; set; } = new List<PolylineSegmentData>();
+    public DateTime CreatedAt { get; set; }
+    public double TotalLengthMeters { get; set; }
+    public string ColorHex { get; set; } = "#FF0000";
+}
+
+public class PolylineSegmentData
+{
+    public int SegmentIndex { get; set; }
+    public PolylinePointData StartPoint { get; set; }
+    public PolylinePointData EndPoint { get; set; }
+    public double LengthMeters { get; set; }
+    public int AzimuthDegrees { get; set; }
+    public double WidthMeters { get; set; }
+    public string SegmentType { get; set; } = "";
 }
 
 
