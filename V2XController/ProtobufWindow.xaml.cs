@@ -1,23 +1,73 @@
-﻿using System;
+﻿using Google.Protobuf.Reflection;
+using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
 using System.Text;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Media;
+using Windows.UI.Xaml.Hosting;
+using static V2XController.ProtobufParser;
 
 namespace V2XController
 {
+    // placeholder proto message: CJyFAhIGCP3QlskGUiUKBgj90JbJBhIDCIAFogECCBWiAQIIF/IBBAgVUCjyAQQIF1Ao
+
     public partial class ProtobufWindow : Window
     {
         private ObservableCollection<ProtoFileInfo> _loadedFiles = new ObservableCollection<ProtoFileInfo>();
+        private string _cachedDefaultMessage = string.Empty;
+        private MessageDirection _currentDirection = MessageDirection.RsuToController;
+        private Dictionary<string, List<OneofOption>> _oneofOptions = new Dictionary<string, List<OneofOption>>
+        {
+            ["RsuToControllerMessageData"] = new List<OneofOption>
+    {
+        new OneofOption { FieldNumber = 10, Name = "nearby_vehicle_detection", DisplayName = "Nearby Vehicle Detection (field 10)" },
+        new OneofOption { FieldNumber = 20, Name = "intersection_request", DisplayName = "Intersection Pass Request (field 20)" },
+        new OneofOption { FieldNumber = 30, Name = "heartbeat", DisplayName = "Heartbeat (field 30)" },
+        new OneofOption { FieldNumber = 40, Name = "poll_request", DisplayName = "Poll Request (field 40)" }
+    },
+            ["ControllerToRsuMessageData"] = new List<OneofOption>
+    {
+        new OneofOption { FieldNumber = 10, Name = "intersection_status", DisplayName = "Intersection Status (field 10)" },
+        new OneofOption { FieldNumber = 20, Name = "intersection_pass_request_status", DisplayName = "Pass Request Status (field 20)" },
+        new OneofOption { FieldNumber = 30, Name = "empty_response", DisplayName = "Empty Response (field 30)" },
+    }
+        };
+        private OneofOption _selectedOneofOption = null;
+
+        private int _currentSearchIndex = -1;
+        private List<int> _searchMatches = new List<int>();
+        private Brush _originalBackground;
+        private Brush _highlightBrush = new SolidColorBrush(Color.FromRgb(255, 255, 0)); // Yellow
+
 
         public ProtobufWindow()
         {
             InitializeComponent();
             LoadedFilesPanel.ItemsSource = _loadedFiles;
+
+            // Subscribe to Loaded event to ensure XAML is fully initialized
+            Loaded += ProtobufWindow_Loaded;
+        }
+
+        private void ProtobufWindow_Loaded(object sender, RoutedEventArgs e)
+        {
             LoadSavedProtoFiles();
+
+            if (AllRadio?.IsChecked == true && TestResultTextBox != null)
+            {
+                TestResultTextBox.Text = "Auto-detect mode: Paste protobuf data to decode";
+                StatusLabel.Content = "Auto-detect mode active";
+                StatusLabel.Foreground = Brushes.Blue;
+            }
+            else
+            {
+                GenerateAndShowDefaultMessage();
+            }
         }
 
         private void LoadSavedProtoFiles()
@@ -60,6 +110,120 @@ namespace V2XController
                 StatusLabel.Content = $"Failed to load saved protos: {ex.Message}";
                 StatusLabel.Foreground = Brushes.Red;
             }
+        }
+
+        private void GenerateAndShowDefaultMessage()
+        {
+            if (TestResultTextBox == null)
+                return;
+
+            if (_loadedFiles.Count == 0)
+            {
+                TestResultTextBox.Text = "Please load proto files to see default message structure";
+                _cachedDefaultMessage = string.Empty;
+                StatusLabel.Content = "No proto files loaded";
+                StatusLabel.Foreground = Brushes.Orange;
+                return;
+            }
+
+            try
+            {
+                var combinedContent = string.Join("\n\n", _loadedFiles.Select(f => f.Content));
+                var messages = ProtobufParser.ParseProtoDefinition(combinedContent);
+
+                if (messages.Count == 0)
+                {
+                    TestResultTextBox.Text = "No messages found in proto files";
+                    _cachedDefaultMessage = string.Empty;
+                    StatusLabel.Content = "No messages to generate";
+                    StatusLabel.Foreground = Brushes.Orange;
+                    return;
+                }
+
+                string rootMessageName = _currentDirection == MessageDirection.RsuToController
+                    ? "RsuToControllerMessageData"
+                    : "ControllerToRsuMessageData";
+
+                var rootMessage = messages.FirstOrDefault(m => m.Name == rootMessageName);
+
+                if (rootMessage == null)
+                {
+                    TestResultTextBox.Text = $"Root message '{rootMessageName}' not found in proto files";
+                    _cachedDefaultMessage = string.Empty;
+                    StatusLabel.Content = "Root message not found";
+                    StatusLabel.Foreground = Brushes.Orange;
+                    return;
+                }
+
+                var sb = new StringBuilder();
+                sb.AppendLine("// ========================================");
+                sb.AppendLine($"// Direction: {_currentDirection}");
+                sb.AppendLine($"// Root Message: {rootMessage.Name}");
+
+                if (_selectedOneofOption != null)
+                {
+                    sb.AppendLine($"// Selected: {_selectedOneofOption.DisplayName}");
+                }
+
+                sb.AppendLine("// Ready to encode");
+                sb.AppendLine("// ========================================");
+                sb.AppendLine();
+                sb.AppendLine(GenerateDefaultMessageJsonWithOneof(rootMessage, messages, 0));
+
+                var output = sb.ToString();
+                _cachedDefaultMessage = output;
+                TestResultTextBox.Text = output;
+
+                string statusMsg = _selectedOneofOption != null
+                    ? $"{_currentDirection} - {_selectedOneofOption.Name}"
+                    : $"{_currentDirection}: Generated {rootMessage.Name}";
+
+                StatusLabel.Content = statusMsg;
+                StatusLabel.Foreground = Brushes.Green;
+            }
+            catch (Exception ex)
+            {
+                TestResultTextBox.Text = $"Error generating default message:\n{ex.Message}\n\n{ex.StackTrace}";
+                _cachedDefaultMessage = string.Empty;
+                StatusLabel.Content = "Generation failed";
+                StatusLabel.Foreground = Brushes.Red;
+            }
+        }
+
+        private string GenerateDefaultMessageJsonWithOneof(ProtoMessage message, List<ProtoMessage> allMessages, int indentLevel)
+        {
+            const int spacesPerIndent = 2;
+            string indent = new string(' ', indentLevel * spacesPerIndent);
+            string fieldIndent = new string(' ', (indentLevel + 1) * spacesPerIndent);
+
+            var sb = new StringBuilder();
+            sb.AppendLine($"{indent}{{");
+
+            foreach (var field in message.Fields)
+            {
+                // Skip oneof fields that are not selected
+                if (_selectedOneofOption != null &&
+                    (field.Number == 10 || field.Number == 20 || field.Number == 30 || field.Number == 40))
+                {
+                    if (field.Number != _selectedOneofOption.FieldNumber)
+                    {
+                        continue; // Skip this field - it's not the selected oneof option
+                    }
+                }
+
+                string defaultValue = GetDefaultValueForField(field, allMessages, indentLevel + 1);
+                sb.AppendLine($"{fieldIndent}\"{field.Name}\": {defaultValue},");
+            }
+
+            if (message.Fields.Count > 0)
+            {
+                sb.Length -= 3; // Remove trailing ",\n"
+                sb.AppendLine();
+            }
+
+            sb.Append($"{indent}}}");
+
+            return sb.ToString();
         }
 
         private void AddProtoFiles_Click(object sender, RoutedEventArgs e)
@@ -124,6 +288,9 @@ namespace V2XController
 
                 UpdateCombinedProtoView();
                 RecompileAllProtos();
+
+                // Regenerate default message with new proto files
+                GenerateAndShowDefaultMessage();
 
                 StatusLabel.Content = $"Loaded {successCount} file(s)" + (failCount > 0 ? $", {failCount} failed" : "");
                 StatusLabel.Foreground = failCount > 0 ? Brushes.Orange : Brushes.Green;
@@ -207,6 +374,9 @@ namespace V2XController
                     UpdateCombinedProtoView();
                     RecompileAllProtos();
 
+                    // Regenerate default message
+                    GenerateAndShowDefaultMessage();
+
                     StatusLabel.Content = $"Removed {fileToRemove.FileName}";
                     StatusLabel.Foreground = Brushes.Gray;
                 }
@@ -247,6 +417,10 @@ namespace V2XController
                 catch { }
 
                 ProtobufParser.ClearAllDefinitions();
+
+                // Clear default message cache and result
+                _cachedDefaultMessage = string.Empty;
+                TestResultTextBox.Clear();
 
                 StatusLabel.Content = "All proto files cleared";
                 StatusLabel.Foreground = Brushes.Gray;
@@ -289,7 +463,7 @@ namespace V2XController
                 }
             }
         }
-
+        // Replace TestDecode_Click method (around line 1700)
         private void TestDecode_Click(object sender, RoutedEventArgs e)
         {
             string input = TestHexTextBox.Text?.Trim() ?? string.Empty;
@@ -306,25 +480,394 @@ namespace V2XController
                 return;
             }
 
-            // Use ProtobufParser.TryDecodeProtobufFromHex which handles timestamp cleaning
-            if (ProtobufParser.TryDecodeProtobufFromHex(input, out string decoded))
+            // Check if input contains multiple lines
+            var inputLines = input.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                                  .Where(line => !string.IsNullOrWhiteSpace(line.Trim()))
+                                  .ToList();
+
+            if (inputLines.Count > 1)
             {
+                // Multiple messages - switch to "All"
+                if (AllRadio != null && AllRadio.IsChecked != true)
+                {
+                    AllRadio.IsChecked = true;
+                    StatusLabel.Content = "Switched to 'All' - multiple messages detected";
+                    StatusLabel.Foreground = Brushes.Blue;
+                }
+            }
+
+            // Determine which message type to force (based on radio selection)
+            string forceMessageType = null;
+            if (RsuToControllerRadio?.IsChecked == true)
+            {
+                forceMessageType = "RsuToControllerMessageData";
+            }
+            else if (ControllerToRsuRadio?.IsChecked == true)
+            {
+                forceMessageType = "ControllerToRsuMessageData";
+            }
+            // If AllRadio is checked, leave forceMessageType as null (auto-detect)
+
+            // DECODE: Always uses the forceMessageType to decode
+            // This respects the ComboBox selection (RsuToController vs ControllerToRsu)
+            if (ProtobufParser.TryDecodeProtobufFromHex(input, out string decoded, forceMessageType))
+            {
+                // Check if result is empty
+                string trimmedResult = decoded.Trim();
+                bool isEmpty = trimmedResult == "{}" || trimmedResult == "{ }" || string.IsNullOrWhiteSpace(trimmedResult);
+
+                if (isEmpty && inputLines.Count == 1 && forceMessageType != null)
+                {
+                    // Empty with forced type - try opposite direction
+                    string oppositeType = forceMessageType == "RsuToControllerMessageData"
+                        ? "ControllerToRsuMessageData"
+                        : "RsuToControllerMessageData";
+
+                    if (ProtobufParser.TryDecodeProtobufFromHex(input, out string retryDecoded, oppositeType))
+                    {
+                        string retryTrimmed = retryDecoded.Trim();
+                        bool retryIsEmpty = retryTrimmed == "{}" || retryTrimmed == "{ }" || string.IsNullOrWhiteSpace(retryTrimmed);
+
+                        if (!retryIsEmpty)
+                        {
+                            // Success with opposite direction - switch radio
+                            if (oppositeType == "RsuToControllerMessageData")
+                            {
+                                RsuToControllerRadio.IsChecked = true;
+                                StatusLabel.Content = "Auto-switched to RSU -> Controller";
+                            }
+                            else
+                            {
+                                ControllerToRsuRadio.IsChecked = true;
+                                StatusLabel.Content = "Auto-switched to Controller -> RSU";
+                            }
+                            StatusLabel.Foreground = Brushes.Green;
+                            TestResultTextBox.Text = retryDecoded;
+                            return;
+                        }
+                    }
+                }
+
+                // Show result
                 TestResultTextBox.Text = decoded;
-                StatusLabel.Content = "Decode successful";
-                StatusLabel.Foreground = Brushes.Green;
+
+                string directionLabel = forceMessageType == "RsuToControllerMessageData" ? "RSU->Controller" :
+                                       forceMessageType == "ControllerToRsuMessageData" ? "Controller->RSU" :
+                                       "Auto-detect";
+
+                StatusLabel.Content = isEmpty ? $"Decode returned empty result ({directionLabel})" : $"Decode successful ({directionLabel})";
+                StatusLabel.Foreground = isEmpty ? Brushes.Orange : Brushes.Green;
             }
             else
             {
-                TestResultTextBox.Text = decoded; // Contains error message
+                TestResultTextBox.Text = decoded;
                 StatusLabel.Content = "Decode failed";
                 StatusLabel.Foreground = Brushes.Red;
             }
         }
 
+        private void GenerateDefaultMessage_Click(object sender, RoutedEventArgs e)
+        {
+            GenerateAndShowDefaultMessage();
+        }
+        private void MessageDirection_Changed(object sender, RoutedEventArgs e)
+        {
+            if (sender is RadioButton rb && rb.IsChecked == true)
+            {
+                // Add null checks for radio buttons
+                if (RsuToControllerRadio != null && rb.Name == "RsuToControllerRadio")
+                {
+                    _currentDirection = MessageDirection.RsuToController;
+                    PopulateMessageTypeDropdown("RsuToControllerMessageData");
+                }
+                else if (ControllerToRsuRadio != null && rb.Name == "ControllerToRsuRadio")
+                {
+                    _currentDirection = MessageDirection.ControllerToRsu;
+                    PopulateMessageTypeDropdown("ControllerToRsuMessageData");
+                }
+                else if (AllRadio != null && rb.Name == "AllRadio")
+                {
+                    // "All" mode - clear dropdown
+                    if (MessageTypeComboBox != null)
+                    {
+                        MessageTypeComboBox.ItemsSource = null;
+                        MessageTypeComboBox.IsEnabled = false;
+                    }
+
+                    if (TestResultTextBox != null)
+                    {
+                        TestResultTextBox.Text = "Auto-detect mode: Paste protobuf data to decode";
+                    }
+                    if (StatusLabel != null)
+                    {
+                        StatusLabel.Content = "Auto-detect mode active";
+                        StatusLabel.Foreground = Brushes.Blue;
+                    }
+                    return;
+                }
+
+                GenerateAndShowDefaultMessage();
+            }
+        }
+
+        private void PopulateMessageTypeDropdown(string messageType)
+        {
+            if (MessageTypeComboBox == null)
+                return;
+
+            MessageTypeComboBox.IsEnabled = true;
+
+            if (_oneofOptions.TryGetValue(messageType, out var options))
+            {
+                MessageTypeComboBox.ItemsSource = options;
+                MessageTypeComboBox.DisplayMemberPath = "DisplayName";
+                MessageTypeComboBox.SelectedIndex = 0; // Select first option by default
+            }
+        }
+
+        private void MessageType_Changed(object sender, SelectionChangedEventArgs e)
+        {
+            if (MessageTypeComboBox?.SelectedItem is OneofOption selected)
+            {
+                _selectedOneofOption = selected;
+                GenerateAndShowDefaultMessage();
+            }
+        }
+
+
+        private List<ProtoMessage> FilterMessagesByDirection(List<ProtoMessage> allMessages, MessageDirection direction)
+        {
+            var filtered = new List<ProtoMessage>();
+
+            if (direction == MessageDirection.RsuToController)
+            {
+                // Find RsuToControllerMessageData and all its nested messages
+                var rootMessage = allMessages.FirstOrDefault(m => m.Name == "RsuToControllerMessageData");
+                if (rootMessage != null)
+                {
+                    filtered.Add(rootMessage);
+                    AddNestedMessages(rootMessage, allMessages, filtered);
+                }
+            }
+            else if (direction == MessageDirection.ControllerToRsu)
+            {
+                // Find ControllerToRsuMessageData and all its nested messages
+                var rootMessage = allMessages.FirstOrDefault(m => m.Name == "ControllerToRsuMessageData");
+                if (rootMessage != null)
+                {
+                    filtered.Add(rootMessage);
+                    AddNestedMessages(rootMessage, allMessages, filtered);
+                }
+            }
+
+            return filtered.Distinct().ToList();
+        }
+
+        private void AddNestedMessages(ProtoMessage message, List<ProtoMessage> allMessages, List<ProtoMessage> result)
+        {
+            foreach (var field in message.Fields)
+            {
+                var nestedMessage = allMessages.FirstOrDefault(m =>
+                    m.Name == field.Type ||
+                    field.Type.EndsWith("." + m.Name));
+
+                if (nestedMessage != null && !result.Contains(nestedMessage))
+                {
+                    result.Add(nestedMessage);
+                    AddNestedMessages(nestedMessage, allMessages, result);
+                }
+            }
+        }
+
+        private string GenerateDefaultMessageJson(ProtoMessage message, List<ProtoMessage> allMessages, int indentLevel)
+        {
+            const int spacesPerIndent = 2;
+            string indent = new string(' ', indentLevel * spacesPerIndent);
+            string fieldIndent = new string(' ', (indentLevel + 1) * spacesPerIndent);
+
+            var sb = new StringBuilder();
+            sb.AppendLine($"{indent}{{");
+
+            foreach (var field in message.Fields)
+            {
+                string defaultValue = GetDefaultValueForField(field, allMessages, indentLevel + 1);
+                sb.AppendLine($"{fieldIndent}\"{field.Name}\": {defaultValue},");
+            }
+
+            if (message.Fields.Count > 0)
+            {
+                sb.Length -= 3; // Remove trailing ",\n"
+                sb.AppendLine();
+            }
+
+            sb.Append($"{indent}}}");
+
+            return sb.ToString();
+        }
+
+        private string GetDefaultValueForField(ProtoField field, List<ProtoMessage> allMessages, int indentLevel)
+        {
+            // Handle repeated fields
+            if (field.IsRepeated)
+            {
+                // Check if it's a repeated enum - generate array with one default enum value
+                if (field.Type.Contains("Enum"))
+                {
+                    string defaultEnumValue = GetDefaultEnumValue(field.Type);
+                    return $"[\"{defaultEnumValue}\"]";
+                }
+
+                // Check if it's a repeated message - generate array with one default message
+                var repeatedMessage = allMessages.FirstOrDefault(m =>
+                    m.Name == field.Type || field.Type.EndsWith("." + m.Name));
+
+                if (repeatedMessage != null)
+                {
+                    return "[\n" +
+                           new string(' ', (indentLevel + 1) * 2) + GenerateDefaultMessageJson(repeatedMessage, allMessages, indentLevel + 1).Replace("\n", "\n" + new string(' ', (indentLevel + 1) * 2)) + "\n" +
+                           new string(' ', indentLevel * 2) + "]";
+                }
+
+                return "[]";
+            }
+
+            // Handle google.protobuf types FIRST
+            if (field.Type.Contains("google.protobuf"))
+            {
+                if (field.Type.Contains("Timestamp"))
+                {
+                    return "{\n" +
+                           new string(' ', (indentLevel + 1) * 2) + "\"seconds\": 0,\n" +
+                           new string(' ', (indentLevel + 1) * 2) + "\"nanos\": 0\n" +
+                           new string(' ', indentLevel * 2) + "}";
+                }
+                else if (field.Type.Contains("Duration"))
+                {
+                    return "{\n" +
+                           new string(' ', (indentLevel + 1) * 2) + "\"seconds\": 0,\n" +
+                           new string(' ', (indentLevel + 1) * 2) + "\"nanos\": 0\n" +
+                           new string(' ', indentLevel * 2) + "}";
+                }
+                else if (field.Type.Contains("StringValue") ||
+                         field.Type.Contains("Int32Value") ||
+                         field.Type.Contains("Int64Value") ||
+                         field.Type.Contains("UInt32Value") ||
+                         field.Type.Contains("UInt64Value") ||
+                         field.Type.Contains("BoolValue") ||
+                         field.Type.Contains("FloatValue") ||
+                         field.Type.Contains("DoubleValue") ||
+                         field.Type.Contains("BytesValue"))
+                {
+                    string defaultValue = field.Type.Contains("String") ? "\"\"" :
+                                         field.Type.Contains("Bool") ? "false" :
+                                         field.Type.Contains("Float") || field.Type.Contains("Double") ? "0.0" : "0";
+
+                    return "{\n" +
+                           new string(' ', (indentLevel + 1) * 2) + $"\"value\": {defaultValue}\n" +
+                           new string(' ', indentLevel * 2) + "}";
+                }
+            }
+
+            // Handle different field types
+            switch (field.Type.ToLower())
+            {
+                case "int32":
+                case "int64":
+                case "uint32":
+                case "uint64":
+                case "sint32":
+                case "sint64":
+                case "fixed32":
+                case "fixed64":
+                case "sfixed32":
+                case "sfixed64":
+                    return "0";
+
+                case "float":
+                case "double":
+                    return "0.0";
+
+                case "bool":
+                    return "false";
+
+                case "string":
+                    return "\"\"";
+
+                case "bytes":
+                    return "\"\"";
+
+                default:
+                    // Check if it's an enum type
+                    if (field.Type.Contains("Enum"))
+                    {
+                        string defaultEnumValue = GetDefaultEnumValue(field.Type);
+                        return $"\"{defaultEnumValue}\"";
+                    }
+
+                    // Check if it's a nested message type
+                    var nestedMessage = allMessages.FirstOrDefault(m =>
+                        m.Name == field.Type ||
+                        field.Type.EndsWith("." + m.Name));
+
+                    if (nestedMessage != null)
+                    {
+                        return GenerateDefaultMessageJson(nestedMessage, allMessages, indentLevel);
+                    }
+                    else
+                    {
+                        // Unknown type, default to 0
+                        return "0";
+                    }
+            }
+        }
+
+        private string GetDefaultEnumValue(string enumType)
+        {
+            // Extract enum name without package prefix
+            string enumName = enumType.Contains(".") ? enumType.Split('.').Last() : enumType;
+
+            // Normalize: remove spaces and convert to uppercase
+            string normalizedName = enumName.Replace(" ", "").ToUpper();
+
+            // Return INVALID value for each known enum type
+            return normalizedName switch
+            {
+                "VEHICLETYPEENUM" => "VEHICLE_TYPE_ENUM_INVALID",
+                "VEHICLEROLEENUM" => "VEHICLE_ROLE_ENUM_INVALID",
+                "PUBLICTRANSPORTVEHICLETYPE" => "PUBLIC_TRANSPORT_VEHICLE_TYPE_INVALID",
+                "PUBLICTRANSPORTVEHICLETYPEENUM" => "PUBLIC_TRANSPORT_VEHICLE_TYPE_INVALID",
+                "ACCURACYLEVELENUM" => "ACCURACY_LEVEL_ENUM_INVALID",
+                "INTERSECTIONPASSREQUESTTYPEENUM" => "INTERSECTION_PASS_REQUEST_TYPE_ENUM_INVALID",
+                "INTERSECTIONPASSREQUESTORROLEENUM" => "INTERSECTION_PASS_REQUESTOR_ROLE_ENUM_INVALID",
+                "INTERSECTIONPASSREQUESTORSUBROLEENUM" => "INTERSECTION_PASS_REQUESTOR_SUB_ROLE_ENUM_INVALID",
+                "INTERSECTIONPASSREQUESTIMPORTANCEENUM" => "INTERSECTION_PASS_REQUEST_IMPORTANCE_ENUM_INVALID",
+                "TRANSITVEHICLEOCCUPANCYENUM" => "TRANSIT_VEHICLE_OCCUPANCY_ENUM_INVALID",
+                "INTERSECTIONCONTROLLERSTATUSENUM" => "INTERSECTION_CONTROLLER_STATUS_ENUM_INVALID",
+                "TRAFFICLIGHTSIGNALSTATEENUM" => "TRAFFIC_LIGHT_SIGNAL_STATE_ENUM_INVALID",
+                "INTERSECTIONPASSREQUESTSTATUSENUM" => "INTERSECTION_PASS_REQUEST_STATUS_ENUM_INVALID",
+
+                // Fallback pattern
+                _ => normalizedName.EndsWith("ENUM")
+                    ? normalizedName.Replace("ENUM", "") + "_INVALID"
+                    : normalizedName + "_INVALID"
+            };
+        }
+
         private void ClearTest_Click(object sender, RoutedEventArgs e)
         {
             TestHexTextBox.Clear();
-            TestResultTextBox.Clear();
+
+            // When clearing decoded message, restore default message
+            if (!string.IsNullOrEmpty(_cachedDefaultMessage))
+            {
+                TestResultTextBox.Text = _cachedDefaultMessage;
+                StatusLabel.Content = "Showing default message structures";
+                StatusLabel.Foreground = Brushes.Gray;
+            }
+            else
+            {
+                TestResultTextBox.Clear();
+            }
         }
 
         public static string GetCombinedProtoDefinition()
@@ -360,6 +903,289 @@ namespace V2XController
                 return string.Empty;
             }
         }
+
+        private void EncodeToHex_Click(object sender, RoutedEventArgs e)
+        {
+            string jsonInput = TestResultTextBox.Text?.Trim() ?? string.Empty;
+
+            if (string.IsNullOrWhiteSpace(jsonInput))
+            {
+                MessageBox.Show("Please enter JSON data to encode", "No Input",
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            if (_loadedFiles.Count == 0)
+            {
+                MessageBox.Show("Please load proto files first", "No Proto Files",
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            // Check if "All (Auto-detect)" is selected
+            if (AllRadio?.IsChecked == true)
+            {
+                MessageBox.Show(
+                    "Cannot encode with 'All (Auto-detect)' mode.\n\n" +
+                    "Please select specific message direction:\n" +
+                    "RSU -> Controller\n" +
+                    "Controller -> RSU",
+                    "Encoding Not Supported",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning
+                );
+                return;
+            }
+
+            try
+            {
+                // Ensure proto definitions are compiled
+                var combinedContent = string.Join("\n\n", _loadedFiles.Select(f => f.Content));
+                if (!ProtobufParser.CompileProtoDefinition(combinedContent, out string compileError))
+                {
+                    MessageBox.Show($"Failed to compile proto definitions:\n{compileError}",
+                        "Compilation Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                    return;
+                }
+
+                // Remove comment lines that start with //
+                var lines = jsonInput.Split('\n');
+                var jsonLines = lines.Where(line => !line.TrimStart().StartsWith("//"));
+                string cleanJson = string.Join("\n", jsonLines).Trim();
+
+                if (string.IsNullOrWhiteSpace(cleanJson))
+                {
+                    MessageBox.Show("No valid JSON found after removing comments", "No JSON",
+                        MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+
+                // Determine message type based on current direction
+                string messageTypeName = _currentDirection == MessageDirection.RsuToController
+                    ? "RsuToControllerMessageData"
+                    : "ControllerToRsuMessageData";
+
+                // Get selected format from ComboBox
+                bool useBase64 = OutputFormatComboBox?.SelectedIndex == 1; // 0=Hex, 1=Base64
+
+                // Try to encode the JSON to protobuf with explicit message type
+                if (ProtobufParser.TryEncodeJsonToProtobufWithType(cleanJson, messageTypeName, useBase64, out string output, out string errorMessage))
+                {
+                    // Success - put the output in the input field
+                    TestHexTextBox.Text = output;
+
+                    string formatName = useBase64 ? "Base64" : "Hex";
+                    int byteCount = useBase64 ? Convert.FromBase64String(output).Length : output.Length / 2;
+
+                    StatusLabel.Content = $"Encoding successful ({byteCount} bytes, {formatName} format)";
+                    StatusLabel.Foreground = Brushes.Green;
+                }
+                else
+                {
+                    // Failed - show reason in status bar and message box
+                    StatusLabel.Content = $"Encoding failed: {errorMessage}";
+                    StatusLabel.Foreground = Brushes.Red;
+
+                    MessageBox.Show(
+                        $"Encoding failed:\n\n{errorMessage}",
+                        "Encoding Error",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Error
+                    );
+                }
+            }
+            catch (Exception ex)
+            {
+                StatusLabel.Content = $"Encoding error: {ex.Message}";
+                StatusLabel.Foreground = Brushes.Red;
+            }
+        }
+
+        private void CopyResult_Click(object sender, RoutedEventArgs e)
+        {
+            if (!string.IsNullOrWhiteSpace(TestResultTextBox.Text))
+            {
+                try
+                {
+                    Clipboard.SetText(TestResultTextBox.Text);
+                    StatusLabel.Content = "Copied to clipboard";
+                    StatusLabel.Foreground = Brushes.Green;
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Failed to copy to clipboard:\n{ex.Message}",
+                        "Copy Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                }
+            }
+        }
+
+        private void SearchTextBox_TextChanged(object sender, TextChangedEventArgs e)
+        {
+            if (string.IsNullOrWhiteSpace(SearchTextBox.Text))
+            {
+                CombinedProtoTextBox.SelectionStart = 0;
+                CombinedProtoTextBox.SelectionLength = 0;
+                SearchResultLabel.Text = "";
+                _searchMatches.Clear();
+                _currentSearchIndex = -1;
+                return;
+            }
+
+            PerformSearch(SearchTextBox.Text);
+        }
+
+        private void SearchTextBox_KeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.Key == Key.Enter)
+            {
+                SearchNext_Click(null, null);
+                e.Handled = true;
+            }
+            else if (e.Key == Key.Escape)
+            {
+                SearchTextBox.Clear();
+                CombinedProtoTextBox.Focus();
+                e.Handled = true;
+            }
+        }
+
+        private void PerformSearch(string searchTerm)
+        {
+            _searchMatches.Clear();
+            _currentSearchIndex = -1;
+
+            if (string.IsNullOrWhiteSpace(searchTerm))
+            {
+                // Clear selection
+                CombinedProtoTextBox.SelectionStart = 0;
+                CombinedProtoTextBox.SelectionLength = 0;
+                SearchResultLabel.Text = "";
+                return;
+            }
+
+            string text = CombinedProtoTextBox.Text;
+            int index = 0;
+
+            while ((index = text.IndexOf(searchTerm, index, StringComparison.OrdinalIgnoreCase)) != -1)
+            {
+                _searchMatches.Add(index);
+                index += searchTerm.Length;
+            }
+
+            if (_searchMatches.Count > 0)
+            {
+                _currentSearchIndex = 0;
+
+                // FORCE focus to TextBox to make selection visible
+                var wasFocused = SearchTextBox.IsFocused;
+                CombinedProtoTextBox.Focus();
+
+                // IMMEDIATELY highlight first match
+                int matchIndex = _searchMatches[_currentSearchIndex];
+                CombinedProtoTextBox.SelectionStart = matchIndex;
+                CombinedProtoTextBox.SelectionLength = searchTerm.Length;
+
+                // Scroll to line
+                int lineNumber = CombinedProtoTextBox.GetLineIndexFromCharacterIndex(matchIndex);
+                CombinedProtoTextBox.ScrollToLine(Math.Max(0, lineNumber - 5));
+
+                // Return focus to SearchBox if it was focused
+                if (wasFocused)
+                {
+                    Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        SearchTextBox.Focus();
+                        SearchTextBox.SelectionStart = SearchTextBox.Text.Length; // Cursor at end
+                    }), System.Windows.Threading.DispatcherPriority.Background);
+                }
+
+                SearchResultLabel.Text = $"{_currentSearchIndex + 1} of {_searchMatches.Count}";
+                SearchResultLabel.Foreground = Brushes.Green;
+            }
+            else
+            {
+                SearchResultLabel.Text = "No matches";
+                SearchResultLabel.Foreground = Brushes.Gray;
+            }
+        }
+
+        private void SearchNext_Click(object sender, RoutedEventArgs e)
+        {
+            if (_searchMatches.Count == 0)
+                return;
+
+            _currentSearchIndex = (_currentSearchIndex + 1) % _searchMatches.Count;
+            HighlightMatch();
+
+            // Only take focus if user clicked button (not keyboard shortcut while typing)
+            if (sender != null)
+            {
+                CombinedProtoTextBox.Focus();
+            }
+        }
+
+        private void SearchPrevious_Click(object sender, RoutedEventArgs e)
+        {
+            if (_searchMatches.Count == 0)
+                return;
+
+            _currentSearchIndex = (_currentSearchIndex - 1 + _searchMatches.Count) % _searchMatches.Count;
+            HighlightMatch();
+
+            // Only take focus if user clicked button (not keyboard shortcut while typing)
+            if (sender != null)
+            {
+                CombinedProtoTextBox.Focus();
+            }
+        }
+
+        private void HighlightMatch()
+        {
+            if (_searchMatches.Count == 0 || _currentSearchIndex < 0)
+                return;
+
+            int matchIndex = _searchMatches[_currentSearchIndex];
+
+            // Set selection
+            CombinedProtoTextBox.SelectionStart = matchIndex;
+            CombinedProtoTextBox.SelectionLength = SearchTextBox.Text.Length;
+
+            // Scroll to line
+            int lineNumber = CombinedProtoTextBox.GetLineIndexFromCharacterIndex(matchIndex);
+            CombinedProtoTextBox.ScrollToLine(Math.Max(0, lineNumber - 5));
+
+            SearchResultLabel.Text = $"{_currentSearchIndex + 1} of {_searchMatches.Count}";
+            SearchResultLabel.Foreground = Brushes.Green;
+        }
+
+        private void CombinedProtoTextBox_KeyDown(object sender, KeyEventArgs e)
+        {
+            // Ctrl+F to focus search
+            if (e.Key == Key.F && Keyboard.Modifiers == ModifierKeys.Control)
+            {
+                SearchTextBox.Focus();
+                SearchTextBox.SelectAll();
+                e.Handled = true;
+            }
+            // F3 to find next
+            else if (e.Key == Key.F3 && Keyboard.Modifiers == ModifierKeys.None)
+            {
+                SearchNext_Click(null, null);
+                e.Handled = true;
+            }
+            // Shift+F3 to find previous
+            else if (e.Key == Key.F3 && Keyboard.Modifiers == ModifierKeys.Shift)
+            {
+                SearchPrevious_Click(null, null);
+                e.Handled = true;
+            }
+        }
+    }
+
+    public enum MessageDirection
+    {
+        RsuToController,
+        ControllerToRsu
     }
 
     public class ProtoFileInfo
@@ -370,5 +1196,12 @@ namespace V2XController
         public string MessageSummary { get; set; }
         public string Status { get; set; }
         public Brush StatusColor { get; set; }
+    }
+
+    public class OneofOption
+    {
+        public int FieldNumber { get; set; }
+        public string Name { get; set; }
+        public string DisplayName { get; set; }
     }
 }

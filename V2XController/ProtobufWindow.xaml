@@ -42,21 +42,73 @@
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="10"/>
                 <RowDefinition Height="Auto"/>
+                <RowDefinition Height="10"/>
+                <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
 
+            
             <!-- Proto Definition -->
             <GroupBox Grid.Row="0" Header="Combined Proto Definition (Read-Only)">
-                <TextBox x:Name="CombinedProtoTextBox"
-                         IsReadOnly="True"
-                         AcceptsReturn="True"
-                         TextWrapping="NoWrap"
-                         VerticalScrollBarVisibility="Auto"
-                         HorizontalScrollBarVisibility="Auto"
-                         FontFamily="Consolas"
-                         FontSize="11"
-                         Padding="5"
-                         Background="#F9F9F9"
-                         Foreground="#333333"/>
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+
+                    <!-- Search Bar -->
+                    <Border Grid.Row="0" Background="#FFFFEB" Padding="5" BorderBrush="#FFCC00" BorderThickness="0,0,0,1">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+
+                            <TextBlock Grid.Column="0" Text="Search:" VerticalAlignment="Center" Margin="0,0,5,0" FontSize="14"/>
+
+                            <TextBox Grid.Column="1" x:Name="SearchTextBox" 
+                         VerticalAlignment="Center"
+                         Padding="4"
+                         TextChanged="SearchTextBox_TextChanged"
+                         KeyDown="SearchTextBox_KeyDown"
+                         ToolTip="Search in proto definitions (Ctrl+F)"/>
+
+                            <TextBlock Grid.Column="2" x:Name="SearchResultLabel"
+                           VerticalAlignment="Center" 
+                           Margin="10,0,10,0"
+                           Foreground="Gray"
+                           FontSize="11"/>
+
+                            <Button Grid.Column="3" Content="▲" 
+                        Width="28" Height="24"
+                        Click="SearchPrevious_Click" 
+                        Margin="0,0,3,0"
+                        ToolTip="Previous (Shift+F3)"/>
+
+                            <Button Grid.Column="4" Content="▼" 
+                        Width="28" Height="24"
+                        Click="SearchNext_Click"
+                        ToolTip="Next (F3)"/>
+                        </Grid>
+                    </Border>
+
+                    <TextBox Grid.Row="1" x:Name="CombinedProtoTextBox"
+         IsReadOnly="True"
+         AcceptsReturn="True"
+         TextWrapping="NoWrap"
+         VerticalScrollBarVisibility="Auto"
+         HorizontalScrollBarVisibility="Auto"
+         FontFamily="Consolas"
+         FontSize="11"
+         Padding="5"
+         Background="#F9F9F9"
+         Foreground="#333333"
+         SelectionBrush="Yellow"
+         IsInactiveSelectionHighlightEnabled="True"
+         PreviewKeyDown="CombinedProtoTextBox_KeyDown"/>
+                </Grid>
             </GroupBox>
 
             <!-- Status Bar -->
@@ -69,8 +121,36 @@
                        Foreground="Gray"/>
             </Border>
 
+            <!-- Message Direction Selection -->
+            <GroupBox Grid.Row="4" Header="Message Direction and Type">
+                <StackPanel>
+                    <!-- Radio buttons for direction -->
+                    <StackPanel Orientation="Horizontal" Margin="0,5,0,10">
+                        <TextBlock Text="Direction:" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="SemiBold"/>
+                        <RadioButton x:Name="RsuToControllerRadio" Content="RSU -> Controller" 
+                         GroupName="Direction" Margin="0,0,15,0"
+                         Checked="MessageDirection_Changed"/>
+                        <RadioButton x:Name="ControllerToRsuRadio" Content="Controller -> RSU" 
+                         GroupName="Direction" Margin="0,0,15,0"
+                         Checked="MessageDirection_Changed"/>
+                        <RadioButton x:Name="AllRadio" Content="All (Auto-detect)" 
+                         GroupName="Direction" Margin="0,0,15,0"
+                         Checked="MessageDirection_Changed" IsChecked="True"/>
+                    </StackPanel>
+
+                    <!-- Dropdown for message type -->
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                        <TextBlock Text="Message Type:" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="SemiBold"/>
+                        <ComboBox x:Name="MessageTypeComboBox" Width="300" 
+                      SelectionChanged="MessageType_Changed">
+                            <!-- Items will be populated dynamically based on selected direction -->
+                        </ComboBox>
+                    </StackPanel>
+                </StackPanel>
+            </GroupBox>
+
             <!-- Test Input -->
-            <GroupBox Grid.Row="4" Header="Decoder">
+            <GroupBox Grid.Row="6" Header="Decoder">
                 <StackPanel>
                     <TextBlock Text="Hex/Base64 Input:" 
                                Margin="0,0,0,5"
@@ -198,21 +278,70 @@
                 </Grid>
             </GroupBox>
 
+
             <!-- Decoded Result -->
             <GroupBox Grid.Row="2" Header="Decoded Result" FontWeight="Bold">
-                <TextBox x:Name="TestResultTextBox"
-                         IsReadOnly="True"
-                         AcceptsReturn="True"
-                         TextWrapping="Wrap"
-                         VerticalScrollBarVisibility="Auto"
-                         HorizontalScrollBarVisibility="Auto"
-                         FontFamily="Consolas"
-                         FontSize="11"
-                         Padding="5"
-                         Background="#F9F9F9"
-                         Foreground="#333333"/>
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <TextBox x:Name="TestResultTextBox"
+                 Grid.Row="0"
+                 AcceptsReturn="True"
+                 TextWrapping="Wrap"
+                 VerticalScrollBarVisibility="Auto"
+                 HorizontalScrollBarVisibility="Auto"
+                 FontFamily="Consolas"
+                 FontSize="11"
+                 Padding="5"
+                 Background="#F9F9F9"
+                 Foreground="#333333"/>
+
+                    <Grid Grid.Row="1" Margin="0,5,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+
+                        <TextBlock Grid.Column="0" 
+                       Text="Encode as:" 
+                       VerticalAlignment="Center"
+                       Margin="0,0,5,0"/>
+
+                        <ComboBox x:Name="OutputFormatComboBox"
+                      Grid.Column="1"
+                      SelectedIndex="1"
+                      Width="100"
+                      HorizontalAlignment="Left">
+                            <ComboBoxItem Content="Hex"/>
+                            <ComboBoxItem Content="Base64"/>
+                        </ComboBox>
+
+                        <StackPanel Grid.Column="3" 
+                        Orientation="Horizontal" 
+                        HorizontalAlignment="Right">
+                            <Button Content="Encode" 
+                        Click="EncodeToHex_Click"
+                        Padding="10,5"
+                        Margin="0,0,5,0"
+                        Background="#4CAF50"
+                        Foreground="White"
+                        ToolTip="Convert JSON to Hex/Base64 and place in input field"/>
+                            <Button Content="Copy" 
+                        Click="CopyResult_Click"
+                        Padding="10,5"
+                        Background="#2196F3"
+                        Foreground="White"/>
+                        </StackPanel>
+                    </Grid>
+                </Grid>
             </GroupBox>
         </Grid>
+
 
         <!-- Help Text - přes všechny sloupce -->
         <StackPanel Grid.Row="2" Grid.ColumnSpan="3" Margin="0,5,0,0">
