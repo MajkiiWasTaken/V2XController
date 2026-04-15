@@ -105,8 +105,8 @@
          Padding="5"
          Background="#F9F9F9"
          Foreground="#333333"
-         SelectionBrush="Yellow"
-         IsInactiveSelectionHighlightEnabled="True"
+         SelectionBrush="Orange"
+         SelectionTextBrush="Black"
          PreviewKeyDown="CombinedProtoTextBox_KeyDown"/>
                 </Grid>
             </GroupBox>

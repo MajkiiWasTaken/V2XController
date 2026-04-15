@@ -13099,23 +13099,33 @@ namespace V2XController
 
         private void OpenProtobuf_Click(object sender, RoutedEventArgs e)
         {
-            if (_protobufWindow == null)
+            if (_protobufWindow == null || !_protobufWindow.IsLoaded)
             {
                 _protobufWindow = new ProtobufWindow { Owner = this };
-                _protobufWindow.Closed += (s, ev) => _protobufWindow = null;
-                _protobufWindow.Show();
+
+                // Hide MainWindow
+                this.Hide();
+
+                // Show ProtobufWindow as dialog (blocks until closed)
+                _protobufWindow.ShowDialog();
+
+                // When ProtobufWindow closes, show MainWindow again
+                this.Show();
+
+                // Clear reference
+                _protobufWindow = null;
             }
             else
             {
+                // If still open, just activate it
                 if (_protobufWindow.WindowState == WindowState.Minimized)
                     _protobufWindow.WindowState = WindowState.Normal;
                 _protobufWindow.Activate();
             }
         }
+
         private bool IsProtobufMessage(string line)
         {
-            // Protobuf zprávy jsou typicky binární data v hex formátu
-            // Můžete definovat vlastní prefix nebo detekční mechanismus
             if (line.StartsWith("PB:", StringComparison.OrdinalIgnoreCase))
                 return true;
 

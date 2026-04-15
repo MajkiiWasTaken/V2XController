@@ -11,6 +11,9 @@ using System.Windows.Input;
 using System.Windows.Media;
 using Windows.UI.Xaml.Hosting;
 using static V2XController.ProtobufParser;
+using System.Windows.Documents;
+using System.Threading.Tasks;
+
 
 namespace V2XController
 {
@@ -44,11 +47,20 @@ namespace V2XController
         private Brush _originalBackground;
         private Brush _highlightBrush = new SolidColorBrush(Color.FromRgb(255, 255, 0)); // Yellow
 
+        private System.Windows.Threading.DispatcherTimer _searchDebounceTimer;
+
 
         public ProtobufWindow()
         {
             InitializeComponent();
             LoadedFilesPanel.ItemsSource = _loadedFiles;
+
+            // Initialize debounce timer for search
+            _searchDebounceTimer = new System.Windows.Threading.DispatcherTimer
+            {
+                Interval = TimeSpan.FromMilliseconds(700) // Wait 700ms after last keystroke
+            };
+            _searchDebounceTimer.Tick += SearchDebounceTimer_Tick;
 
             // Subscribe to Loaded event to ensure XAML is fully initialized
             Loaded += ProtobufWindow_Loaded;
@@ -418,7 +430,6 @@ namespace V2XController
 
                 ProtobufParser.ClearAllDefinitions();
 
-                // Clear default message cache and result
                 _cachedDefaultMessage = string.Empty;
                 TestResultTextBox.Clear();
 
@@ -444,6 +455,7 @@ namespace V2XController
 
             CombinedProtoTextBox.Text = sb.ToString();
         }
+
 
         private void RecompileAllProtos()
         {
@@ -1021,6 +1033,9 @@ namespace V2XController
 
         private void SearchTextBox_TextChanged(object sender, TextChangedEventArgs e)
         {
+            // Stop existing timer
+            _searchDebounceTimer.Stop();
+
             if (string.IsNullOrWhiteSpace(SearchTextBox.Text))
             {
                 CombinedProtoTextBox.SelectionStart = 0;
@@ -1031,7 +1046,11 @@ namespace V2XController
                 return;
             }
 
-            PerformSearch(SearchTextBox.Text);
+            SearchResultLabel.Text = "Searching... (Ctrl+F to edit search)";
+            SearchResultLabel.Foreground = Brushes.Gray;
+
+            // Start debounce timer - will trigger search after 300ms
+            _searchDebounceTimer.Start();
         }
 
         private void SearchTextBox_KeyDown(object sender, KeyEventArgs e)
@@ -1049,16 +1068,13 @@ namespace V2XController
             }
         }
 
-        private void PerformSearch(string searchTerm)
+        private void PerformSearchInternal(string searchTerm)
         {
             _searchMatches.Clear();
             _currentSearchIndex = -1;
 
             if (string.IsNullOrWhiteSpace(searchTerm))
             {
-                // Clear selection
-                CombinedProtoTextBox.SelectionStart = 0;
-                CombinedProtoTextBox.SelectionLength = 0;
                 SearchResultLabel.Text = "";
                 return;
             }
@@ -1066,6 +1082,7 @@ namespace V2XController
             string text = CombinedProtoTextBox.Text;
             int index = 0;
 
+            // Simple string search
             while ((index = text.IndexOf(searchTerm, index, StringComparison.OrdinalIgnoreCase)) != -1)
             {
                 _searchMatches.Add(index);
@@ -1075,32 +1092,7 @@ namespace V2XController
             if (_searchMatches.Count > 0)
             {
                 _currentSearchIndex = 0;
-
-                // FORCE focus to TextBox to make selection visible
-                var wasFocused = SearchTextBox.IsFocused;
-                CombinedProtoTextBox.Focus();
-
-                // IMMEDIATELY highlight first match
-                int matchIndex = _searchMatches[_currentSearchIndex];
-                CombinedProtoTextBox.SelectionStart = matchIndex;
-                CombinedProtoTextBox.SelectionLength = searchTerm.Length;
-
-                // Scroll to line
-                int lineNumber = CombinedProtoTextBox.GetLineIndexFromCharacterIndex(matchIndex);
-                CombinedProtoTextBox.ScrollToLine(Math.Max(0, lineNumber - 5));
-
-                // Return focus to SearchBox if it was focused
-                if (wasFocused)
-                {
-                    Dispatcher.BeginInvoke(new Action(() =>
-                    {
-                        SearchTextBox.Focus();
-                        SearchTextBox.SelectionStart = SearchTextBox.Text.Length; // Cursor at end
-                    }), System.Windows.Threading.DispatcherPriority.Background);
-                }
-
-                SearchResultLabel.Text = $"{_currentSearchIndex + 1} of {_searchMatches.Count}";
-                SearchResultLabel.Foreground = Brushes.Green;
+                HighlightCurrentMatch();
             }
             else
             {
@@ -1109,19 +1101,15 @@ namespace V2XController
             }
         }
 
+        
+
         private void SearchNext_Click(object sender, RoutedEventArgs e)
         {
             if (_searchMatches.Count == 0)
                 return;
 
             _currentSearchIndex = (_currentSearchIndex + 1) % _searchMatches.Count;
-            HighlightMatch();
-
-            // Only take focus if user clicked button (not keyboard shortcut while typing)
-            if (sender != null)
-            {
-                CombinedProtoTextBox.Focus();
-            }
+            HighlightCurrentMatch();
         }
 
         private void SearchPrevious_Click(object sender, RoutedEventArgs e)
@@ -1130,16 +1118,32 @@ namespace V2XController
                 return;
 
             _currentSearchIndex = (_currentSearchIndex - 1 + _searchMatches.Count) % _searchMatches.Count;
-            HighlightMatch();
-
-            // Only take focus if user clicked button (not keyboard shortcut while typing)
-            if (sender != null)
-            {
-                CombinedProtoTextBox.Focus();
-            }
+            HighlightCurrentMatch();
         }
 
-        private void HighlightMatch()
+
+        private void HighlightCurrentMatch()
+        {
+            if (_searchMatches.Count == 0 || _currentSearchIndex < 0 || string.IsNullOrEmpty(SearchTextBox.Text))
+                return;
+
+            int matchIndex = _searchMatches[_currentSearchIndex];
+            int searchLength = SearchTextBox.Text.Length;
+
+            // Take focus for F3/button navigation
+            CombinedProtoTextBox.Focus();
+            CombinedProtoTextBox.SelectionStart = matchIndex;
+            CombinedProtoTextBox.SelectionLength = searchLength;
+
+            // Scroll
+            int lineNumber = CombinedProtoTextBox.GetLineIndexFromCharacterIndex(matchIndex);
+            CombinedProtoTextBox.ScrollToLine(Math.Max(0, lineNumber - 5));
+
+            SearchResultLabel.Text = $"{_currentSearchIndex + 1} of {_searchMatches.Count}";
+            SearchResultLabel.Foreground = Brushes.Green;
+        }
+
+        /*private void HighlightMatch()
         {
             if (_searchMatches.Count == 0 || _currentSearchIndex < 0)
                 return;
@@ -1156,7 +1160,7 @@ namespace V2XController
 
             SearchResultLabel.Text = $"{_currentSearchIndex + 1} of {_searchMatches.Count}";
             SearchResultLabel.Foreground = Brushes.Green;
-        }
+        }*/
 
         private void CombinedProtoTextBox_KeyDown(object sender, KeyEventArgs e)
         {
@@ -1173,12 +1177,83 @@ namespace V2XController
                 SearchNext_Click(null, null);
                 e.Handled = true;
             }
-            // Shift+F3 to find previous
-            else if (e.Key == Key.F3 && Keyboard.Modifiers == ModifierKeys.Shift)
+           
+            else if (e.Key == Key.F2 && Keyboard.Modifiers == ModifierKeys.None)
             {
                 SearchPrevious_Click(null, null);
                 e.Handled = true;
             }
+        }
+
+        private async void SearchDebounceTimer_Tick(object sender, EventArgs e)
+        {
+            _searchDebounceTimer.Stop();
+
+            if (!string.IsNullOrWhiteSpace(SearchTextBox.Text))
+            {
+                await PerformSearchAsync(SearchTextBox.Text);
+            }
+        }
+
+        private async Task PerformSearchAsync(string searchTerm)
+        {
+            if (string.IsNullOrWhiteSpace(searchTerm))
+                return;
+
+            // READ TEXT ON UI THREAD FIRST!
+            string textToSearch = CombinedProtoTextBox.Text;
+
+            // Run search on background thread
+            var matches = await Task.Run(() =>
+            {
+                var results = new List<int>();
+                int index = 0;
+
+                while ((index = textToSearch.IndexOf(searchTerm, index, StringComparison.OrdinalIgnoreCase)) != -1)
+                {
+                    results.Add(index);
+                    index += searchTerm.Length;
+                }
+
+                return results;
+            });
+
+            // Update UI on main thread (we're back on UI thread after await)
+            _searchMatches = matches;
+
+            if (_searchMatches.Count > 0)
+            {
+                _currentSearchIndex = 0;
+                HighlightCurrentMatchWithoutFocus();
+            }
+            else
+            {
+                SearchResultLabel.Text = "No matches";
+                SearchResultLabel.Foreground = Brushes.Gray;
+            }
+        }
+
+        private void HighlightCurrentMatchWithoutFocus()
+        {
+            if (_searchMatches.Count == 0 || _currentSearchIndex < 0 || string.IsNullOrEmpty(SearchTextBox.Text))
+                return;
+
+            int matchIndex = _searchMatches[_currentSearchIndex];
+            int searchLength = SearchTextBox.Text.Length;
+
+            // Keep focus in TextBox - selection stays visible!
+            CombinedProtoTextBox.Focus();
+            CombinedProtoTextBox.SelectionStart = matchIndex;
+            CombinedProtoTextBox.SelectionLength = searchLength;
+
+            // Scroll
+            int lineNumber = CombinedProtoTextBox.GetLineIndexFromCharacterIndex(matchIndex);
+            CombinedProtoTextBox.ScrollToLine(Math.Max(0, lineNumber - 5));
+
+            SearchResultLabel.Text = $"{_currentSearchIndex + 1} of {_searchMatches.Count}";
+            SearchResultLabel.Foreground = Brushes.Green;
+
+            // DON'T return focus - user can press Ctrl+F to continue typing
         }
     }
 
