@@ -3,6 +3,19 @@ using System.Runtime.CompilerServices;
 using System.Windows;
 using System.Windows.Shapes;
 
+/**********************************************************************************************************
+ * V2X Controller - ActivationZone.cs
+ * Author: Michal Švrček
+ * Version: 1.0.7
+ * Description: Represents an activation zone within the V2X Controller application. Handles properties such as
+ *              name, rectangle, width, height, azimuth, last tram ID, bounds, active state, color, start point,
+ *              latitude, longitude, main zone, sub zone, and switch zone status. Provides property change
+ *              notifications for data binding in the UI.
+ *              
+ * Copyright (c) 2025 Hroší stavby Morava a.s.
+ * All rights reserved.
+ *********************************************************************************************************/
+
 public class ActivationZone : INotifyPropertyChanged
 {
     private string name;
@@ -21,7 +34,6 @@ public class ActivationZone : INotifyPropertyChanged
     private int subZone = 0;
     public bool isSwitchZone = false;
 
-    // NEW: Polyline segment tracking
     private Guid? polylineId;
     private int segmentIndex = -1;
     private string segmentType = ""; // "Přibližovací", "Blokovací", "Vzdalovací"

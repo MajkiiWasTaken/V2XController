@@ -3,6 +3,17 @@ using System.Globalization;
 using System.IO;
 using System.Xml.Linq;
 
+/**********************************************************************************************************
+ * V2X Controller - ExportSettingsStorage.cs
+ * Author: Michal Švrček
+ * Version: 1.2.4
+ * Description: Storage logic for export settings in the V2X Controller application. Handles loading and saving
+ *              export profiles, including TCP and tunnel configurations, as well as settings for profiles.
+ *
+ * Copyright (c) 2025 Hroší stavby Morava a.s.
+ * All rights reserved.
+ *********************************************************************************************************/
+
 namespace V2XController
 {
     public sealed class ExportProfile

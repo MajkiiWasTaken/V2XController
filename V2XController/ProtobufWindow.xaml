@@ -1,4 +1,15 @@
-﻿<Window x:Class="V2XController.ProtobufWindow"
+﻿<!--
+    ProtobufWindow.xaml
+    Author: Michal Švrček
+    Version: 2.4.7
+    
+    Description: Protobuf Message Translator window of the V2X Controller application. 
+    Allows users to add multiple .proto files, automatically detects message types, and provides a UI for decoding messages.
+    
+    Copyright (c) 2025 Hroší stavby Morava a.s.
+    All rights reserved.
+    -->
+<Window x:Class="V2XController.ProtobufWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Protobuf Message Translator"

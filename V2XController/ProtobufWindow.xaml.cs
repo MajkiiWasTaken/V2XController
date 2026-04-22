@@ -14,6 +14,19 @@ using static V2XController.ProtobufParser;
 using System.Windows.Documents;
 using System.Threading.Tasks;
 
+/**********************************************************************************************************
+ * V2X Controller - ProtobufWindow.xaml.cs
+ * Author: Michal Švrček
+ * Version: 2.4.7
+ * Description: Protobuf window logic of the V2X Controller application. Translator for protobuf definitions 
+ *              and messages, allowing users to load .proto files, view combined definitions. Generate default 
+ *              message structures, and decode protobuf messages from hex or base64 input.
+ *              
+ * Copyright (c) 2025 Hroší stavby Morava a.s.
+ * All rights reserved.
+ *********************************************************************************************************/
+
+
 
 namespace V2XController
 {

@@ -1,6 +1,19 @@
 ﻿using System.Globalization;
 using System.Windows.Media.Animation;
 
+/**********************************************************************************************************
+ * V2X Controller - ExportSettings.cs
+ * Author: Michal Švrček
+ * Version: 1.2.4
+ * Description: Defines the ExportSettings class, which encapsulates the settings for exporting Modbus data, 
+ *              including TCP, serial, and tunnel configurations. Provides methods to capture settings from 
+ *              the UI and to clone settings instances.
+ *              
+ * Copyright (c) 2025 Hroší stavby Morava a.s.
+ * All rights reserved.
+ *********************************************************************************************************/
+
+
 namespace V2XController
 {
     public class ExportSettings

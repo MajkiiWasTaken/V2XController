@@ -21,7 +21,24 @@ using System.Xml;
 using System.Xml.Linq;
 using System.Runtime.InteropServices;
 
-//TODO:
+
+/**********************************************************************************************************
+ * V2X Controller - MainWindow.xaml.cs
+ * Author: Michal Švrček
+ * Version: 3.1.2
+ * Description: Main window logic of the V2X Controller application. Handles map display, user interactions, 
+ *              CAM/SRV message processing, and activation zone management. Provides a visual interface 
+ *              for monitoring and controlling V2X communications in real-time. 
+ *              Activation zone drawing, tram tracking, tram simulation, map panning/zooming, 
+ *              CAM message playback, exporting data onto devices and a terminal for raw message display, 
+ *              Protobuf Translator and more. Designed for use in traffic management and V2X testing scenarios. 
+ *              
+ * Copyright (c) 2025 Hroší stavby Morava a.s.
+ * All rights reserved.
+ *********************************************************************************************************/
+
+
+//TODO: Polyline
 
 namespace V2XController
 {
@@ -466,6 +483,11 @@ namespace V2XController
 
         //||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
         //Main window constructor
+
+
+        /// <summary>
+        /// Main window constructor. Initializes UI, sets up event handlers
+        /// </summary>
         public MainWindow()
         {
             InitializeComponent();
@@ -702,6 +724,11 @@ namespace V2XController
             this.Closing += MainWindow_Closing;
         }
 
+        /// <summary>
+        /// Closes main window and performs necessary cleanup.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void MainWindow_Closing(object sender, CancelEventArgs e)
         {
             Console.WriteLine("[APP] Closing application...");
@@ -738,6 +765,10 @@ namespace V2XController
             }
         }
 
+
+        /// <summary>
+        /// Loads available COM ports into the dropdown. Called on startup and when refreshing the list.
+        /// </summary>
         private void LoadAvailableComPorts()
         {
             ComPortsComboBox.Items.Clear();
@@ -749,6 +780,9 @@ namespace V2XController
                 ComPortsComboBox.SelectedIndex = 0;
         }
 
+        /// <summary>
+        /// Ensures the default radius selection is set in the RadiusComboBox.
+        /// </summary>
         private void EnsureDefaultRadiusSelection()
         {
             if (RadiusComboBox == null) return;
@@ -771,7 +805,12 @@ namespace V2XController
         //||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
         // METHODS FOR THE MAP
 
-        //calculating tile location
+        /// <summary>
+        /// Converts latitude and longitude to tile X/Y coordinates for a given zoom level.
+        /// </summary>
+        /// <param name="lat">Latitude in degrees</param>
+        /// <param name="lon">Longitude in degrees</param>
+        /// <param name="zoom">Zoom level</param>
         private static (int tileX, int tileY) LatLonToTileXY(double lat, double lon, int zoom)
         {
             int tileX = (int)Math.Floor((lon + 180.0) / 360.0 * (1 << zoom));
@@ -783,7 +822,12 @@ namespace V2XController
         }
 
 
-        //Position on the map
+        /// <summary>
+        /// Converts latitude and longitude to canvas X/Y coordinates based on the current camera position and zoom level.
+        /// </summary>
+        /// <param name="lat">Latitude in degrees</param>
+        /// <param name="lon">Longitude in degrees</param>
+        /// <returns>Canvas X/Y coordinates</returns>
         public (double x, double y) ConvertLatLonToCanvasXY(double lat, double lon)
         {
             // Convert lat/lon to fractional tile coordinates
@@ -802,14 +846,26 @@ namespace V2XController
         }
 
 
-        //CONVERT PIXELS TO LAT/LON
+        /// <summary>
+        /// Converts canvas pixels to Latitude and longitude based on the current camera position and zoom level.
+        /// </summary>
+        /// <param name="x">Canvas X coordinate</param>
+        /// <param name="y">Canvas Y coordinate</param>
+        /// <param name="zoom">Zoom level</param>
+        /// <returns>Latitude and longitude in degrees</returns>
         public (double Latitude, double Longitude) ConvertCanvasXYToLatLon(double x, double y, int zoom)
         {
             var lonlat = CanvasPixelsToLatLon(new Point(x, y), latitude, longitude, zoom);
             return (lonlat.Y, lonlat.X);
         }
 
-        // Loading map tiles on the canvas
+        /// <summary>
+        /// Loads map tiles smoothly with optional offsets.
+        /// </summary>
+        /// <param name="startX">Starting tile X coordinate</param>
+        /// <param name="startY">Starting tile Y coordinate</param>
+        /// <param name="offsetX">Optional X offset in pixels</param>
+        /// <param name="offsetY">Optional Y offset in pixels</param>
         private async Task LoadTilesSmoothAsync(int startX, int startY, double offsetX = 0, double offsetY = 0)
         {
             Console.WriteLine($"[TILES] Start: tile=({startX}, {startY}), offset=({offsetX:F1}, {offsetY:F1})");
@@ -859,6 +915,14 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Fetches a map tile asynchronously.
+        /// </summary>
+        /// <param name="z">Zoom level</param>
+        /// <param name="x">Tile X coordinate</param>
+        /// <param name="y">Tile Y coordinate</param>
+        /// <param name="ct">Cancellation token</param>
+        /// <returns>BitmapSource of the tile or null if fetch failed</returns>
         private async Task<BitmapSource?> FetchTileAsync(int z, int x, int y, CancellationToken ct)
         {
             if (_tileCache.TryGetValue((z, x, y), out var cached))
@@ -896,6 +960,11 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Creates an Image control for a map tile with a fade-in animation.
+        /// </summary>
+        /// <param name="bmp">BitmapSource of the tile</param>
+        /// <returns>Image control with the tile</returns>
         private Image CreateTileImage(BitmapSource? bmp)
         {
             var img = new Image
@@ -917,6 +986,11 @@ namespace V2XController
             return img;
         }
 
+        /// <summary>
+        /// Generates a list of tile offsets in a spiral order.
+        /// </summary>
+        /// <param name="count">Number of tiles in one dimension</param>
+        /// <returns>List of tile offsets</returns>
         private List<(int offX, int offY)> GenerateSpiralOrder(int count)
         {
             int n = count;
@@ -936,10 +1010,19 @@ namespace V2XController
         }
 
 
-
+        /// <summary>
+        /// Handles the mouse wheel event on the tile canvas.
+        /// </summary>
+        /// <param name="sender">The source of the event.</param>
+        /// <param name="e">The mouse wheel event arguments.</param>
         private void TileCanvas_MouseWheel(object sender, MouseWheelEventArgs e) { }
 
-        // Prefer SRV (RSU) polohu, fallback střed mapy; lazy fetch + cache
+        /// <summary>
+        /// Ensures local area altitude is resolved and stored. 
+        /// Uses caching to avoid redundant API calls for nearby locations. 
+        /// Updates the altitude label in the UI accordingly.
+        /// </summary>
+        /// <param name="force">Whether to force a refresh of the altitude data.</param>
         private async Task EnsureLocalAreaAltitudeAsync(bool force = false)
         {
             double lat, lon;
@@ -982,7 +1065,12 @@ namespace V2XController
             }
         }
 
-        // Altitude providers: OpenTopodata first, then Open‑Meteo fallback
+        /// <summary>
+        /// Queries the altitude for the specified latitude and longitude.
+        /// </summary>
+        /// <param name="lat">The latitude of the location.</param>
+        /// <param name="lon">The longitude of the location.</param>
+        /// <returns>The altitude in meters, or null if the query fails.</returns>
         private static async Task<double?> QueryAltitudeAsync(double lat, double lon)
         {
             // Provider 1: OpenTopodata (SRTM90m)
@@ -1052,7 +1140,12 @@ namespace V2XController
             return null;
         }
 
-        // Extrakce alt z CAM XML (<vehPt ... alt="123.4" .../>)
+        /// <summary>
+        /// Extracts the altitude from a CAM XML string.
+        /// </summary>
+        /// <param name="rawXml">The raw CAM XML string.</param>
+        /// <param name="altitudeMeters">The extracted altitude in meters.</param>
+        /// <returns>True if the altitude was successfully extracted; otherwise, false.</returns>
         private static bool TryExtractAltitudeFromCamXml(string rawXml, out double altitudeMeters)
         {
             altitudeMeters = 0;
@@ -1077,7 +1170,11 @@ namespace V2XController
             catch { return false; }
         }
 
-        // Live CAM: true = filtrovat (nevykreslit), false = povolit
+        /// <summary>
+        /// Filters a CAM XML string by altitude.
+        /// </summary>
+        /// <param name="rawXml">The raw CAM XML string.</param>
+        /// <returns>True if the CAM should be filtered; otherwise, false.</returns>
         private bool TryFilterCamByAltitude(string rawXml)
         {
             if (FilterCheckBox?.IsChecked != true) return false;
@@ -1091,7 +1188,12 @@ namespace V2XController
             return Math.Abs(camAlt - _localAltitudeMeters.Value) > 50.0;
         }
 
-        // Replay: filter by altitude OR invalid ID only when checkbox is ON
+        /// <summary>
+        /// Filters a replay by altitude.
+        /// </summary>
+        /// <param name="fullId">The full vehicle ID.</param>
+        /// <param name="ts">The timestamp of the replay.</param>
+        /// <returns>True if the replay should be filtered; otherwise, false.</returns>
         private bool FilterReplayByAltitude(string fullId, TimeSpan ts)
         {
             if (FilterCheckBox?.IsChecked != true) return false;
@@ -1108,6 +1210,11 @@ namespace V2XController
             return false;
         }
 
+        /// <summary>
+        /// Determines whether a vehicle ID is invalid.
+        /// </summary>
+        /// <param name="vehicleId">The vehicle ID to check.</param>
+        /// <returns>True if the vehicle ID is invalid; otherwise, false.</returns>
         private static bool IsInvalidVehicleId(string vehicleId)
         {
             if (string.IsNullOrWhiteSpace(vehicleId)) return true;
@@ -1120,13 +1227,21 @@ namespace V2XController
             return true;
         }
 
-        // Helper: apply the ID rule only when the checkbox is ON
+        /// <summary>
+        /// Determines whether a live vehicle ID should be filtered.
+        /// </summary>
+        /// <param name="vehicleId">The vehicle ID to check.</param>
+        /// <returns>True if the live vehicle ID should be filtered; otherwise, false.</returns>
         private bool ShouldFilterLiveById(string vehicleId)
         {
             return (FilterCheckBox?.IsChecked == true) && IsInvalidVehicleId(vehicleId);
         }
 
-        //zooming on the map
+        /// <summary>
+        /// Handles the mouse wheel event for zooming on the map.
+        /// </summary>
+        /// <param name="sender">The source of the event.</param>
+        /// <param name="e">The mouse wheel event arguments.</param>
         private void Window_MouseWheel(object sender, MouseWheelEventArgs e)
         {
             int delta = e.Delta > 0 ? 1 : -1;
@@ -1213,7 +1328,11 @@ namespace V2XController
             e.Handled = true;
         }
 
-        // Dragging the map with MMB
+        /// <summary>
+        /// Handles the mouse down event on the tile canvas.
+        /// </summary>
+        /// <param name="sender">The source of the event.</param>
+        /// <param name="e">The mouse button event arguments.</param>
         private void TileCanvas_PreviewMouseDown(object sender, MouseButtonEventArgs e)
         {
             if (e.ChangedButton == MouseButton.Middle)
@@ -1226,7 +1345,11 @@ namespace V2XController
         }
 
 
-        // MouseMove - continuous pan and tile loading
+        /// <summary>
+        /// Handles panning on the map when the middle mouse button is held down and the mouse is moved.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void TileCanvas_MouseMove_MiddlePan(object sender, MouseEventArgs e)
         {
             if (!isDragging) return;
@@ -1255,6 +1378,9 @@ namespace V2XController
             e.Handled = true;
         }
 
+        /// <summary>
+        /// Updates all overlays on the map live during a drag operation.
+        /// </summary>
         private void UpdateAllOverlaysLive()
         {
             // 1. Update stops
@@ -1286,6 +1412,9 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Updates the positions of all polylines and their vertices on the canvas based on their stored geographic coordinates.
+        /// </summary>
         private void UpdatePolylinePositions()
         {
             foreach (var kv in _polylineGeoPoints.ToList())
@@ -1336,26 +1465,65 @@ namespace V2XController
                     }
                 }
 
-                var rebuildPoints = GetCommittedPolylinePoints(poly);
+                // *** KLÍČOVÁ OPRAVA: Pro aktivní kreslení použít polylinePoints místo GetCommittedPolylinePoints ***
+                List<Point> rebuildPoints;
+
+                if (isActiveDrawing)
+                {
+                    // Při aktivním kreslení použít aktuální polylinePoints
+                    rebuildPoints = new List<Point>(polylinePoints);
+                    Console.WriteLine($"[UPDATE POS] Active drawing: using {rebuildPoints.Count} points from polylinePoints");
+                }
+                else
+                {
+                    // Pro finalizované polyline použít všechny body
+                    rebuildPoints = poly.Points.ToList();
+                    Console.WriteLine($"[UPDATE POS] Finalized: using {rebuildPoints.Count} points from poly.Points");
+                }
 
                 if (rebuildPoints.Count >= 2)
                 {
-                    if (isActiveDrawing)
+                    // Rozhodnout, kterou rebuild metodu použít
+                    bool hasContinuation = (_polylineCommittedPointsCount > 0 && poly == currentPolyline);
+                    bool hasTableSegments = (_polylineToSegmentZones.ContainsKey(poly) && _polylineToSegmentZones[poly].Count > 0);
+
+                    if (isActiveDrawing && hasContinuation && hasTableSegments)
                     {
-                        RebuildPolylineZone(poly, rebuildPoints, halfWidthPx);
+                        // Pokračování v existující polyline - použít variable widths
+                        Console.WriteLine($"[UPDATE POS] Rebuilding with VARIABLE widths (continuation, committed={_polylineCommittedPointsCount})");
+                        RebuildPolylineZoneWithVariableWidths(poly, rebuildPoints);
                     }
-                    else if (_polylineToSegmentZones.ContainsKey(poly) && _polylineToSegmentZones[poly].Count > 0)
+                    else if (!isActiveDrawing && hasTableSegments)
                     {
+                        // Finalizovaná polyline s table segments
+                        Console.WriteLine($"[UPDATE POS] Rebuilding with VARIABLE widths (finalized)");
                         RebuildPolylineZoneWithVariableWidths(poly, rebuildPoints);
                     }
                     else
                     {
+                        // Nová polyline nebo bez table segments - uniform width
+                        Console.WriteLine($"[UPDATE POS] Rebuilding with UNIFORM width");
                         RebuildPolylineZone(poly, rebuildPoints, halfWidthPx);
+                    }
+
+                    // Sync _currentPolylineSegments
+                    if (isActiveDrawing && _polylineToSegments.TryGetValue(poly, out var currentSegs))
+                    {
+                        _currentPolylineSegments.Clear();
+                        _currentPolylineSegments.AddRange(currentSegs);
+                        Console.WriteLine($"[UPDATE POS] Synced {currentSegs.Count} segments to _currentPolylineSegments");
                     }
                 }
             }
         }
 
+        /// <summary>
+        /// Gets commited polyline points on polyline verticies for a given polyline. 
+        /// If currently drawing this polyline, excludes the last point which is the 
+        /// "preview" point following the mouse.
+        /// </summary>
+        /// <param name="poly">The polyline to get committed points from.</param>
+        /// <returns>A list of committed points.</returns>
         private List<Point> GetCommittedPolylinePoints(Polyline poly)
         {
             var points = poly.Points.ToList();
@@ -1370,6 +1538,9 @@ namespace V2XController
             return points;
         }
 
+        /// <summary>
+        /// Collapses the polyline preview by finalizing the last point.
+        /// </summary>
         private void CollapsePolylinePreview()
         {
             if (currentPolyline == null)
@@ -1384,6 +1555,9 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Updates activation zones positions based on their stored geographic coordinates and the current zoom level.
+        /// </summary>
         private void UpdateActivationZonesPositions()
         {
             foreach (var zone in ActivationZonesCollection.Where(z => z != null && !IsSwitchZone(z)))
@@ -1406,6 +1580,9 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Updates drawn trams positions based on their stored geographic coordinates and the current zoom level.
+        /// </summary>
         private void UpdateDrawnTramsPositions()
         {
             for (int idx = 0; idx < drawnTrams.Length; idx++)
@@ -1479,6 +1656,9 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Updates active vehicles positions based on their stored geographic coordinates and the current zoom level.
+        /// </summary>
         private void UpdateActiveVehiclesPositions()
         {
             var now = DateTime.Now;
@@ -1607,6 +1787,9 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Updates replay vehicles positions based on their stored geographic coordinates and the current zoom level.
+        /// </summary>
         private void UpdateReplayVehiclesPositions()
         {
             foreach (var kvp in _replayVehicles)
@@ -1682,6 +1865,12 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Updates the position and rotation of a vehicle's bounding box on the canvas.
+        /// </summary>
+        /// <param name="box">The rectangle representing the vehicle's bounding box.</param>
+        /// <param name="topCenter">The top center point of the vehicle.</param>
+        /// <param name="headingDeg">The heading of the vehicle in degrees.</param>
         private void UpdateVehicleBoxPosition(Rectangle box, Point topCenter, double headingDeg)
         {
             if (box == null) return;
@@ -1698,6 +1887,9 @@ namespace V2XController
             box.RenderTransform = new RotateTransform(angle, boxWidth / 2.0, 0.0);
         }
 
+        /// <summary>
+        /// Updates the positions of all switch zones on the canvas based on their stored geographic coordinates and the current zoom level.
+        /// </summary>
         private void UpdateSwitchZonesPositions()
         {
             foreach (var zone in ActivationZonesCollection.Where(z => z != null && IsSwitchZone(z)))
@@ -1718,6 +1910,9 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Updates the positions of all stops on the canvas based on their stored geographic coordinates and the current zoom level.
+        /// </summary>
         private void UpdateStopsPositions()
         {
             if (stops == null || stops.Count == 0 || TileCanvas == null) return;
@@ -1760,7 +1955,9 @@ namespace V2XController
             }
         }
 
-
+        /// <summary>
+        /// Renders tiles progressively on the canvas based on the current camera position and zoom level.
+        /// </summary>
         private void RenderTilesProgressive()
         {
             if (TileCanvas.ActualWidth == 0 || TileCanvas.ActualHeight == 0) return;
@@ -1851,6 +2048,14 @@ namespace V2XController
             // DON'T call UpdateOverlayPositions here - it's called in UpdateAllOverlaysLive
         }
 
+        /// <summary>
+        /// Loads and places tiles into correct place on canvas based on given tile coordinates and camera position.
+        /// </summary>
+        /// <param name="z">Zoom level of the tile.</param>
+        /// <param name="x">X coordinate of the tile.</param>
+        /// <param name="y">Y coordinate of the tile.</param>
+        /// <param name="canvasX">X position on the canvas.</param>
+        /// <param name="canvasY">Y position on the canvas.</param>
         private async Task LoadAndPlaceTileAsync(int z, int x, int y, double canvasX, double canvasY)
         {
             try
@@ -1929,8 +2134,12 @@ namespace V2XController
             {
                 _tileSemaphore.Release();
             }
+        
         }
 
+        /// <summary>
+        /// Update positions of all overlays based on their stored geographic coordinates and the current zoom level.
+        /// </summary>
         private void UpdateOverlayPositions()
         {
             // Stops are updated separately in MouseMove for better performance
@@ -1943,7 +2152,11 @@ namespace V2XController
             //ReprojectRailwaysOnMapChange();
         }
 
-        //moving overlays
+        /// <summary>
+        /// Moves all overlays by the specified delta values.
+        /// </summary>
+        /// <param name="deltaX">The change in the X direction.</param>
+        /// <param name="deltaY">The change in the Y direction.</param>
         private void MoveOverlays(double deltaX, double deltaY)
         {
             foreach (var pt in points)
@@ -2040,7 +2253,11 @@ namespace V2XController
         }
 
 
-        // Shift all Image tiles by tile offset
+        /// <summary>
+        /// Shifts all tiles and overlays by the specified tile offsets.
+        /// </summary>
+        /// <param name="shiftX">The number of tiles to shift in the X direction.</param>
+        /// <param name="shiftY">The number of tiles to shift in the Y direction.</param>
         private void ShiftTiles(int shiftX, int shiftY)
         {
             foreach (var img in TileCanvas.Children.OfType<Image>())
@@ -2076,7 +2293,11 @@ namespace V2XController
         }
 
 
-        // MouseUp - commit pan
+        /// <summary>
+        /// Handles the mouse up event on the tile canvas, committing any pan operations.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private async void TileCanvas_PreviewMouseUp(object sender, MouseButtonEventArgs e)
         {
             if (e.ChangedButton != MouseButton.Middle) return;
@@ -2108,9 +2329,10 @@ namespace V2XController
         }
 
 
-        // ======================================
-        // Kontrola a načtení nových dlaždic během panování
-        // ======================================
+        /// <summary>
+        /// Checks and loads new tiles during panning.
+        /// </summary>
+        /// <returns>A task representing the asynchronous operation.</returns>
         private async Task CheckAndLoadTilesDuringPanAsync()
         {
             if (!isMiddleMousePanning || isTileLoadPending) return;
@@ -2141,6 +2363,9 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Loads tiles initially based on the current map center and zoom level, and renders them progressively on the canvas.
+        /// </summary>
         private async Task LoadTilesInitialAsync()
         {
             var (centerX, centerY) = LatLonToTileXY(latitude, longitude, zoom);
@@ -2153,6 +2378,10 @@ namespace V2XController
             await Task.Delay(200); // Give tiles time to load
         }
 
+        /// <summary>
+        /// Handles the tile shift operation when the visual offset exceeds the tile size.
+        /// </summary>
+        /// <returns>A task representing the asynchronous operation.</returns>
         private async Task HandleTileShiftAsync()
         {
             int shiftX = 0, shiftY = 0;
@@ -2183,6 +2412,10 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Checks and loads new tiles during panning.
+        /// </summary>
+        /// <returns>A task representing the asynchronous operation.</returns>
         private async Task CheckTileShiftAsync()
         {
             int shiftX = 0;
@@ -2215,7 +2448,12 @@ namespace V2XController
             }
         }
 
-
+        /// <summary>
+        /// Loads new tiles that have appeared due to the shift in tile coordinates, and places them in the correct position on the canvas.
+        /// </summary>
+        /// <param name="shiftX">The horizontal shift in tile coordinates.</param>
+        /// <param name="shiftY">The vertical shift in tile coordinates.</param>
+        /// <returns>A task representing the asynchronous operation.</returns>
         private async Task LoadTilesShiftAsync(int shiftX, int shiftY)
         {
             _currentTopLeftTileX += shiftX;
@@ -2253,7 +2491,9 @@ namespace V2XController
             await Task.WhenAll(tasks);
         }
 
-
+        /// <summary>
+        /// Strips old replay trails from the canvas while keeping the replay points (vehicles) intact.
+        /// </summary>
         private void StripReplayTrailsKeepPoints()
         {
             // odstranění starých replay polylines
@@ -2277,6 +2517,9 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Refreshes the map by loading new tiles and updating the display.
+        /// </summary>
         public async void RefreshMap()
         {
             Console.WriteLine($"[REFRESH] Starting refresh...");
@@ -2310,7 +2553,12 @@ namespace V2XController
         }
 
 
-        //Meters per px
+        /// <summary>
+        /// Converts meters to pixels at the current zoom level and latitude, which is essential for correctly sizing overlays like switch zones and stops on the map.
+        /// </summary>
+        /// <param name="latitude">The latitude at which to calculate the meters per pixel.</param>
+        /// <param name="zoom">The zoom level of the map.</param>
+        /// <returns>The number of meters per pixel at the specified latitude and zoom level.</returns>
         private double MetersPerPixel(double latitude, int zoom)
         {
             double earthCircumference = 40075016.686; // in meters
@@ -2319,7 +2567,12 @@ namespace V2XController
         }
 
 
-        //Get the parenet element in the canvas of an object
+        /// <summary>
+        /// Gets the parent UIElement of the given element that is a direct child of the TileCanvas. 
+        /// This is used to determine which overlay element (e.g., stop, zone) was clicked on when handling mouse events.
+        /// </summary>
+        /// <param name="element">The UIElement for which to find the parent in the TileCanvas.</param>
+        /// <returns>The parent UIElement that is a direct child of the TileCanvas, or null if not found.</returns>
         private UIElement GetParentElementInCanvas(UIElement element)
         {
             while (element != null && !TileCanvas.Children.Contains(element))
@@ -2329,6 +2582,9 @@ namespace V2XController
             return element;
         }
 
+        /// <summary>
+        /// Updates the latitude and longitude text boxes in the UI to reflect the current center coordinates of the map.
+        /// </summary>
         private void UpdateCenterTextBoxesFromFields()
         {
             // prevent recursive RefreshMap while updating text
@@ -2340,6 +2596,12 @@ namespace V2XController
             LongitudeBox.TextChanged += LongitudeBox_TextChanged;
         }
 
+        /// <summary>
+        /// Sets map center for current zoom level and position.
+        /// </summary>
+        /// <param name="lat">The latitude to set as the map center.</param>
+        /// <param name="lon">The longitude to set as the map center.</param>
+        /// <param name="updateTextBoxes">Whether to update the latitude and longitude text boxes.</param>
         public void SetMapCenter(double lat, double lon, bool updateTextBoxes = true)
         {
             latitude = lat;
@@ -2358,8 +2620,11 @@ namespace V2XController
         //||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
         // METHODS FOR DRAWING AND MOUSE EVENTS
 
-        //LMB pressed
-
+        /// <summary>
+        /// Handles the mouse left button down event on the TileCanvas.
+        /// </summary>
+        /// <param name="sender">The source of the event.</param>
+        /// <param name="e">The mouse button event data.</param>
         private void TileCanvas_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         {
             // Block drawing while playback is running
@@ -2985,6 +3250,7 @@ namespace V2XController
                     {
                         Stroke = _strokeBrush,
                         StrokeThickness = 3,
+                        Fill = null,
                         IsHitTestVisible = true
                     };
                     TileCanvas.Children.Add(currentPolyline);
@@ -3078,6 +3344,12 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Rebuilds the visual representation of a polyline zone.
+        /// </summary>
+        /// <param name="polyline">The polyline to rebuild.</param>
+        /// <param name="points">The points defining the polyline.</param>
+        /// <param name="halfWidthPx">The half width of the polyline zone in pixels.</param>
         private void RebuildPolylineZone(Polyline polyline, List<Point> points, double halfWidthPx)
         {
             // Remove old zone shapes AND center lines
@@ -3284,6 +3556,11 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Handles the mouse enter event on a polyline vertex.
+        /// </summary>
+        /// <param name="sender">The source of the event.</param>
+        /// <param name="e">The mouse event data.</param>
         private void PolylineVertex_MouseEnter(object sender, MouseEventArgs e)
         {
             if (sender is Ellipse dot)
@@ -3318,6 +3595,11 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Handles the mouse leave event on a polyline vertex.
+        /// </summary>
+        /// <param name="sender">The source of the event.</param>
+        /// <param name="e">The mouse event data.</param>
         private void PolylineVertex_MouseLeave(object sender, MouseEventArgs e)
         {
             if (sender is Ellipse dot && _hoveredVertex == dot)
@@ -3337,6 +3619,10 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Updates the position of a rectangle based on its start point.
+        /// </summary>
+        /// <param name="zone">The activation zone containing the rectangle.</param>
         private void UpdateRectanglePositionFromStartPoint(ActivationZone zone)
         {
             double width = zone.Rectangle.Width;
@@ -3352,6 +3638,11 @@ namespace V2XController
             ApplyZoneRotation(zone);
         }
 
+        /// <summary>
+        /// Handles the mouse move event on the tile canvas.
+        /// </summary>
+        /// <param name="sender">The source of the event.</param>
+        /// <param name="e">The mouse event data.</param>
         private void TileCanvas_MouseMove(object sender, MouseEventArgs e)
         {
             var pos = e.GetPosition(TileCanvas);
@@ -3470,12 +3761,19 @@ namespace V2XController
         }
 
 
-        //stop drawing when mouse button is released
+        /// <summary>
+        /// Handles the mouse left button up event on the tile canvas.
+        /// </summary>
+        /// <param name="sender">The source of the event.</param>
+        /// <param name="e">The mouse button event data.</param>
         private void TileCanvas_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
         {
             
         }
 
+        /// <summary>
+        /// Ensures the dimension text block is created and added to the canvas.
+        /// </summary>
         private void EnsureDimensionTextBlock()
         {
             if (dimensionTextBlock == null)
@@ -3493,7 +3791,10 @@ namespace V2XController
             }
         }
 
-
+        /// <summary>
+        /// Shows a preview rectangle on the canvas.
+        /// </summary>
+        /// <param name="halfWidth">The half width of the rectangle.</param>
         private void ShowPreviewRectangle(double halfWidth)
         {
             var axis = rectSecondPoint - rectFirstPoint;
@@ -3533,6 +3834,9 @@ namespace V2XController
             TileCanvas.Children.Add(previewRect);
         }
 
+        /// <summary>
+        /// Clears temporary elements from the canvas.
+        /// </summary>
         private void ClearTempElements()
         {
             if (tempHeightLine != null)
@@ -3567,6 +3871,12 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Calculates the azimuth angle between two points.
+        /// </summary>
+        /// <param name="start">The starting point.</param>
+        /// <param name="end">The ending point.</param>
+        /// <returns>The azimuth angle in degrees.</returns>
         private int CalculateAzimuth(Point start, Point end)
         {
             double dx = end.X - start.X;
@@ -3581,10 +3891,11 @@ namespace V2XController
             return (int)Math.Round(angleDeg);
         }
 
-
-
-
-        //moving objects with RMB
+        /// <summary>
+        /// Handles the right mouse button down event on the tile canvas.
+        /// </summary>
+        /// <param name="sender">The source of the event.</param>
+        /// <param name="e">The mouse button event arguments.</param>
         private void TileCanvas_MouseRightButtonDown(object sender, MouseButtonEventArgs e)
         {
             var position = e.GetPosition(TileCanvas);
@@ -3653,7 +3964,11 @@ namespace V2XController
         }
 
 
-        //mouse dragging
+        /// <summary>
+        /// Handles the mouse move event for dragging elements on the tile canvas.
+        /// </summary>
+        /// <param name="sender">The source of the event.</param>
+        /// <param name="e">The mouse event arguments.</param>
         private void TileCanvas_MouseMoveForDrag(object sender, MouseEventArgs e)
         {
             if (selectedElement == null || e.RightButton != MouseButtonState.Pressed) return;
@@ -3735,7 +4050,11 @@ namespace V2XController
         }
 
 
-        //RMB release updater
+        /// <summary>
+        /// Handles the right mouse button up event on the tile canvas.
+        /// </summary>
+        /// <param name="sender">The source of the event.</param>
+        /// <param name="e">The mouse button event arguments.</param>
         private void TileCanvas_MouseRightButtonUp(object sender, MouseButtonEventArgs e)
         {
             if (selectedElement is Rectangle rect)
@@ -3748,7 +4067,11 @@ namespace V2XController
 
 
 
-        //Keystrokes (esc, arrows, etc.)
+        /// <summary>
+        /// Handles the preview key down event for the main window.
+        /// </summary>
+        /// <param name="sender">The source of the event.</param>
+        /// <param name="e">The key event arguments.</param>
         private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
         {
             //esc stop drawing
@@ -4007,6 +4330,11 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Deletes a vertex from the specified polyline.
+        /// </summary>
+        /// <param name="polyline">The polyline from which to delete the vertex.</param>
+        /// <param name="vertexIndex">The index of the vertex to delete.</param>
         private void DeletePolylineVertex(Polyline polyline, int vertexIndex)
         {
             if (polyline == null || vertexIndex < 0 || vertexIndex >= polyline.Points.Count)
@@ -4128,6 +4456,10 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Deletes the entire specified polyline and its associated elements.
+        /// </summary>
+        /// <param name="polyline">The polyline to delete.</param>
         private void DeleteEntirePolyline(Polyline polyline)
         {
             if (polyline == null) return;
@@ -4166,7 +4498,9 @@ namespace V2XController
             Console.WriteLine("[POLYLINE] Polyline deleted completely");
         }
 
-
+        /// <summary>
+        /// Finalizes the current polyline and performs necessary cleanup.
+        /// </summary>
         private void FinalizePolyline()
         {
             if (currentPolyline == null || polylinePoints.Count < 2)
@@ -4224,7 +4558,36 @@ namespace V2XController
             var addedSegments = new List<ActivationZone>();
             double totalPolylineLength = 0;
 
+            // Segmenty UŽ EXISTUJÍ v _polylineToSegmentZones (vytvořeny v AddPolylineSegmentToTable)
+            if (_polylineToSegmentZones.TryGetValue(currentPolyline, out var existingSegments))
+            {
+                // Jen updatovat PolylineId na finální hodnotu
+                foreach (var seg in existingSegments)
+                {
+                    seg.PolylineId = polylineId;
+                    addedSegments.Add(seg);
+                    Console.WriteLine($"[FINALIZE] Using existing segment {seg.SegmentIndex}: Main={seg.MainZone}, Sub={seg.SubZone}, Color={seg.Color}");
+                }
+            }
+            else
+            {
+                Console.WriteLine($"[FINALIZE] WARNING: No segments found in _polylineToSegmentZones!");
+            }
+
+
             int startSegmentIndex = wasContinuation ? Math.Max(0, _polylineCommittedPointsCount - 1) : 0;
+
+            // *** KLÍČOVÁ OPRAVA: Najít poslední MainZone/SubZone z EXISTUJÍCÍCH segmentů ***
+            int currentMainZone = 0;
+            int currentSubZone = -1; // -1 znamená "ještě nepřiřazeno"
+
+            if (wasContinuation && _polylineToSegmentZones.TryGetValue(currentPolyline, out var existingSegs) && existingSegs.Count > 0)
+            {
+                var lastExisting = existingSegs.OrderBy(s => s.SegmentIndex).Last();
+                currentMainZone = lastExisting.MainZone;
+                currentSubZone = lastExisting.SubZone;
+                Console.WriteLine($"[FINALIZE] Continuation from existing: Main={currentMainZone}, Sub={currentSubZone}");
+            }
 
             for (int i = startSegmentIndex; i < polylinePoints.Count - 1; i++)
             {
@@ -4240,6 +4603,31 @@ namespace V2XController
                 double lengthMeters = HaversineMeters(lat1, lon1, lat2, lon2);
                 totalPolylineLength += lengthMeters;
                 int azimuth = CalculateAzimuth(p1, p2);
+
+                // *** AUTOMATICKÉ PŘIŘAZENÍ MainZone/SubZone pro NOVÝ segment ***
+                // (Ne pro staré segmenty při pokračování!)
+                if (!wasContinuation || i >= _polylineCommittedPointsCount - 1)
+                {
+                    // Increment pro nový segment
+                    currentSubZone++;
+
+                    // SubZone přesáhl 4 → další MainZone
+                    if (currentSubZone > 4)
+                    {
+                        currentMainZone++;
+                        currentSubZone = 0;
+
+                        // Limit: MainZone 0-3
+                        if (currentMainZone > 3)
+                        {
+                            currentMainZone = 3;
+                            currentSubZone = 4;
+                            Console.WriteLine($"[FINALIZE] WARNING: Max zones (3/4) at segment {i}");
+                        }
+                    }
+                }
+
+                string color = GetColorForMainZone(currentMainZone);
 
                 string segmentType = "";
                 if (polylinePoints.Count >= 3)
@@ -4263,9 +4651,9 @@ namespace V2XController
                     Width = _polylineZoneWidthMeters,
                     Height = lengthMeters,
                     Azimuth = azimuth,
-                    Color = ((SolidColorBrush)_strokeBrush).Color.ToString(),
-                    MainZone = 0,
-                    SubZone = i,
+                    Color = color, // *** Barva podle MainZone ***
+                    MainZone = currentMainZone, // *** Správné přiřazení ***
+                    SubZone = currentSubZone,   // *** Správné přiřazení ***
                     IsSwitchZone = false
                 };
 
@@ -4275,17 +4663,23 @@ namespace V2XController
                 ActivationZonesCollection.Add(segment);
                 addedSegments.Add(segment);
 
-                Console.WriteLine($"[POLYLINE] Segment {i + 1}: '{segment.Name}' Length={lengthMeters:F2}m Az={azimuth}°");
+                Console.WriteLine($"[FINALIZE] Segment {i}: Main={currentMainZone}, Sub={currentSubZone}, Color={color}, Type={segmentType}, Len={lengthMeters:F2}m");
             }
 
             if (!_polylineToSegmentZones.ContainsKey(currentPolyline))
             {
                 _polylineToSegmentZones[currentPolyline] = new List<ActivationZone>();
             }
+
             _polylineToSegmentZones[currentPolyline].AddRange(addedSegments);
+
+            var currentPoints = currentPolyline.Points.ToList();
+            Console.WriteLine($"[FINALIZE] Calling live rebuild with {currentPoints.Count} points and {addedSegments.Count} segments");
+            RebuildPolylineZoneWithVariableWidths(currentPolyline, currentPoints);
 
             polylineData.TotalLengthMeters = totalPolylineLength;
             _drawnPolylines.Add(polylineData);
+
 
             var geoPoints = new List<(double lat, double lon)>();
             if (_polylineGeoPoints.TryGetValue(currentPolyline, out var existingGeo))
@@ -4301,6 +4695,7 @@ namespace V2XController
                 }
                 _polylineGeoPoints[currentPolyline] = geoPoints;
             }
+
 
             var polylineToAdd = currentPolyline;
             var dotsToAdd = new List<Ellipse>(polylineVertexDots);
@@ -4632,6 +5027,12 @@ namespace V2XController
             Console.WriteLine("[POLYLINE] Finalized and ready for next polyline");
         }
 
+        /// <summary>
+        /// Updates the segments of a polyline around a specific vertex.
+        /// </summary>
+        /// <param name="polyline">The polyline containing the vertex.</param>
+        /// <param name="vertexIndex">The index of the vertex to update.</param>
+        /// <param name="newPosition">The new position of the vertex.</param>
         private void UpdatePolylineSegmentsAroundVertex(Polyline polyline, int vertexIndex, Point newPosition)
         {
             if (polyline == null || vertexIndex < 0 || vertexIndex >= polyline.Points.Count)
@@ -4760,6 +5161,11 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Rebuilds the polyline zone with variable widths.
+        /// </summary>
+        /// <param name="polyline">The polyline to rebuild.</param>
+        /// <param name="points">The list of points defining the polyline.</param>
         private void RebuildPolylineZoneWithVariableWidths(Polyline polyline, List<Point> points)
         {
             // Remove old shapes
@@ -4986,6 +5392,13 @@ namespace V2XController
             Console.WriteLine($"[REBUILD VAR] ✓ Created {_polylineToSegments[polyline].Count} Path elements");
         }
 
+        /// <summary>
+        /// Updates the geometry of a segment between two points.
+        /// </summary>
+        /// <param name="segment">The segment to update.</param>
+        /// <param name="p1">The starting point of the segment.</param>
+        /// <param name="p2">The ending point of the segment.</param>
+        /// <param name="halfWidthPx">Half of the width of the segment in pixels.</param>
         private void UpdateSegmentGeometry(System.Windows.Shapes.Path segment, Point p1, Point p2, double halfWidthPx)
         {
             // This method is deprecated - zones are now rebuilt entirely using RebuildPolylineZone
@@ -5012,6 +5425,13 @@ namespace V2XController
             segment.Data = geometry;
         }
 
+        /// <summary>
+        /// Updates or creates a segment between two points.
+        /// </summary>
+        /// <param name="p1">The starting point of the segment.</param>
+        /// <param name="p2">The ending point of the segment.</param>
+        /// <param name="halfWidthPx">Half of the width of the segment in pixels.</param>
+        /// <param name="existingSegments">The list of existing segments to update or add to.</param>
         private void UpdateOrCreateSegment(Point p1, Point p2, double halfWidthPx, List<System.Windows.Shapes.Path> existingSegments)
         {
             var dir = p2 - p1;
@@ -5069,7 +5489,9 @@ namespace V2XController
             segmentPath.Data = geometry;
         }
 
-
+        /// <summary>
+        /// Cancels all drawing.
+        /// </summary>
         private bool CancelAllDrawing()
         {
             bool didSomething = false;
@@ -5254,7 +5676,13 @@ namespace V2XController
             return didSomething;
         }
 
-        //checking for close points => drawing only one point on one place
+        /// <summary>
+        /// Checks if drawn points are close to each other (to prevent duplicates when dragging vertices).
+        /// </summary>
+        /// <param name="p1">The first point to compare.</param>
+        /// <param name="p2">The second point to compare.</param>
+        /// <param name="threshold">The distance threshold to consider points as close.</param>
+        /// <returns>True if the points are close; otherwise, false.</returns>
         private bool ArePointsClose(Point p1, Point p2, double threshold = 2.0)
         {
             return Math.Abs(p1.X - p2.X) < threshold && Math.Abs(p1.Y - p2.Y) < threshold;
@@ -5262,7 +5690,9 @@ namespace V2XController
 
 
 
-        //recalculating connection line between points after dragging or removing point(s)
+        /// <summary>
+        /// Recalculates the connection line between points after dragging or removing point(s).
+        /// </summary>
         private void RecalculateConnectionLine()
         {
             connectionLine.Points.Clear();
@@ -5274,7 +5704,11 @@ namespace V2XController
         }
 
 
-        //updating thickness of rectangles on mouse events
+        /// <summary>
+        /// Logic for entering rectangles in selection mode - highlights them on mouse enter and selects on click.
+        /// </summary>
+        /// <param name="sender">The source of the event.</param>
+        /// <param name="e">The event data.</param>
         private void Rectangle_MouseEnter(object sender, MouseEventArgs e)
         {
             if (isSelectionMode)
@@ -5286,6 +5720,11 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Logic for leaving rectangles in selection mode - resets their appearance.
+        /// </summary>
+        /// <param name="sender">The source of the event.</param>
+        /// <param name="e">The event data.</param>
         private void Rectangle_MouseLeave(object sender, MouseEventArgs e)
         {
             if (isSelectionMode)
@@ -5297,6 +5736,11 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Logic for handling mouse left button down event on rectangles in selection mode - selects the rectangle.
+        /// </summary>
+        /// <param name="sender">The source of the event.</param>
+        /// <param name="e">The event data.</param>
         private void Rectangle_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         {
             if (!isSelectionMode)
@@ -5313,6 +5757,9 @@ namespace V2XController
             e.Handled = true;
         }
 
+        /// <summary>
+        /// Updates the hit test visibility for selectable elements based on the current mode.
+        /// </summary>
         private void UpdateHitTestForSelectableElements()
         {
             bool allowSelection = isSelectionMode || currentDrawingMode == DrawingMode.Rectangle;
@@ -5324,7 +5771,10 @@ namespace V2XController
 
         }
 
-
+        /// <summary>
+        /// Sets the drawing mode and updates the hit test visibility for selectable elements.
+        /// </summary>
+        /// <param name="mode">The drawing mode to set.</param>
         private void SetDrawingMode(DrawingMode mode)
         {
             currentDrawingMode = mode;
@@ -5332,7 +5782,9 @@ namespace V2XController
             UpdateHitTestForSelectableElements();
         }
 
-
+        /// <summary>
+        /// Sets the selection mode and updates the hit test visibility for selectable elements.
+        /// </summary>
         private void SetSelectionMode()
         {
             isSelectionMode = true;
@@ -5341,15 +5793,21 @@ namespace V2XController
         }
 
 
-        //activation zone handler
+        /// <summary>
+        /// Handles the mouse left button down event on the activation zone.
+        /// </summary>
+        /// <param name="sender">The source of the event.</param>
+        /// <param name="e">The event data.</param>
         private void ActivationZone_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         {
             e.Handled = true;
         }
 
 
-        // srv radius circle drawing
 
+        /// <summary>
+        /// Draws the radius circle around the RSU if the checkbox is checked.
+        /// </summary>
         private void DrawRadiusCircle()
         {
             // Do nothing (and ensure removal) when the checkbox is unchecked
@@ -5406,7 +5864,11 @@ namespace V2XController
         }
 
 
-        // Cleanup old vehicles that haven't been updated in the last 60 seconds
+        /// <summary>
+        /// Cleans up old vehicles that haven't been updated in the last 60 seconds.
+        /// </summary>
+        /// <param name="sender">The source of the event.</param>
+        /// <param name="e">The event data.</param>
         private void CleanupOldVehicles(object sender, EventArgs e)
         {
             var now = DateTime.Now;
@@ -5480,7 +5942,11 @@ namespace V2XController
             }
         }
 
-
+        /// <summary>
+        /// Removes a vehicle completely from the map and all associated data structures.
+        /// </summary>
+        /// <param name="vehicleId">The ID of the vehicle to remove.</param>
+        /// <param name="vehicle">The vehicle object to remove.</param>
         private void RemoveVehicleCompletely(string vehicleId, MapPoint vehicle)
         {
             if (vehicle == null) return;
@@ -5553,6 +6019,11 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Removes a drawn tram completely from the map and all associated data structures.
+        /// </summary>
+        /// <param name="idx">The index of the drawn tram to remove.</param>
+        /// <param name="tram">The tram object to remove.</param>
         private void RemoveDrawnTramCompletely(int idx, MapPoint tram)
         {
             Dispatcher.Invoke(() =>
@@ -5601,7 +6072,12 @@ namespace V2XController
             });
         }
 
-        // async method for removing vehicle trail gradually
+        /// <summary>
+        /// Gradually removes a vehicle's trail from the map.
+        /// </summary>
+        /// <param name="vehicleId">The ID of the vehicle whose trail is to be removed.</param>
+        /// <param name="vehicle">The vehicle object whose trail is to be removed.</param>
+        /// <param name="token">A cancellation token to cancel the operation.</param>
         private async Task RemoveTrailGradually(string vehicleId, MapPoint vehicle, CancellationToken token)
         {
             try
@@ -5662,6 +6138,12 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Gradually removes a drawn tram's trail from the map.
+        /// </summary>
+        /// <param name="idx">The index of the drawn tram whose trail is to be removed.</param>
+        /// <param name="tram">The tram object whose trail is to be removed.</param>
+        /// <param name="token">A cancellation token to cancel the operation.</param>
         private async Task RemoveDrawnTramTrailGradually(int idx, MapPoint tram, CancellationToken token)
         {
             try
@@ -5725,6 +6207,11 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Adds an undo and redo action to the respective stacks.
+        /// </summary>
+        /// <param name="undo">The action to undo.</param>
+        /// <param name="redo">The action to redo.</param>
         private void AddUndoRedo(Action undo, Action redo)
         {
             undoStack.Push(new UndoRedoAction { UndoAction = undo, RedoAction = redo });
@@ -5732,7 +6219,9 @@ namespace V2XController
         }
 
 
-
+        /// <summary>
+        /// Undos the last action by invoking the undo action from the top of the undo stack and pushing it onto the redo stack.
+        /// </summary>
         private void Undo()
         {
             if (undoStack.Count > 0)
@@ -5743,6 +6232,9 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Redoes the last undone action by invoking the redo action from the top of the redo stack and pushing it onto the undo stack.
+        /// </summary>
         private void Redo()
         {
             if (redoStack.Count > 0)
@@ -5754,7 +6246,10 @@ namespace V2XController
         }
 
 
-        //element selection and deselection
+        /// <summary>
+        /// Selects the specified UI element.
+        /// </summary>
+        /// <param name="element">The UI element to select.</param>
         private void SelectElement(UIElement element)
         {
             if (element is Polyline)
@@ -5778,6 +6273,9 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Deselects the currently selected UI element.
+        /// </summary>
         private void DeselectElement()
         {
             if (selectedElement is Rectangle rect)
@@ -5813,25 +6311,33 @@ namespace V2XController
         //||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
         // METHODS FOR THE CAM AND SRV STATUSES
 
-        // increment cam ok messages count (crc must be ok)
+        /// <summary>
+        /// Increments the count of CAM OK messages.
+        /// </summary>
         private void IncrementCamOkCount()
         {
             return;
         }
 
-        //increment cam error messages count (crc is not ok)
+        /// <summary>
+        /// Increments the count of CAM error messages (CRC is not OK).
+        /// </summary>
         private void IncrementCamErrorCount()
         {
             return;
         }
 
-        // increment srv ok messages count
+        /// <summary>
+        /// Increments the count of SRV OK messages.
+        /// </summary>
         private void IncrementSrvOkCount()
         {
             return;
         }
 
-        // increment srv error messages count
+        /// <summary>
+        /// Increments the count of SRV error messages.
+        /// </summary>
         private void IncrementSrvErrorCount()
         {
             return;
@@ -5843,7 +6349,11 @@ namespace V2XController
         // METHODS FOR EXPORTING AND SAVING
 
 
-        //Exporting canvas into an image
+        /// <summary>
+        /// Exports the specified canvas to a PNG file.
+        /// </summary>
+        /// <param name="canvas">The canvas to export.</param>
+        /// <param name="filePath">The file path to save the PNG.</param>
         private void ExportCanvasToPng(Canvas canvas, string filePath)
         {
             int width = (int)canvas.ActualWidth;
@@ -5888,7 +6398,10 @@ namespace V2XController
         }
 
 
-        //saving map into an XML file (lines, rectangles, points)
+        /// <summary>
+        /// Saves the current map data to an XML file.
+        /// </summary>
+        /// <param name="filePath">The file path to save the XML.</param>
         private void SaveXML(string filePath)
         {
             XElement root = new XElement("MapData",
@@ -5947,7 +6460,10 @@ namespace V2XController
         }
 
 
-        //loading XML file
+        /// <summary>
+        /// Loads map data from an XML file.
+        /// </summary>
+        /// <param name="filePath">The file path of the XML to load.</param>
         private async void LoadXML(string filePath)
         {
             if (!File.Exists(filePath)) return;
@@ -6096,6 +6612,10 @@ namespace V2XController
 
         }
 
+        /// <summary>
+        /// Updates the bounds of the specified activation zone.
+        /// </summary>
+        /// <param name="zone">The activation zone to update.</param>
         public void UpdateActivationZoneBounds(ActivationZone zone)
         {
             var rect = zone.Rectangle;
@@ -6140,14 +6660,23 @@ namespace V2XController
             zone.Bounds = new Rect(minX, minY, maxX - minX, maxY - minY);
         }
 
+        /// <summary>
+        /// Calculates a linear interpolation between two values a and b based on a parameter t (0 to 1).
+        /// </summary>
+        /// <param name="a">The start value.</param>
+        /// <param name="b">The end value.</param>
+        /// <param name="t">The interpolation parameter (0 to 1).</param>
+        /// <returns>The interpolated value.</returns>
         private static double Lerp(double a, double b, double t)
         {
             return a + (b - a) * t;
         }
 
-
-        //Playback timer ticks
-
+        /// <summary>
+        /// Handles the playback timer tick event.
+        /// </summary>
+        /// <param name="sender">The sender of the event.</param>
+        /// <param name="e">The event arguments.</param>
         private void PlaybackTimer_Tick(object? sender, EventArgs e)
         {
             playbackElapsedTime = TimeSpan.FromTicks((long)((DateTime.Now - playbackStartTime).Ticks * playbackSpeedFactor));
@@ -6204,7 +6733,9 @@ namespace V2XController
         }
 
 
-        //start recording method
+        /// <summary>
+        /// Starts recording CAM messages.
+        /// </summary>
         private void StartRecording()
         {
             ResetStatusUi();
@@ -6219,7 +6750,9 @@ namespace V2XController
             UpdateUiEnabledState();
         }
 
-
+        /// <summary>
+        /// Stops recording CAM messages and prompts the user to save the recording.
+        /// </summary>
         private void StopRecording()
         {
             isRecording = false;
@@ -6271,7 +6804,9 @@ namespace V2XController
             UpdateUiEnabledState();
         }
 
-        // Helper: uloží live (RS485) buffer
+        /// <summary>
+        /// Saves the live RS485 CAM buffer to a file.
+        /// </summary>
         private void SaveLiveCamBuffer()
         {
             if (recordedCamMessages.Count == 0)
@@ -6296,12 +6831,20 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Saves the current CAM recording to a file.
+        /// </summary>
+        /// <param name="filePath">The file path to save the CAM recording.</param>
         private void SaveCamRecording(string filePath)
         {
             WriteCamrecWithCenter(filePath, recordedCamMessages);
         }
 
-        //updating point position on the map
+        /// <summary>
+        /// Updates the position of a map point on the canvas   .
+        /// </summary>
+        /// <param name="pt">The map point to update.</param>
+        /// <param name="pos">The new position of the map point.</param>
         private void UpdatePointPosition(MapPoint pt, Point pos)
         {
             Canvas.SetLeft(pt.Ellipse, pos.X - pt.Ellipse.Width / 2);
@@ -6320,7 +6863,12 @@ namespace V2XController
 
 
         //V2X Listener !!!!
-        // StartV2XListenerAsync – po otevření portu rovnou pošli SRV a spusť minutu timer (pokud je checkbox zaškrtnutý)
+        /// <summary>
+        /// Starts the V2X listener on the specified port and baud rate.
+        /// </summary>
+        /// <param name="portName">The name of the serial port.</param>
+        /// <param name="baudRate">The baud rate for the serial port.</param>
+        /// <returns>A task representing the asynchronous operation.</returns>
         private Task StartV2XListenerAsync(string portName, int baudRate)
         {
             serialPort = new SerialPort(portName, baudRate)
@@ -6451,15 +6999,22 @@ namespace V2XController
         }
 
 
-        //Asynchronous read line from serial port
+        /// <summary>
+        /// Asynchronously reads a line from the specified serial port.
+        /// </summary>
+        /// <param name="port">The serial port to read from.</param>
+        /// <returns>A task representing the asynchronous operation, with the read line as the result.</returns>
         private Task<string> ReadLineAsync(SerialPort port)
         {
             return Task.Run(() => port.ReadLine());
         }
 
 
-        //Handling V2X messages !!!!!!!
-
+        /// <summary>
+        /// Handling logic for V2X messages, including filtering based on UI settings, parsing accuracy, and updating the map display.
+        /// </summary>
+        /// <param name="msg">The V2X message to handle.</param>
+        /// <param name="rawXml">The raw XML representation of the V2X message.</param>
         private void HandleV2XMessage(V2XMessage msg, string rawXml)
         {
             if (msg.IsManual)
@@ -6866,7 +7421,11 @@ namespace V2XController
             }
         }
 
-        // Validate SRV by computing CRC over the <service .../> tag (same CRC as CAM)
+        /// <summary>
+        /// Validates an SRV message by computing the CRC over the <service .../> tag.
+        /// </summary>
+        /// <param name="rawXml">The raw XML representation of the SRV message.</param>
+        /// <returns>True if the SRV message is valid; otherwise, false.</returns>
         private static bool IsValidSrvMessage(string rawXml)
         {
             try
@@ -6897,7 +7456,10 @@ namespace V2XController
             }
         }
 
-        // updating points and vehicle trails on the map
+        /// <summary>
+        /// Updates the trail of a vehicle on the map based on the received V2X message.
+        /// </summary>
+        /// <param name="msg">The V2X message containing the vehicle's position and other information.</param>
         private void UpdateVehicleTrail(V2XMessage msg)
         {
             var isSrv = msg.MessageType == "SRV";
@@ -7049,7 +7611,10 @@ namespace V2XController
 
 
 
-        //drawing SRV point on the map
+        /// <summary>
+        /// Draws an SRV point on the map based on the received SRV message.
+        /// </summary>
+        /// <param name="msg">The SRV message containing the point's position and other information.</param>
         private void DrawSrvPoint(SRVMessage msg)
         {
             if (msg == null) return;
@@ -7073,7 +7638,11 @@ namespace V2XController
         }
 
 
-        //checking if the cam message is valid (CRC check, substring check)
+        /// <summary>
+        /// Validates a CAM message by computing the CRC over the <vehPt .../> tag.
+        /// </summary>
+        /// <param name="rawXml">The raw XML representation of the CAM message.</param>
+        /// <returns>True if the CAM message is valid; otherwise, false.</returns>
         public static bool IsValidCamMessage(string rawXml)
         {
             try
@@ -7120,7 +7689,11 @@ namespace V2XController
         }
 
 
-        //COMPUTING CRC
+        /// <summary>
+        /// Computes the CRC for the given data using the MODBUS algorithm.
+        /// </summary>
+        /// <param name="data">The data for which to compute the CRC.</param>
+        /// <returns>The computed CRC value.</returns>
         public static ushort ComputeCRC(string data)
         {
             ushort crc = 0xFFFF; // MODBUS start value
@@ -7141,7 +7714,13 @@ namespace V2XController
         }
 
 
-        // Serial port data received event handler
+        /// <summary>
+        /// Logic for recieved serial port data. We expect SRV messages here, 
+        /// which we parse and then draw as red points on the map. We also validate 
+        /// the SRV messages using a CRC check and log any errors to the terminal.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void SerialPort_DataReceived(object sender, SerialDataReceivedEventArgs e)
         {
             string line = serialPort.ReadLine();
@@ -7157,6 +7736,22 @@ namespace V2XController
 
         }
 
+        /// <summary>
+        /// Sends point as CAM message while simulating tram.
+        /// </summary>
+        /// <param name="vehicleId">The ID of the vehicle.</param>
+        /// <param name="latitude">The latitude of the vehicle.</param>
+        /// <param name="longitude">The longitude of the vehicle.</param>
+        /// <param name="speed">The speed of the vehicle.</param>
+        /// <param name="heading">The heading of the vehicle.</param>
+        /// <param name="altitude">The altitude of the vehicle.</param>
+        /// <param name="dist">The distance traveled by the vehicle.</param>
+        /// <param name="type">The type of the vehicle.</param>
+        /// <param name="typeEx">The extended type of the vehicle.</param>
+        /// <param name="lineNum">The line number of the vehicle.</param>
+        /// <param name="vehNum">The vehicle number.</param>
+        /// <param name="embarkation">The embarkation status of the vehicle.</param>
+        /// <param name="suppressLocalRender">Whether to suppress local rendering of the vehicle.</param>
         private void SendPointAsCamMessage(
         string vehicleId,
         double latitude,
@@ -7217,6 +7812,13 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Checks if the given position is within any of the defined 
+        /// activation zones. If it is, activates the zone 
+        /// (change color and store last tram ID) and sets a timer to deactivate after 0.5 seconds.
+        /// </summary>
+        /// <param name="pos">The position to check.</param>
+        /// <param name="vehicleId">The ID of the vehicle.</param>
         private void CheckActivationZones(Point pos, string vehicleId)
         {
             // Use only last 4 digits for the table
@@ -7254,6 +7856,12 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Determines if a given point is inside a rotated rectangle defined by an activation zone.
+        /// </summary>
+        /// <param name="point">The point to check.</param>
+        /// <param name="zone">The activation zone.</param>
+        /// <returns>True if the point is inside the rotated rectangle, false otherwise.</returns>
         private static bool IsPointInRotatedRectangle(Point point, ActivationZone zone)
         {
             var rect = zone.Rectangle;
@@ -7282,7 +7890,10 @@ namespace V2XController
                    localY >= top && localY <= top + height;
         }
 
-        // Keep CAM replay vehicles independent of simulated tram IDs; show real IDs and speed in m/s; cap trail to last 6 points
+        /// <summary>
+        /// Loads playback file for replay.
+        /// </summary>
+        /// <param name="fileName">The name of the playback file.</param>
         private async void LoadPlaybackFile(string fileName)
         {
             StopPlaybackAndReset();
@@ -7708,7 +8319,10 @@ namespace V2XController
             MessageBox.Show("Playback data loaded. Use Play button to start playback.", "Playback ready", MessageBoxButton.OK, MessageBoxImage.Information);
         }
 
-        // .camrec loader: do not treat recorded IDs as simulated; show real IDs, and cap trails to last 6 points
+        /// <summary>
+        /// .camrec loader, a simple custom format we defined for easy recording and replay of CAM messages without the full XML structure.
+        /// </summary>
+        /// <param name="fileName">The name of the .camrec file to load.</param>
         private async Task LoadCamRecording(string fileName)
         {
             StopPlaybackAndReset();
@@ -7946,7 +8560,15 @@ namespace V2XController
             MessageBox.Show("CAM recording loaded. Use Play to start playback.", "Playback ready", MessageBoxButton.OK, MessageBoxImage.Information);
         }
 
-        // Show speed in m/s for live vehicles; keep simulated filter logic unchanged
+        /// <summary>
+        /// Updates vehicle canvas position, with speed in m/s
+        /// </summary>
+        /// <param name="vehicle">The vehicle map point to update.</param>
+        /// <param name="newPos">The new position of the vehicle.</param>
+        /// <param name="color">The color to use for the vehicle visuals.</param>
+        /// <param name="isSrv">Indicates if the vehicle is an SRV.</param>
+        /// <param name="label">The label of the vehicle.</param>
+        /// <param name="speed">The speed of the vehicle in m/s.</param>
         private void UpdateVehicleCanvasPosition(MapPoint vehicle, Point newPos, Brush color, bool isSrv, string label, double? speed = null)
         {
             if (vehicle == null) return;
@@ -8046,6 +8668,12 @@ namespace V2XController
 
         }
 
+        /// <summary>
+        /// Ensures that the visual elements for a map point (vehicle) are created and added to the canvas.
+        /// </summary>
+        /// <param name="vehicle">The vehicle map point to update.</param>
+        /// <param name="color">The color to use for the vehicle visuals.</param>
+        /// <param name="isSrv">Indicates if the vehicle is an SRV.</param>
         private void EnsureMapPointVisuals(MapPoint vehicle, Brush color, bool isSrv)
         {
             if (vehicle == null) return;
@@ -8080,7 +8708,13 @@ namespace V2XController
         }
 
 
-        // Updating or adding vehicle data in the table
+        /// <summary>
+        /// Updates or adds vehicle data in the table.
+        /// </summary>
+        /// <param name="vehicleId">The ID of the vehicle.</param>
+        /// <param name="speed">The speed of the vehicle.</param>
+        /// <param name="messageTime">The time of the message.</param>
+        /// <param name="isReplay">Indicates if the data is from a replay.</param>
         private void UpdateOrAddVehicleData(string vehicleId, double speed, DateTime messageTime, bool isReplay = false)
         {
             DateTime displayLocalTime = TimeZoneInfo.ConvertTimeFromUtc(messageTime.ToUniversalTime(), czechTimeZone);
@@ -8132,7 +8766,9 @@ namespace V2XController
         }
 
 
-        // cam cleanup timer
+        /// <summary>
+        /// Starts the cleanup timer for old vehicles.
+        /// </summary>
         private void StartCleanupTimer()
         {
             cleanupTimer = new DispatcherTimer();
@@ -8143,7 +8779,11 @@ namespace V2XController
 
 
 
-        // changing properties of the activation zone table
+        /// <summary>
+        /// Handles property changes for an activation zone.
+        /// </summary>
+        /// <param name="sender">The activation zone that changed.</param>
+        /// <param name="e">The property change event arguments.</param>
         private void ActivationZone_PropertyChanged(object sender, PropertyChangedEventArgs e)
         {
             if (isUpdatingActivationZone) return;
@@ -8218,6 +8858,11 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Handles property changes for a polyline segment.
+        /// </summary>
+        /// <param name="segment">The polyline segment that changed.</param>
+        /// <param name="propertyName">The name of the property that changed.</param>
         private void HandlePolylineSegmentPropertyChange(ActivationZone segment, string propertyName)
         {
             if (!segment.PolylineId.HasValue) return;
@@ -8231,6 +8876,20 @@ namespace V2XController
             var allSegments = _polylineToSegmentZones[polyline]
                 .OrderBy(s => s.SegmentIndex)
                 .ToList();
+
+            // *** ZMĚNA MainZone → automatická změna barvy ***
+            if (propertyName == nameof(ActivationZone.MainZone))
+            {
+                string newColor = GetColorForMainZone(segment.MainZone);
+
+                // Nastavit barvu (to vyvolá další PropertyChanged pro Color)
+                if (segment.Color != newColor)
+                {
+                    segment.Color = newColor;
+                    Console.WriteLine($"[POLYLINE] MainZone→{segment.MainZone} → Color={newColor} for seg {segment.SegmentIndex}");
+                }
+                return; // Rebuild se zavolá automaticky díky Color PropertyChanged
+            }
 
             if (propertyName == nameof(ActivationZone.Color))
             {
@@ -8258,7 +8917,6 @@ namespace V2XController
                         return new Point(x, y);
                     }).ToList();
 
-                    // This will re-calculate groups based on new widths
                     RebuildPolylineZoneWithVariableWidths(polyline, points);
                     UpdatePolylineVertexPositions(polyline, points);
                 }
@@ -8373,6 +9031,11 @@ namespace V2XController
             isDirty = true;
         }
 
+        /// <summary>
+        /// Updates the positions of the vertex dots for a given polyline.
+        /// </summary>
+        /// <param name="polyline">The polyline whose vertex dots need to be updated.</param>
+        /// <param name="points">The list of points representing the polyline's vertices.</param>
         private void UpdatePolylineVertexPositions(Polyline polyline, List<Point> points)
         {
             // Find all vertex dots belonging to this polyline
@@ -8404,6 +9067,14 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Calculates the endpoint coordinates given a start point, azimuth, and distance.
+        /// </summary>
+        /// <param name="startLat">The starting latitude.</param>
+        /// <param name="startLon">The starting longitude.</param>
+        /// <param name="azimuthDeg">The azimuth in degrees.</param>
+        /// <param name="distanceMeters">The distance in meters.</param>
+        /// <returns>The calculated endpoint coordinates as a tuple (latitude, longitude).</returns>
         private (double lat, double lon) CalculateEndPoint(double startLat, double startLon, int azimuthDeg, double distanceMeters)
         {
             const double EarthRadiusMeters = 6371000.0;
@@ -8430,6 +9101,11 @@ namespace V2XController
             return (newLat, newLon);
         }
 
+        /// <summary>
+        /// Finds the polyline that contains a given segment.
+        /// </summary>
+        /// <param name="segment">The segment to search for.</param>
+        /// <returns>The polyline containing the segment, or null if not found.</returns>
         private Polyline FindPolylineContainingSegment(ActivationZone segment)
         {
             foreach (var kvp in _polylineGeoPoints)
@@ -8456,6 +9132,11 @@ namespace V2XController
             return null;
         }
 
+        /// <summary>
+        /// Writes the camera recording file with the current map center and zoom.
+        /// </summary>
+        /// <param name="filePath">The file path to write the camera recording file.</param>
+        /// <param name="camLines">The lines representing the camera recording data.</param>
         private void WriteCamrecWithCenter(string filePath, IEnumerable<string> camLines)
         {
             using var sw = new StreamWriter(filePath, false, Encoding.UTF8);
@@ -8468,6 +9149,14 @@ namespace V2XController
         //|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
         //Methods for rotating rectangles around their base center
 
+        /// <summary>
+        /// Rotates a rectangle around its start point.
+        /// </summary>
+        /// <param name="rect">The rectangle to rotate.</param>
+        /// <param name="angleDegrees">The rotation angle in degrees.</param>
+        /// <param name="startPointCanvas">The start point on the canvas.</param>
+        /// <param name="rectWidth">The width of the rectangle.</param>
+        /// <param name="rectHeight">The height of the rectangle.</param>
         private void RotateRectangleAroundStartPoint(Rectangle rect, double angleDegrees, Point startPointCanvas, double rectWidth, double rectHeight)
         {
             if (rect == null) return;
@@ -8476,29 +9165,60 @@ namespace V2XController
 
 
 
-
+        /// <summary>
+        /// Transforms longitude to tile X coordinate at a given zoom level.
+        /// </summary>
+        /// <param name="lon">The longitude to transform.</param>
+        /// <param name="zoom">The zoom level.</param>
+        /// <returns>The tile X coordinate.</returns>
         private double LonToTileX(double lon, int zoom)
         {
             return (lon + 180.0) / 360.0 * (1 << zoom);
         }
 
+        /// <summary>
+        /// Transforms latitude to tile Y coordinate at a given zoom level.
+        /// </summary>
+        /// <param name="lat">The latitude to transform.</param>
+        /// <param name="zoom">The zoom level.</param>
+        /// <returns>The tile Y coordinate.</returns>
         private double LatToTileY(double lat, int zoom)
         {
             double latRad = lat * Math.PI / 180.0;
             return (1.0 - Math.Log(Math.Tan(latRad) + 1.0 / Math.Cos(latRad)) / Math.PI) / 2.0 * (1 << zoom);
         }
 
+        /// <summary>
+        /// Transforms tile X coordinate to longitude at a given zoom level.
+        /// </summary>
+        /// <param name="x">The tile X coordinate.</param>
+        /// <param name="zoom">The zoom level.</param>
+        /// <returns>The longitude.</returns>
         private double TileXToLon(double x, int zoom)
         {
             return x / Math.Pow(2, zoom) * 360.0 - 180.0;
         }
 
+        /// <summary>
+        /// Transforms tile Y coordinate to latitude at a given zoom level.
+        /// </summary>
+        /// <param name="y">The tile Y coordinate.</param>
+        /// <param name="zoom">The zoom level.</param>
+        /// <returns>The latitude.</returns>
         private double TileYToLat(double y, int zoom)
         {
             double n = Math.PI - (2.0 * Math.PI * y) / Math.Pow(2, zoom);
             return 180.0 / Math.PI * Math.Atan(0.5 * (Math.Exp(n) - Math.Exp(-n)));
         }
 
+        /// <summary>
+        /// Converts canvas pixel coordinates to latitude and longitude.
+        /// </summary>
+        /// <param name="pixelPoint">The pixel point on the canvas.</param>
+        /// <param name="centerLat">The latitude of the map center.</param>
+        /// <param name="centerLon">The longitude of the map center.</param>
+        /// <param name="zoom">The zoom level.</param>
+        /// <returns>The latitude and longitude as a Point.</returns>
         private Point CanvasPixelsToLatLon(Point pixelPoint, double centerLat, double centerLon, int zoom)
         {
             // Convert canvas pixel to world pixel
@@ -8516,7 +9236,10 @@ namespace V2XController
             return new Point(lon, lat);
         }
 
-
+        /// <summary>
+        /// Applies rotation to the specified activation zone.
+        /// </summary>
+        /// <param name="zone">The activation zone to rotate.</param>
         public void ApplyZoneRotation(ActivationZone zone)
         {
             if (zone?.Rectangle == null) return;
@@ -8529,7 +9252,10 @@ namespace V2XController
         }
         //|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
 
-
+        /// <summary>
+        /// Loads stops from OpenStreetMap (OSM) using the Overpass API.
+        /// </summary>
+        /// <returns>A list of stops.</returns>
         async Task<List<Stop>> LoadStopsFromOSM()
         {
             string query = @"[out:json];
@@ -8566,7 +9292,9 @@ namespace V2XController
             return stops;
         }
 
-        // Replace the existing static DrawStops(...) with this instance method
+        /// <summary>
+        /// Draws stops on the canvas safely, ensuring thread safety.
+        /// </summary>
         private void DrawStopsOnCanvasSafe()
         {
             if (TileCanvas == null) return;
@@ -8621,7 +9349,13 @@ namespace V2XController
         }
 
 
-        // Funkce pro přepočet Lat/Lon → globální pixely
+        /// <summary>
+        /// Transforms latitude and longitude to pixel X and Y coordinates on the map (px) for a given zoom level.
+        /// </summary>
+        /// <param name="lat">The latitude in degrees.</param>
+        /// <param name="lon">The longitude in degrees.</param>
+        /// <param name="zoom">The zoom level.</param>
+        /// <returns>A tuple containing the pixel X and Y coordinates.</returns>
         private static (double pixelX, double pixelY) LatLonToPixelXY(double lat, double lon, int zoom)
         {
             double tileSize = 256.0;
@@ -8636,7 +9370,12 @@ namespace V2XController
 
         //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-        //WPF Component methods
+        /// <summary>
+        /// Handler for latitude text box changes. Parses the input, 
+        /// updates the map center, and refreshes the map. Clamps latitude to Web Mercator bounds.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
 
         private void LatitudeBox_TextChanged(object sender, TextChangedEventArgs e)
         {
@@ -8651,6 +9390,12 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Handler for latitude text box changes. Parses the input, 
+        /// updates the map center, and refreshes the map. Clamps latitude to Web Mercator bounds.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void LongitudeBox_TextChanged(object sender, TextChangedEventArgs e)
         {
             var raw = LongitudeBox.Text?.Trim() ?? string.Empty;
@@ -8664,6 +9409,11 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Handler for rectangle button click. Activates rectangle drawing mode.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void rectButton_Click(object sender, RoutedEventArgs e)
         {
             Console.WriteLine("[RECTANGLE] Rectangle drawing mode activated");
@@ -8676,6 +9426,11 @@ namespace V2XController
             Keyboard.Focus(this);
         }
 
+        /// <summary>
+        /// Handler for stop drawing button click. Deactivates current drawing mode and returns to selection mode.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void StopDrawing_Click(object sender, RoutedEventArgs e)
         {
             Console.WriteLine("[STOP DRAWING] Stop drawing clicked");
@@ -8687,6 +9442,11 @@ namespace V2XController
                 PolylineWidthPanel.Visibility = Visibility.Collapsed;
         }
 
+        /// <summary>
+        /// Handler for polyline button click. Activates polyline drawing mode.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void PolylineButton_Click(object sender, RoutedEventArgs e)
         {
             Console.WriteLine("[POLYLINE] Polyline drawing mode activated");
@@ -8699,6 +9459,11 @@ namespace V2XController
             Keyboard.Focus(this);
         }
 
+        /// <summary>
+        /// Handler for draw points button click. Activates tram simulation mode.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void DrawPoints_Click(object sender, RoutedEventArgs e)
         {
             Console.WriteLine("[DRAW POINTS] Tram simulation mode activated");
@@ -8711,6 +9476,11 @@ namespace V2XController
             Keyboard.Focus(this);
         }
 
+        /// <summary>
+        /// Redraws playback to specific time, used for both timeline scrubbing and auto-playback. 
+        /// Updates vehicle positions based on replay frames, applies filtering,.
+        /// </summary>
+        /// <param name="time">The time to which playback should be redrawn.</param>
         private void RedrawPlaybackToTime(TimeSpan time)
         {
             playbackElapsedTime = time;
@@ -9092,6 +9862,13 @@ namespace V2XController
         }
 
 
+        /// <summary>
+        /// Updates replay statistics for a given time. Called during timeline
+        /// scrubbing and auto-playback to keep the stats table in sync with 
+        /// the replayed positions. Applies filtering and altitude checks to
+        /// ensure stats reflect only visible vehicles.
+        /// </summary>
+        /// <param name="t">The time for which to update replay statistics.</param>
         private void UpdateReplayStatsForTime(TimeSpan t)
         {
             if (_replayFrames == null || _replayFrames.Count == 0) return;
@@ -9128,17 +9905,32 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Handler for refresh button, refreshes map.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void RefreshMap_Click(object sender, RoutedEventArgs e)
         {
             RefreshMap();
         }
 
+        /// <summary>
+        /// Handler for export button, exports map to PNG.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void ExportMap_Click(object sender, RoutedEventArgs e)
         {
             ExportCanvasToPng(TileCanvas, "map_export.png");
             Console.WriteLine("Map exported into: map_export.png");
         }
 
+        /// <summary>
+        /// Handler for connect button, connects to a given COM port with given baudrate.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private async void Connect_Click(object sender, RoutedEventArgs e)
         {
             try
@@ -9182,6 +9974,11 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Handler for disconnect button, disconnects from com port.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void Disconnect_Click(object sender, RoutedEventArgs e)
         {
             try
@@ -9314,6 +10111,11 @@ namespace V2XController
         }
 
 
+        /// <summary>
+        /// Handler for save to xml button, saves map drawings to an xml file.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void SaveToXML_Click(object sender, RoutedEventArgs e)
         {
             // consider activation zones and railways too
@@ -9359,7 +10161,11 @@ namespace V2XController
 
 
 
-
+        /// <summary>
+        /// Handler for load from xml button, loads drawings from an xml file.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void LoadFromXML_Click(object sender, RoutedEventArgs e)
         {
             var dlg = new Microsoft.Win32.OpenFileDialog
@@ -9378,6 +10184,11 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Handler for play movement button, starts replay.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void PlayMovement_Click(object sender, RoutedEventArgs e)
         {
             if (_keyframes == null || _keyframes.Count == 0)
@@ -9422,6 +10233,11 @@ namespace V2XController
             UpdateUiEnabledState();
         }
 
+        /// <summary>
+        /// Handler for record movement button, records replay.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void btnRecordMovement_Click(object sender, RoutedEventArgs e)
         {
             // removing all active vehicles
@@ -9452,12 +10268,21 @@ namespace V2XController
             StartRecording();
         }
 
-
+        /// <summary>
+        /// Handler for stop recording button, stops recording.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void btnStopRecording_Click(object sender, RoutedEventArgs e)
         {
             StopRecording();
         }
 
+        /// <summary>
+        /// Handler for map controls button, shows map controls.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void MapControls_Click(object sender, RoutedEventArgs e)
         {
 
@@ -9465,6 +10290,11 @@ namespace V2XController
 
         }
 
+        /// <summary>
+        /// Handler for baudrate textbox, saves baudrate for future connection.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void BaudrateTB_TextChanged(object sender, TextChangedEventArgs e)
         {
             var text = BaudrateTB?.Text?.Trim() ?? string.Empty;
@@ -9490,7 +10320,9 @@ namespace V2XController
 
 
 
-        // Add this helper (near RedrawVehicleTrails/BringAllOverlaysToFront)
+        /// <summary>
+        /// Resets all tram trails if trams are live and if the position on the map changes.
+        /// </summary>
         private void ResetAllTramTrails()
         {
             // Active vehicles (RS485/live)
@@ -9538,7 +10370,9 @@ namespace V2XController
         }
 
 
-        // Fix RedrawVehicleTrails to use consistent tags and clean existing ones correctly
+        /// <summary>
+        /// Redraws vehicle trails.
+        /// </summary>
         private void RedrawVehicleTrails()
         {
             // Remove any existing tram trail polylines (both new/old tag variants)
@@ -9579,7 +10413,9 @@ namespace V2XController
             }
         }
 
-
+        /// <summary>
+        /// Brings all overlays to front safely.
+        /// </summary>
         public async Task BringAllOverlaysToFrontSafeAsync()
         {
             if (TileCanvas == null) return;
@@ -9671,13 +10507,22 @@ namespace V2XController
             });
         }
 
-
+        /// <summary>
+        /// Logic for checked radius box.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void CheckBox_Checked(object sender, RoutedEventArgs e)
         {
             RadiusComboBox.IsEnabled = true;
             DrawRadiusCircle();
         }
 
+        /// <summary>
+        /// Logic for unchecked radius box.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void CheckBox_Unchecked(object sender, RoutedEventArgs e)
         {
             RadiusComboBox.IsEnabled = false;
@@ -9688,6 +10533,11 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Logic for radius combo box selection.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void RadiusComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
             if (CircleCheckBox.IsChecked == true)
@@ -9695,6 +10545,11 @@ namespace V2XController
 
         }
 
+        /// <summary>
+        /// Logic for clearing all objects.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void ClearButton_Click(object sender, RoutedEventArgs e)
         {
             Console.WriteLine($"[CLEAR] Clear all objects requested");
@@ -9847,6 +10702,11 @@ namespace V2XController
         }
 
 
+        /// <summary>
+        /// Logic for Tram1 text box.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void Tram1TB_TextChanged(object sender, TextChangedEventArgs e)
         {
             if (_suppressTramTextChanged) return;
@@ -9872,6 +10732,11 @@ namespace V2XController
                 drawnTramIds[0] = "0000009999";
         }
 
+        /// <summary>
+        /// Logic for Tram2 text box.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void Tram2TB_TextChanged(object sender, TextChangedEventArgs e)
         {
             if (_suppressTramTextChanged) return;
@@ -9897,6 +10762,12 @@ namespace V2XController
                 drawnTramIds[1] = "0000001111";
         }
 
+
+        /// <summary>
+        /// Playback file button logic.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void btnPlaybackFile_Click(object sender, RoutedEventArgs e)
         {
             var dlg = new Microsoft.Win32.OpenFileDialog
@@ -9914,7 +10785,12 @@ namespace V2XController
             }
         }
 
-        // Pause: prefer classic replay pause when a replay is loaded
+
+        /// <summary>
+        /// Pause replay.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void btnPause_Click(object sender, RoutedEventArgs e)
         {
             if (_playbackLoaded)
@@ -9937,7 +10813,12 @@ namespace V2XController
             UpdateUiEnabledState();
         }
 
-        // Resume: replay branch – honor current slider, handle "at end" smartly
+
+        /// <summary>
+        /// Resume replay.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void btnPlay_Click(object sender, RoutedEventArgs e)
         {
             // Classic replay first
@@ -10018,16 +10899,32 @@ namespace V2XController
         }
 
 
+        /// <summary>
+        /// Logic for when the selected COM port is changed.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void ComPortsComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
 
         }
 
+
+        /// <summary>
+        /// Refresh all COM ports.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void RefreshComPorts_Click(object sender, RoutedEventArgs e)
         {
             LoadAvailableComPorts();
         }
 
+        /// <summary>
+        /// Handle mouse events while replay is active and user is dragging playback slider.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void PlaybackSlider_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         {
             isSliderDragging = true;
@@ -10045,7 +10942,11 @@ namespace V2XController
         }
 
 
-
+        /// <summary>
+        /// Update timer label while replay is active.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void UpdateTimerLabel()
         {
             try
@@ -10070,7 +10971,11 @@ namespace V2XController
             catch { /* ignore if label not present */ }
         }
 
-        // If loop starts playback from the end, consider session active
+        /// <summary>
+        /// Loop replay.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void LoopCheckbox_Checked(object sender, RoutedEventArgs e)
         {
             if (LoopCheckbox?.IsChecked == true && _keyframes.Count > 0 &&
@@ -10101,6 +11006,11 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Set custom speed for simulated tram.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void SpeedBox_TextChanged(object sender, TextChangedEventArgs e)
         {
             var text = SpeedBox.Text?.Trim() ?? "";
@@ -10113,11 +11023,21 @@ namespace V2XController
                 _manualCamSpeedKmh = 0.0;
         }
 
+        /// <summary>
+        /// Send test SRV message.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void SendSrv_Click(object sender, RoutedEventArgs e)
         {
             SendSrvMessage();
         }
 
+        /// <summary>
+        /// Send test SRV messages periodically.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void SrvCheckBox_Checked(object sender, RoutedEventArgs e)
         {
             if (serialPort != null && serialPort.IsOpen)
@@ -10128,6 +11048,9 @@ namespace V2XController
         }
 
 
+        /// <summary>
+        /// Send test SRV message.
+        /// </summary>
         private void SendSrvMessage()
         {
             double lat = latitude;
@@ -10181,6 +11104,10 @@ namespace V2XController
         }
 
 
+        /// <summary>
+        /// Send test SRV messages periodically (default: every minute).
+        /// </summary>
+
         private void StartSrvAutoTimerIfEnabled()
         {
             if (SrvCheckBox?.IsChecked != true)
@@ -10195,13 +11122,20 @@ namespace V2XController
                 _srvTimer.Start();
         }
 
+
+        /// <summary>
+        /// Stops timer for auto sending messages.
+        /// </summary>
         private void StopSrvAutoTimer()
         {
             if (_srvTimer != null)
                 _srvTimer.Stop();
         }
 
-        // Keep classic replay slider enabled only when a replay is loaded
+
+        /// <summary>
+        /// Update UI enabled states.
+        /// </summary>
         private void UpdateUiEnabledState()
         {
             // Connected-gated (serial)
@@ -10247,6 +11181,10 @@ namespace V2XController
             TramTrailLengthTB?.SetValue(IsEnabledProperty, _isConnected);
         }
 
+
+        /// <summary>
+        /// Reproject activation zones while dragging.
+        /// </summary>
         public void ReprojectActivationZonesOnMapChange()
         {
             // Reproject all non-switch zones from geo -> canvas, using per-zone latitude for MPP
@@ -10275,6 +11213,10 @@ namespace V2XController
             }
         }
 
+
+        /// <summary>
+        /// Reprojects active vehicles if the map changes (panning, zooming, etc.)
+        /// </summary>
         private void ReprojectActiveVehiclesOnMapChange()
         {
             foreach (var kv in activeVehicles)
@@ -10300,6 +11242,10 @@ namespace V2XController
             }
         }
 
+
+        /// <summary>
+        /// Reprojects all zones if the map changes (panning, zooming, etc.)
+        /// </summary>
         public async Task ReprojectAllZonesOnMapChange()
         {
             ReprojectActivationZonesOnMapChange();
@@ -10337,11 +11283,19 @@ namespace V2XController
             RedrawPlaybackToTime(playbackElapsedTime);
         }
 
+
+        /// <summary>
+        /// Redraws polyline.
+        /// </summary>
         private void ReprojectPolylines()
         {
             UpdatePolylinePositions();
         }
 
+
+        /// <summary>
+        /// Redraws trams if the user is panning, zooming, etc.
+        /// </summary>
         private void ReprojectDrawnTramsOnMapChange()
         {
             for (int idx = 0; idx < drawnTrams.Length; idx++)
@@ -10452,6 +11406,10 @@ namespace V2XController
             }
         }
 
+
+        /// <summary>
+        /// Builds key playback frames for replay.
+        /// </summary>
         private void BuildPlaybackKeyframes()
         {
             var set = new SortedSet<TimeSpan>();
@@ -10496,6 +11454,10 @@ namespace V2XController
             UpdateReplayTimerLabel();
         }
 
+        /// <summary>
+        /// Gets time index.
+        /// </summary>
+        /// <param name="time">Index by time</param>
         private int GetIndexForTime(TimeSpan time)
         {
             if (_keyframes.Count == 0) return 0;
@@ -10513,7 +11475,11 @@ namespace V2XController
             return ans;
         }
 
-        // Send CAMs for frames that occur exactly at time 't'
+
+        /// <summary>
+        /// Sends playback CAMs for user defined time.
+        /// </summary>
+        /// <param name="t">Defined time</param>
         private void SendPlaybackCamForTime(TimeSpan t)
         {
             if (!isPlaying) return;
@@ -10541,6 +11507,12 @@ namespace V2XController
             UpdateReplayStatsForTime(t);
         }
 
+
+        /// <summary>
+        /// Handler for Activation zone datagrid.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void ActivationZonesDataGrid_PreviewKeyDown(object sender, KeyEventArgs e)
         {
             if (e.Key == Key.Enter && _pendingNewZone != null)
@@ -10554,6 +11526,11 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Adds new row into activation zones datagrid
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void NewRow_Click(object sender, RoutedEventArgs e)
         {
             Console.WriteLine($"[ROW] Add table row clicked");
@@ -10586,6 +11563,9 @@ namespace V2XController
         }
 
 
+        /// <summary>
+        /// Tries to finalize pending zone, if zone is valid, adds as a new zone.
+        /// </summary>
         private bool TryFinalizePendingNewZone()
         {
             var zone = _pendingNewZone;
@@ -10670,9 +11650,12 @@ namespace V2XController
             return true;
         }
 
-        // Validate and finalize new row on commit
 
-        // Helper to focus a specific cell (by column index) for a given zone
+        /// <summary>
+        /// Focuses on cell in activation zones datagrid.
+        /// </summary>
+        /// <param name="zone">Activation zone</param>
+        /// <param name="columnIndex">Index of the column</param>
         private void FocusCell(ActivationZone zone, int columnIndex)
         {
             if (ActivationZonesDataGrid == null) return;
@@ -10693,7 +11676,11 @@ namespace V2XController
             }), DispatcherPriority.Input);
         }
 
-        // Focus first missing required field in order: Name, Latitude, Longitude, Azimuth, Width, Height
+
+        /// <summary>
+        /// Focus into first missing field in activation zones datagrid
+        /// </summary>
+        /// <param name="zone">Which zone to focus to</param>
         private void FocusFirstMissingField(ActivationZone zone)
         {
             if (string.IsNullOrWhiteSpace(zone.Name)) { FocusCell(zone, 0); return; }
@@ -10705,6 +11692,9 @@ namespace V2XController
         }
 
 
+        /// <summary>
+        /// Clears trams from playback that were left as remainders from stopped replay.
+        /// </summary>
         private void ClearPlaybackTramsFromCanvas()
         {
             // existing drawnTrams cleanup (kept)
@@ -10780,7 +11770,10 @@ namespace V2XController
             _playbackAccuracyByIdAndTs.Clear();
         }
 
-        // Stop completely (button Stop replay or programmatic stop)
+
+        /// <summary>
+        /// Stops replay and resets buffer for replay.
+        /// </summary>
         private void StopPlaybackAndReset()
         {
             playbackTimer?.Stop();
@@ -10811,7 +11804,10 @@ namespace V2XController
         }
 
 
-        // Smaž všechny živé CAM tramvaje (ponech SRV)
+
+        /// <summary>
+        /// Purges and ignores new CAM messages while replay is active.
+        /// </summary>
         private void PurgeLiveCamVehiclesForPlayback()
         {
             foreach (var kv in activeVehicles.ToList())
@@ -10830,12 +11826,24 @@ namespace V2XController
             TramTable.Clear();
         }
 
+
+        /// <summary>
+        /// Handler for stop replay button
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void StopReplay_Click(object sender, RoutedEventArgs e)
         {
             StopPlaybackAndReset();
             UpdateUiEnabledState();
         }
 
+
+        /// <summary>
+        /// Resets selected replay.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void ReloadReplay_Click(object sender, RoutedEventArgs e)
         {
             if (string.IsNullOrEmpty(_lastReplayFile) || !File.Exists(_lastReplayFile))
@@ -10849,6 +11857,9 @@ namespace V2XController
         }
 
 
+        /// <summary>
+        /// Starts timeshift session while replay is active.
+        /// </summary>
         private void StartTimeshiftSession()
         {
             _timeshiftEnabled = true;
@@ -10882,6 +11893,9 @@ namespace V2XController
         }
 
 
+        /// <summary>
+        /// Stops timeshift session and returns to replay.
+        /// </summary>
         private void StopTimeshiftSession()
         {
             _timeshiftEnabled = false;
@@ -10898,6 +11912,11 @@ namespace V2XController
             // keep buffer recordedCamMessages in memory; user may export range later if desired
         }
 
+
+        /// <summary>
+        /// Updates timeshift timer label while dragging.
+        /// </summary>
+        /// <param name="elapsedOverride">Override elapsed timer</param>
         private void UpdateTimeshiftTimerLabel(TimeSpan? elapsedOverride = null)
         {
             try
@@ -10911,6 +11930,9 @@ namespace V2XController
         }
 
 
+        /// <summary>
+        /// Starts timeshift catchup while dragging timeshift slider.
+        /// </summary>
         private void StartTimeshiftCatchupFromSliderAsync()
         {
             // cancel previous run if any
@@ -11005,6 +12027,10 @@ namespace V2XController
             });
         }
 
+
+        /// <summary>
+        /// Updates timer label while replay is active.
+        /// </summary>
         private void UpdateReplayTimerLabel()
         {
             try
@@ -11024,6 +12050,12 @@ namespace V2XController
             catch { }
         }
 
+
+        /// <summary>
+        /// Handler for value changes on replay slider.
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void ReplaySlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
         {
             if (_keyframes.Count == 0) return;
@@ -11056,6 +12088,12 @@ namespace V2XController
             SyncTramTableForReplay(t);
         }
 
+
+        /// <summary>
+        /// Handler
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void ReplaySlider_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         {
             isReplaySliderDragging = true;
@@ -13551,34 +14589,108 @@ namespace V2XController
 
         private void AddPolylineSegmentToTable(Point p1, Point p2, double widthMeters)
         {
+            if (currentPolyline == null) return;
+
             var (lat1, lon1) = ConvertCanvasXYToLatLon(p1.X, p1.Y, zoom);
             var (lat2, lon2) = ConvertCanvasXYToLatLon(p2.X, p2.Y, zoom);
 
-            double centerLat = (lat1 + lat2) / 2;
-            double centerLon = (lon1 + lon2) / 2;
-
+            double centerLat = (lat1 + lat2) / 2.0;
+            double centerLon = (lon1 + lon2) / 2.0;
             double lengthMeters = HaversineMeters(lat1, lon1, lat2, lon2);
-
             int azimuth = CalculateAzimuth(p1, p2);
 
-            var nextId = PolylineZonesCollection.Count > 0
-                ? PolylineZonesCollection.Max(z => z.SubZone) + 1
-                : 1;
+            int segmentIndex = polylinePoints.Count - 2;
 
-            var segment = new ActivationZone
+            // *** AUTOMATICKÉ PŘIŘAZENÍ MainZone a SubZone ***
+            List<ActivationZone> existingSegments = null;
+            if (_polylineToSegmentZones.TryGetValue(currentPolyline, out existingSegments))
             {
-                Name = $"Segment {nextId}",
+                existingSegments = existingSegments.OrderBy(s => s.SegmentIndex).ToList();
+            }
+
+            int mainZone = 0;
+            int subZone = 0;
+
+            if (existingSegments != null && existingSegments.Count > 0)
+            {
+                var lastSegment = existingSegments[existingSegments.Count - 1];
+                mainZone = lastSegment.MainZone;
+                subZone = lastSegment.SubZone + 1;
+
+                // Real-time update: SubZone 0-4 (5 zón), pak MainZone++
+                if (subZone > 4)
+                {
+                    mainZone++;
+                    subZone = 0;
+
+                    // Limit: MainZone 0-3 (4 hlavní zóny)
+                    if (mainZone > 3)
+                    {
+                        mainZone = 3;
+                        subZone = 4; // Zůstat na poslední možné pozici
+                        Console.WriteLine($"[SEGMENT] WARNING: Maximum zones reached (3/4)!");
+                    }
+                }
+            }
+
+            string color = GetColorForMainZone(mainZone);
+
+            Console.WriteLine($"[SEGMENT] Adding segment {segmentIndex}: Main={mainZone}, Sub={subZone}, Color={color}");
+
+            var zone = new ActivationZone
+            {
+                Name = $"Seg-{segmentIndex + 1}",
                 Latitude = centerLat,
                 Longitude = centerLon,
-                Width = widthMeters,       
-                Height = lengthMeters,     
+                Width = widthMeters,
+                Height = lengthMeters,
                 Azimuth = azimuth,
-                Color = "#000000",
-                MainZone = 0,
-                SubZone = nextId
+                Color = color,
+                PolylineId = Guid.Empty,
+                SegmentIndex = segmentIndex,
+                SegmentType = "",
+                MainZone = mainZone,
+                SubZone = subZone,
+                LastTramId = "-"
             };
 
-            PolylineZonesCollection.Add(segment);
+            if (!_polylineToSegmentZones.ContainsKey(currentPolyline))
+                _polylineToSegmentZones[currentPolyline] = new List<ActivationZone>();
+
+            _polylineToSegmentZones[currentPolyline].Add(zone);
+            zone.PropertyChanged += ActivationZone_PropertyChanged;
+
+            _polylineRows.Add(zone);
+
+            if (!_suspendPolylineZoneLiveSort)
+            {
+                SetPolylineZonesLiveSorting(false);
+                _suspendPolylineZoneLiveSort = true;
+            }
+
+            PolylineZonesCollection.Add(zone);
+        }
+
+        private static string GetColorForMainZone(int mainZone)
+        {
+            return mainZone switch
+            {
+                0 => "#FFFF0000", // Red
+                1 => "Green",      //Green = #FF008000)
+                2 => "#FF0000FF", // Blue
+                3 => "#FFFF00FF", // Magenta
+                _ => "#FFFF0000"  // Default Red
+            };
+        }
+
+
+        private void SetPolylineZonesLiveSorting(bool enabled)
+        {
+            var view = CollectionViewSource.GetDefaultView(PolylineZonesCollection);
+            if (view is ICollectionViewLiveShaping live)
+            {
+                live.IsLiveSorting = enabled;
+            }
         }
 
     }

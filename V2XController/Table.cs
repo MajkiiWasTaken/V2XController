@@ -5,6 +5,20 @@ using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Threading.Tasks;
 
+/**********************************************************************************************************
+ * V2X Controller - Table.cs
+ * Author: Michal Švrček
+ * Version: 2.1.2
+ * Description: Represents a data table for the V2X Controller application. Contains properties for various
+ *              attributes such as station ID, type, GPS coordinates, speed, azimuth, last received time,
+ *              distance, line number, vehicle number, and embarkation status.
+ *              
+ * Copyright (c) 2025 Hroší stavby Morava a.s.
+ * All rights reserved.
+ *********************************************************************************************************/
+
+
+
 namespace V2XController {
 
       public class Table

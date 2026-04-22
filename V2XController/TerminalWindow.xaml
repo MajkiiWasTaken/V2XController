@@ -1,3 +1,14 @@
+<!--
+    TerminalWindow.xaml
+    Author: Michal Svrcek
+    Version: 3.1.2
+    
+    Description: Terminal Window of the V2X Controller application. Terminal for displaying debug messages and raw data from the V2X system.
+    
+    Copyright (c) 2025 Hrosi stavby Morava a.s.
+    All rights reserved.
+    -->
+    
 <Window x:Class="V2XController.TerminalWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"

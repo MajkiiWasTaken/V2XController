@@ -1,4 +1,17 @@
-﻿<Window x:Class="V2XController.ExportWindow"
+﻿<!--
+    ExportWindow.xaml
+    Author: Michal Švrček
+    Version: 1.8.0
+    
+    Description: XAML layout for ExportWindow, 
+    which allows users to manage export profiles 
+    and export and read data to/from selected devices.
+    
+    Copyright (c) 2025 Hroší stavby Morava a.s.
+    All rights reserved.
+    -->
+
+<Window x:Class="V2XController.ExportWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Export" Height="500" Width="370"

@@ -20,6 +20,18 @@ using System.Windows.Threading;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 
+/**********************************************************************************************************
+ * V2X Controller - ExportWindow.xaml.cs
+ * Author: Michal Švrček
+ * Version: 1.9.4
+ * Description: Export window for exporting activation zones and switch zones to MPC devices via Modbus ASCII/TCP,
+ *              serial tunnel, or via RS-485.
+ *              
+ * Copyright (c) 2025 Hroší stavby Morava a.s.
+ * All rights reserved.    
+ *********************************************************************************************************/
+
+
 namespace V2XController
 {
     //Todo:

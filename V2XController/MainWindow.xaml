@@ -1,4 +1,21 @@
-﻿<Window x:Class="V2XController.MainWindow"
+﻿<!--
+    MainWindow.xaml
+    Author: Michal Švrček
+    Version: 3.1.2
+    
+    Description: Main Window of the V2X Controller application. 
+    Contains UI elements for connecting to COM ports, configuring RSU settings, 
+    inputting GPS coordinates, drawing on the map, managing trams, recording and 
+    playback of movements, and displaying activation zones. The window is divided 
+    into three main panels: left panel for settings and controls, center panel for 
+    tram configuration and SRV messages, and right panel for filter settings and the map canvas. 
+    Additional buttons for debugging, refreshing the map, exporting the map, and opening a 
+    Protobuf translator are also included.
+    
+     Copyright (c) 2025 Hroší stavby Morava a.s.
+     All rights reserved.
+    -->
+<Window x:Class="V2XController.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"

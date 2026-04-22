@@ -5,6 +5,18 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
+/**********************************************************************************************************
+ * V2X Controller - TestExtract.cs
+ * Author: Michal Švrček
+ * Version: 1.8.7 
+ * Description: Provides helper methods for Modbus RTU communication, including CRC calculation, frame 
+ *              validation, and exception code explanation. Designed for use in V2X Controller application 
+ *              for handling Modbus RTU messages in real-time.
+ *              
+ * Copyright (c) 2025 Hroší stavby Morava a.s.
+ * All rights reserved.
+ *********************************************************************************************************/
+
 public static class ModbusRtuHelpers
 {
     public static ushort Crc16Modbus(byte[] data, int offset, int length)

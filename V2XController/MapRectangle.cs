@@ -2,6 +2,16 @@
 using System.Windows.Media;
 using System.Windows.Shapes;
 
+/**********************************************************************************************************
+ * V2X Controller - MapRectangle.cs
+ * Author: Michal Švrček
+ * Version: 1.0.7
+ * Description: Represents a map rectangle in the V2X Controller application, containing shape, position, 
+ *              and visual properties.
+ *              
+ * Copyright (c) 2025 Hroší stavby Morava a.s.
+ * All rights reserved.
+ *********************************************************************************************************/
 
 namespace V2XController
 {

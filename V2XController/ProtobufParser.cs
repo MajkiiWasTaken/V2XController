@@ -7,6 +7,19 @@ using System.Linq;
 using System.Text;
 using System.Text.Json;
 
+/**********************************************************************************************************
+ * V2X Controller - ProtobufParser.cs
+ * Author: Michal Švrček
+ * Version: 2.4.7
+ * Description: Protobuf parser logic of the V2X Controller application. Handles parsing of protobuf definitions
+ *              and messages, allowing users to load .proto files, view combined definitions, generate default
+ *              message structures, and decode protobuf messages from hex or base64 input.
+ *              
+ * Copyright (c) 2025 Hroší stavby Morava a.s.
+ * All rights reserved.
+ *********************************************************************************************************/
+
+
 namespace V2XController
 {
     public static class ProtobufParser

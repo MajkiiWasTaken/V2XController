@@ -2,6 +2,19 @@ using System.Windows;
 using System.Windows.Documents;
 using System.Windows.Media;
 
+/**********************************************************************************************************
+ * V2X Controller - TerminalWindow.xaml.cs
+ * Author: Michal Švrèek
+ * Version: 2.1.2
+ * Description: Terminal window logic of the V2X Controller application. Handles raw message display,
+ *              user interactions, and provides a visual interface for monitoring V2X communications 
+ *              in real-time. 
+ *              
+ * Copyright (c) 2025 Hroší stavby Morava a.s.
+ * All rights reserved.
+ *********************************************************************************************************/
+
+
 namespace V2XController
 {
     public partial class TerminalWindow : Window
