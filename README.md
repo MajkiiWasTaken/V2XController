@@ -186,7 +186,6 @@ This application is intended for:
 **All rights reserved.**
 
 This project is primarily an **internal tool** used for development, testing, and diagnostics.  
-It combines HMI, communication, data parsing, and export functionality into a single desktop application.
 
 ---
 
