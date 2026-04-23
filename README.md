@@ -180,10 +180,12 @@ This application is intended for:
 
 ---
 
-##  Notes
+##  Copyright
+
+**Copyright (c) 2025 Hroší stavby Morava a.s.**
+**All rights reserved.**
 
 This project is primarily an **internal tool** used for development, testing, and diagnostics.  
-It combines HMI, communication, data parsing, and export functionality into a single desktop application.
 
 ---
 
