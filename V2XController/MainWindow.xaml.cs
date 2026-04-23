@@ -4603,6 +4603,7 @@ namespace V2XController
                 double lengthMeters = HaversineMeters(lat1, lon1, lat2, lon2);
                 totalPolylineLength += lengthMeters;
                 int azimuth = CalculateAzimuth(p1, p2);
+                bool isrtvmode = IsSwitchMode();
 
                 // *** AUTOMATICKÉ PŘIŘAZENÍ MainZone/SubZone pro NOVÝ segment ***
                 // (Ne pro staré segmenty při pokračování!)
@@ -4612,7 +4613,7 @@ namespace V2XController
                     currentSubZone++;
 
                     // SubZone přesáhl 4 → další MainZone
-                    if (currentSubZone > 4)
+                    if (currentSubZone > 4 && !isrtvmode)
                     {
                         currentMainZone++;
                         currentSubZone = 0;
@@ -4625,12 +4626,28 @@ namespace V2XController
                             Console.WriteLine($"[FINALIZE] WARNING: Max zones (3/4) at segment {i}");
                         }
                     }
+                    else
+                    {
+                        if (isrtvmode && currentSubZone > 6)
+                        {
+                            currentMainZone++;
+                            currentSubZone = 0;
+                            // Limit: MainZone 0-4
+                            if (currentMainZone > 4)
+                            {
+                                currentMainZone = 4;
+                                currentSubZone = 6;
+                                Console.WriteLine($"[FINALIZE] WARNING: Max zones (4/6) in switch mode at segment {i}");
+                            }
+                        }
+                    }
                 }
+                
 
-                string color = GetColorForMainZone(currentMainZone);
+                string color = GetColorForMainZone(currentMainZone, IsSwitchMode());
 
                 string segmentType = "";
-                if (polylinePoints.Count >= 3)
+                if (polylinePoints.Count >= 3 && isrtvmode)
                 {
                     int totalSegments = polylinePoints.Count - 1;
                     if (i == 0)
@@ -5032,7 +5049,7 @@ namespace V2XController
         /// </summary>
         /// <param name="polyline">The polyline containing the vertex.</param>
         /// <param name="vertexIndex">The index of the vertex to update.</param>
-        /// <param name="newPosition">The new position of the vertex.</param>
+        /// <param name="newPosition">The new positiFon of the vertex.</param>
         private void UpdatePolylineSegmentsAroundVertex(Polyline polyline, int vertexIndex, Point newPosition)
         {
             if (polyline == null || vertexIndex < 0 || vertexIndex >= polyline.Points.Count)
@@ -8880,7 +8897,7 @@ namespace V2XController
             // *** ZMĚNA MainZone → automatická změna barvy ***
             if (propertyName == nameof(ActivationZone.MainZone))
             {
-                string newColor = GetColorForMainZone(segment.MainZone);
+                string newColor = GetColorForMainZone(segment.MainZone, IsSwitchMode());
 
                 // Nastavit barvu (to vyvolá další PropertyChanged pro Color)
                 if (segment.Color != newColor)
@@ -10805,7 +10822,6 @@ namespace V2XController
                 return;
             }
 
-            // Timeshift pause ...
             _timeshiftPaused = true;
             _suppressLiveRender = true;
             _timeshiftFollowLive = false;
@@ -13547,6 +13563,78 @@ namespace V2XController
                     switchZones.Clear();
                 }
 
+                // *** NOVĚ: Clear polyline zones and visual elements ***
+                if (PolylineZonesCollection != null)
+                {
+                    PolylineZonesCollection.Clear();
+                }
+
+                if (_polylineRows != null)
+                {
+                    _polylineRows.Clear();
+                }
+
+                // Remove all polyline visual elements from canvas
+                if (_polylineToSegmentZones != null)
+                {
+                    _polylineToSegmentZones.Clear();
+                }
+
+                if (_polylineToSegments != null)
+                {
+                    foreach (var segments in _polylineToSegments.Values)
+                    {
+                        foreach (var segment in segments)
+                        {
+                            if (segment?.Parent is System.Windows.Controls.Panel parent)
+                                parent.Children.Remove(segment);
+                        }
+                    }
+                    _polylineToSegments.Clear();
+                }
+
+                // Remove polyline vertices (dots)
+                if (_polylineVertexMap != null)
+                {
+                    foreach (var vertex in _polylineVertexMap.Keys.ToList())
+                    {
+                        if (vertex?.Parent is System.Windows.Controls.Panel parent)
+                            parent.Children.Remove(vertex);
+                    }
+                    _polylineVertexMap.Clear();
+                }
+
+                if (_polylineVertexToCircle != null)
+                {
+                    foreach (var circle in _polylineVertexToCircle.Values)
+                    {
+                        if (circle?.Parent is System.Windows.Controls.Panel parent)
+                            parent.Children.Remove(circle);
+                    }
+                    _polylineVertexToCircle.Clear();
+                }
+
+                // Remove the actual polyline paths
+                if (_polylineGeoPoints != null)
+                {
+                    foreach (var polyline in _polylineGeoPoints.Keys.ToList())
+                    {
+                        if (polyline?.Parent is System.Windows.Controls.Panel parent)
+                            parent.Children.Remove(polyline);
+                    }
+                    _polylineGeoPoints.Clear();
+                }
+
+                // Clear current drawing state
+                currentPolyline = null;
+                polylinePoints?.Clear();
+                polylineVertexDots?.Clear();
+                _currentPolylineCircles?.Clear();
+                _currentPolylineSegments?.Clear();
+                _currentPolylineCircleGeoPoints?.Clear();
+                _isDrawingPolyline = false;
+                _polylineCommittedPointsCount = 0;
+
                 // Reset selection/highlight if any
                 if (_highlightedRect != null)
                 {
@@ -13578,6 +13666,7 @@ namespace V2XController
                 // best-effort clear
             }
         }
+
         // near other helpers
         public bool IsSwitchModeSelected => SwitchRadio?.IsChecked == true;
 
@@ -14601,7 +14690,10 @@ namespace V2XController
 
             int segmentIndex = polylinePoints.Count - 2;
 
-            // *** AUTOMATICKÉ PŘIŘAZENÍ MainZone a SubZone ***
+            // *** AUTOMATICKÉ PŘIŘAZENÍ MainZone a SubZone podle režimu WLC/RTV ***
+            // Correct mapping: Switch radio = RTV, Zone radio = WLC
+            bool isRtvMode = IsSwitchMode();
+
             List<ActivationZone> existingSegments = null;
             if (_polylineToSegmentZones.TryGetValue(currentPolyline, out existingSegments))
             {
@@ -14617,29 +14709,46 @@ namespace V2XController
                 mainZone = lastSegment.MainZone;
                 subZone = lastSegment.SubZone + 1;
 
-                // Real-time update: SubZone 0-4 (5 zón), pak MainZone++
-                if (subZone > 4)
+                if (isRtvMode)
                 {
-                    mainZone++;
-                    subZone = 0;
-
-                    // Limit: MainZone 0-3 (4 hlavní zóny)
-                    if (mainZone > 3)
+                    // RTV: SubZone 0-6 (7 zón), pak MainZone++
+                    if (subZone > 6)
                     {
-                        mainZone = 3;
-                        subZone = 4; // Zůstat na poslední možné pozici
-                        Console.WriteLine($"[SEGMENT] WARNING: Maximum zones reached (3/4)!");
+                        mainZone++;
+                        subZone = 0;
+                        if (mainZone > 4)
+                        {
+                            mainZone = 4;
+                            subZone = 6;
+                            Console.WriteLine($"[SEGMENT] WARNING: Maximum RTV zones reached (4/6)!");
+                        }
+                    }
+                }
+                else
+                {
+                    // WLC: SubZone 0-4 (5 zón), pak MainZone++
+                    if (subZone > 4)
+                    {
+                        mainZone++;
+                        subZone = 0;
+                        if (mainZone > 3)
+                        {
+                            mainZone = 3;
+                            subZone = 4;
+                            Console.WriteLine($"[SEGMENT] WARNING: Maximum WLC zones reached (3/4)!");
+                        }
                     }
                 }
             }
 
-            string color = GetColorForMainZone(mainZone);
+            string color = GetColorForMainZone(mainZone, isRtvMode);
+            string zoneName = GeneratePolylineZoneName(mainZone, subZone, isRtvMode);
 
-            Console.WriteLine($"[SEGMENT] Adding segment {segmentIndex}: Main={mainZone}, Sub={subZone}, Color={color}");
+            Console.WriteLine($"[SEGMENT] Adding segment {segmentIndex}: Name={zoneName}, Main={mainZone}, Sub={subZone}, Color={color}, Mode={(isRtvMode ? "RTV" : "WLC")}");
 
             var zone = new ActivationZone
             {
-                Name = $"Seg-{segmentIndex + 1}",
+                Name = zoneName,
                 Latitude = centerLat,
                 Longitude = centerLon,
                 Width = widthMeters,
@@ -14648,7 +14757,7 @@ namespace V2XController
                 Color = color,
                 PolylineId = Guid.Empty,
                 SegmentIndex = segmentIndex,
-                SegmentType = "",
+                SegmentType = isRtvMode ? "RTV" : "WLC",
                 MainZone = mainZone,
                 SubZone = subZone,
                 LastTramId = "-"
@@ -14671,16 +14780,60 @@ namespace V2XController
             PolylineZonesCollection.Add(zone);
         }
 
-        private static string GetColorForMainZone(int mainZone)
+        private static string GeneratePolylineZoneName(int mainZone, int subZone, bool isRtvMode)
         {
-            return mainZone switch
+            // interně 0-based, zobrazujeme 1..7
+            int sub = Math.Clamp(subZone, 0, 6) + 1;
+
+            if (isRtvMode)
             {
-                0 => "#FFFF0000", // Red
-                1 => "Green",      //Green = #FF008000)
-                2 => "#FF0000FF", // Blue
-                3 => "#FFFF00FF", // Magenta
-                _ => "#FFFF0000"  // Default Red
-            };
+                if (mainZone <= 1)
+                {
+                    // Přibližovací: P1-X (main=0) nebo P2-X (main=1)
+                    int adjustedMain = mainZone + 1;
+                    return $"P{adjustedMain}-{sub}";
+                }
+                else if (mainZone == 2)
+                {
+                    // Blokovací: B1..B7
+                    return $"B{sub}";
+                }
+                else
+                {
+                    // Vzdalovací: V1-X (main=3->1), V2-X (main=4->2)
+                    int adjustedMain = mainZone - 2;
+                    return $"V{adjustedMain}-{sub}";
+                }
+            }
+
+            // WLC / default naming
+            return $"Z{mainZone + 1}-{sub}";
+        }
+
+        private static string GetColorForMainZone(int mainZone, bool isRtvMode)  // ← OPRAVENO: přidán parametr
+        {
+            if (isRtvMode)
+            {
+                // RTV: 0-1 = Zelená (P), 2 = Červená (B), 3-4 = Modrá (V)
+                if (mainZone <= 1)
+                    return "#008000"; // green
+                if (mainZone == 2)
+                    return "#FF0000"; // red
+                                      // main >=3
+                return "#0000FF"; // blue
+            }
+            else
+            {
+                // WLC: 0 = Červená, 1 = Zelená, 2 = Modrá, 3 = Magenta
+                return mainZone switch
+                {
+                    0 => "#FFFF0000", // Red
+                    1 => "#008000",     // Green
+                    2 => "#FF0000FF", // Blue
+                    3 => "#FFFF00FF", // Magenta
+                    _ => "#FFFF0000"  // Default Red
+                };
+            }
         }
 
 

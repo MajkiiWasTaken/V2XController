@@ -36,7 +36,7 @@ public class ActivationZone : INotifyPropertyChanged
 
     private Guid? polylineId;
     private int segmentIndex = -1;
-    private string segmentType = ""; // "Přibližovací", "Blokovací", "Vzdalovací"
+    private string segmentType = ""; // "Přibližovací", "Blokovací", "Vzdalovací", "RTV", ...
 
     public Guid? PolylineId
     {
@@ -164,48 +164,92 @@ public class ActivationZone : INotifyPropertyChanged
         set { isSwitchZone = value; OnPropertyChanged(); UpdateName(); }
     }
 
+    private static bool IsPbvSegmentType(string st)
+    {
+        if (string.IsNullOrWhiteSpace(st))
+            return false;
+
+        var s = st.Trim().ToUpperInvariant();
+
+        // Common explicit markers
+        if (s == "RTV")
+            return true;
+
+        // Single-letter markers
+        if (s.Length == 1 && (s == "P" || s == "B" || s == "V"))
+            return true;
+
+        // Czech words or longer markers -> check for substrings (case-insensitive)
+        s = st.ToLowerInvariant();
+        if (s.Contains("přibl") || s.Contains("pribl") || s.Contains("blok") || s.Contains("vzdal"))
+            return true;
+
+        return false;
+    }
+
     public void UpdateName()
     {
+        // Displayed sub-zone index: clamp to 1..7 per requirement (internal stored is 0-based)
+        int sub = Math.Clamp(subZone, 0, 6) + 1;
+
         if (IsPolylineSegment)
         {
-            if (!string.IsNullOrWhiteSpace(segmentType))
+            // Choose PBV naming if segment type looks like RTV/P/B/V or if this activation zone is marked as switch.
+            bool usePbvNaming = IsPbvSegmentType(segmentType);
+
+            if (usePbvNaming)
             {
-                Name = $"{segmentType}-{segmentIndex + 1}";
+                if (mainZone <= 1)
+                {
+                    int adjustedMain = mainZone + 1;
+                    Name = $"P{adjustedMain}-{sub}";
+                }
+                else if (mainZone == 2)
+                {
+                    Name = $"B{sub}";
+                }
+                else
+                {
+                    int adjustedMain = mainZone - 2;
+                    Name = $"V{adjustedMain}-{sub}";
+                }
             }
             else
             {
-                Name = $"Segment {segmentIndex + 1}";
+                // Default WLC naming
+                Name = $"Z{mainZone + 1}-{sub}";
             }
             return;
         }
 
+        // Non-polyline (regular switch / normal areas)
         if (isSwitchZone)
         {
             switch (mainZone)
             {
                 case 0:
-                    Name = $"P1-{subZone + 1}";
+                    Name = $"P1-{sub}";
                     break;
                 case 1:
-                    Name = $"P2-{subZone + 1}";
+                    Name = $"P2-{sub}";
                     break;
                 case 2:
-                    Name = $"B{subZone + 1}";
+                    Name = $"B{sub}";
                     break;
                 case 3:
-                    Name = $"V1-{subZone + 1}";
+                    Name = $"V1-{sub}";
                     break;
                 case 4:
-                    Name = $"V2-{subZone + 1}";
+                    Name = $"V2-{sub}";
                     break;
                 default:
-                    Name = $"Switch {mainZone + 1}-{subZone + 1}";
+                    Name = $"Switch {mainZone + 1}-{sub}";
                     break;
             }
         }
         else
         {
-            Name = $"Z{mainZone + 1}-{subZone + 1}";
+            Name = $"Z{mainZone + 1}-{sub}";
         }
     }
 
