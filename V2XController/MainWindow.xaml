@@ -432,11 +432,23 @@ PreviewKeyDown="ActivationZonesDataGrid_PreviewKeyDown">
         Width="165" Height="20" Margin="340,0,0,199"
         Click="ExportMap_Click" ToolTip="Exports map state into an image (.png)" Panel.ZIndex="100"/>
 
-        <Button Content="Protobuf Translator" HorizontalAlignment="Left" VerticalAlignment="Bottom" Background="LightYellow"
+        <Button Content="Protobuf Translator" HorizontalAlignment="Left" VerticalAlignment="Bottom" Background="#025a7a"
         Width="166" Height="20" Margin="510,0,0,249"
-        Click="OpenProtobuf_Click" ToolTip="Open Protobuf message translator" Panel.ZIndex="100"/>
+        Click="OpenProtobuf_Click" ToolTip="Open Protobuf message translator" Panel.ZIndex="100">
+            <Button.Style>
+                <Style TargetType="Button">
+                    <Setter Property="Foreground" Value="White"/>
 
-        <Button x:Name="MapControls" Content="Map controls" HorizontalAlignment="Left" VerticalAlignment="Bottom"
+                    <Style.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter Property="Foreground" Value="Black"/>
+                        </Trigger>
+                    </Style.Triggers>
+                </Style>
+            </Button.Style>
+        </Button>
+
+            <Button x:Name="MapControls" Content="Map controls" HorizontalAlignment="Left" VerticalAlignment="Bottom"
         Width="109" Height="20" Margin="681,0,0,249"
         Click="MapControls_Click" ToolTip="Displays map controls" Panel.ZIndex="100"/>
     </Grid>

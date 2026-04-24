@@ -12,9 +12,9 @@ using System.Xml;
  * Version: 1.0.0
  * Description: Represents a V2X message within the V2X Controller application. Handles properties such as
  *              VehicleID, MessageID, Timestamp, Latitude, Longitude, Speed, Heading, Altitude, MessageType,
- *              RawContent, DistanceMeters, and IsManual. Provides a data structure for storing and processing
- *              
+ *              RawContent, DistanceMeters, and IsManual. Provides a data structure for storing and processing             
  *              V2X messages in real-time.
+ *              
  * Copyright (c) 2025 Hroší stavby Morava a.s.
  * All rights reserved.
  *********************************************************************************************************/

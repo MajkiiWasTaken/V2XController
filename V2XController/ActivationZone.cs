@@ -36,7 +36,7 @@ public class ActivationZone : INotifyPropertyChanged
 
     private Guid? polylineId;
     private int segmentIndex = -1;
-    private string segmentType = ""; // "Přibližovací", "Blokovací", "Vzdalovací", "RTV", ...
+    private string segmentType = "";
 
     public Guid? PolylineId
     {

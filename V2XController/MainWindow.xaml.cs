@@ -156,7 +156,7 @@ namespace V2XController
         private Polyline connectionLine = new Polyline
         {
             Stroke = Brushes.Red,
-            StrokeThickness = 2
+            StrokeThickness = 0.5
         };
 
         private Point? _rectangleStartPoint = null;
@@ -469,6 +469,8 @@ namespace V2XController
         private readonly List<PolylineData> _drawnPolylines = new List<PolylineData>();
         private List<(double lat, double lon)> _currentPolylineCircleGeoPoints = new List<(double, double)>();
         private int _polylineCommittedPointsCount = 0;
+        private readonly Dictionary<Polyline, List<System.Windows.Shapes.Line>> _polylineDirectionArrows = new Dictionary<Polyline, List<System.Windows.Shapes.Line>>();
+
 
         private ProtobufWindow _protobufWindow;
 
@@ -1492,18 +1494,26 @@ namespace V2XController
                         // Pokračování v existující polyline - použít variable widths
                         Console.WriteLine($"[UPDATE POS] Rebuilding with VARIABLE widths (continuation, committed={_polylineCommittedPointsCount})");
                         RebuildPolylineZoneWithVariableWidths(poly, rebuildPoints);
+                        RebuildPolylineZoneWithVariableWidths(poly, poly.Points.ToList());
+                        UpdatePolylineDirectionArrows(poly, poly.Points.ToList());
                     }
                     else if (!isActiveDrawing && hasTableSegments)
                     {
                         // Finalizovaná polyline s table segments
                         Console.WriteLine($"[UPDATE POS] Rebuilding with VARIABLE widths (finalized)");
                         RebuildPolylineZoneWithVariableWidths(poly, rebuildPoints);
+                        RebuildPolylineZoneWithVariableWidths(poly, poly.Points.ToList());
+                        UpdatePolylineDirectionArrows(poly, poly.Points.ToList());
+
                     }
                     else
                     {
                         // Nová polyline nebo bez table segments - uniform width
                         Console.WriteLine($"[UPDATE POS] Rebuilding with UNIFORM width");
                         RebuildPolylineZone(poly, rebuildPoints, halfWidthPx);
+                        RebuildPolylineZone(poly, poly.Points.ToList(), halfWidthPx);
+                        UpdatePolylineDirectionArrows(poly, poly.Points.ToList());
+
                     }
 
                     // Sync _currentPolylineSegments
@@ -3249,7 +3259,7 @@ namespace V2XController
                     currentPolyline = new Polyline
                     {
                         Stroke = _strokeBrush,
-                        StrokeThickness = 3,
+                        StrokeThickness = 2,
                         Fill = null,
                         IsHitTestVisible = true
                     };
@@ -4693,7 +4703,7 @@ namespace V2XController
             var currentPoints = currentPolyline.Points.ToList();
             Console.WriteLine($"[FINALIZE] Calling live rebuild with {currentPoints.Count} points and {addedSegments.Count} segments");
             RebuildPolylineZoneWithVariableWidths(currentPolyline, currentPoints);
-
+            UpdatePolylineDirectionArrows(currentPolyline, currentPoints);
             polylineData.TotalLengthMeters = totalPolylineLength;
             _drawnPolylines.Add(polylineData);
 
@@ -4851,6 +4861,7 @@ namespace V2XController
                         {
                             var oldPoints = polylineToAdd.Points.ToList();
                             RebuildPolylineZoneWithVariableWidths(polylineToAdd, oldPoints);
+                            UpdatePolylineDirectionArrows(polylineToAdd, oldPoints);
                         }
 
                         // Keep in finalized state
@@ -5006,7 +5017,7 @@ namespace V2XController
                     // Rebuild visual zones from ALL table segments
                     var currentPoints = polylineToAdd.Points.ToList();
                     RebuildPolylineZoneWithVariableWidths(polylineToAdd, currentPoints);
-
+                    UpdatePolylineDirectionArrows(polylineToAdd, currentPoints);
                     // Na konci redo akce v FinalizePolyline (kolem řádku 193000):
 
                     if (!_drawnPolylines.Contains(polylineDataToAdd))
@@ -5168,9 +5179,10 @@ namespace V2XController
 
                 // Rebuild with per-segment widths
                 RebuildPolylineZoneWithVariableWidths(polyline, polyline.Points.ToList());
-
+                
                 // Update vertex positions (dots and circles)
                 UpdatePolylineVertexPositions(polyline, polyline.Points.ToList());
+                UpdatePolylineDirectionArrows(polyline, polyline.Points.ToList());
             }
             finally
             {
@@ -5402,7 +5414,7 @@ namespace V2XController
                 };
 
                 TileCanvas.Children.Add(centerLinePath);
-                Panel.SetZIndex(centerLinePath, 501);
+                Panel.SetZIndex(centerLinePath, 100000);
                 _polylineToSegments[polyline].Add(centerLinePath);
             }
 
@@ -10303,7 +10315,7 @@ namespace V2XController
         private void MapControls_Click(object sender, RoutedEventArgs e)
         {
 
-            MessageBox.Show(ControlsMessage, "Controls");
+            MessageBox.Show(ControlsMessage, "Map controls");
 
         }
 
@@ -14689,9 +14701,6 @@ namespace V2XController
             int azimuth = CalculateAzimuth(p1, p2);
 
             int segmentIndex = polylinePoints.Count - 2;
-
-            // *** AUTOMATICKÉ PŘIŘAZENÍ MainZone a SubZone podle režimu WLC/RTV ***
-            // Correct mapping: Switch radio = RTV, Zone radio = WLC
             bool isRtvMode = IsSwitchMode();
 
             List<ActivationZone> existingSegments = null;
@@ -14833,6 +14842,90 @@ namespace V2XController
                     3 => "#FFFF00FF", // Magenta
                     _ => "#FFFF0000"  // Default Red
                 };
+            }
+        }
+
+        private void UpdatePolylineDirectionArrows(Polyline polyline, List<Point> points)
+        {
+            if (polyline == null) return;
+
+            if (!_polylineDirectionArrows.TryGetValue(polyline, out var arrows))
+            {
+                arrows = new List<System.Windows.Shapes.Line>();
+                _polylineDirectionArrows[polyline] = arrows;
+            }
+
+            // Remove existing arrow shapes
+            foreach (var line in arrows.ToList())
+            {
+                if (TileCanvas.Children.Contains(line))
+                    TileCanvas.Children.Remove(line);
+            }
+            arrows.Clear();
+
+            if (points == null || points.Count < 2)
+                return;
+
+            // Choose arrow density (approx. 3-5 arrows per polyline)
+            int desiredArrows = 4;
+            int step = Math.Max(1, (points.Count - 1) / desiredArrows);
+
+            // Arrow visual parameters (in canvas pixels)
+            double headLen = 10.0;
+            double headWidth = 10.0;
+            var stroke = polyline.Stroke as SolidColorBrush ?? Brushes.Black;
+            double thickness = Math.Max(1.0, polyline.StrokeThickness);
+
+            for (int i = 0; i < points.Count - 1; i += step)
+            {
+                var p1 = points[i];
+                var p2 = points[i + 1];
+
+                var dir = p2 - p1;
+                double len = dir.Length;
+                if (len < 0.5) continue;
+                dir.Normalize();
+
+                // midpoint of segment
+                var mid = new Point((p1.X + p2.X) * 0.5, (p1.Y + p2.Y) * 0.5);
+
+                // perpendicular vector
+                var perp = new Vector(-dir.Y, dir.X);
+
+                // Tip is on the center line; arrow "wings" go backwards
+                var tip = mid;
+                var left = tip - dir * headLen + perp * headWidth * 0.5;
+                var right = tip - dir * headLen - perp * headWidth * 0.5;
+
+                // Create two Line shapes (tip->left and tip->right)
+                var l1 = new System.Windows.Shapes.Line
+                {
+                    X1 = tip.X,
+                    Y1 = tip.Y,
+                    X2 = left.X,
+                    Y2 = left.Y,
+                    Stroke = stroke,
+                    StrokeThickness = thickness,
+                    IsHitTestVisible = false
+                };
+                var l2 = new System.Windows.Shapes.Line
+                {
+                    X1 = tip.X,
+                    Y1 = tip.Y,
+                    X2 = right.X,
+                    Y2 = right.Y,
+                    Stroke = stroke,
+                    StrokeThickness = thickness,
+                    IsHitTestVisible = false
+                };
+
+                TileCanvas.Children.Add(l1);
+                TileCanvas.Children.Add(l2);
+                Panel.SetZIndex(l1, 200);
+                Panel.SetZIndex(l2, 200);
+
+                arrows.Add(l1);
+                arrows.Add(l2);
             }
         }
 

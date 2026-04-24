@@ -440,9 +440,9 @@ namespace V2XController
 
                     MessageBox.Show(
                         $"DEVICE FIRMWARE TYPE MISMATCH!\n\n" +
-                        $"Device type: MPC-{deviceTypeStr}\n" +
+                        $"Device type: MPCv3-{deviceTypeStr}\n" +
                         $"Zones in table: {zonesType}\n\n" +
-                        $"You are trying to export {zonesType} zones to an MPC-{deviceTypeStr}!\n\n" +
+                        $"You are trying to export {zonesType} zones to an MPCv3-{deviceTypeStr}!\n\n" +
                         $"Switch to the correct mode ({deviceTypeStr})\n" +
                         $"Please try exporting again after switching to correct mode.",
                         "Export Type Mismatch",
