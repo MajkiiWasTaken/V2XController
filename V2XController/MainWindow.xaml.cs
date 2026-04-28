@@ -3316,7 +3316,7 @@ namespace V2XController
                 dot.MouseLeave += PolylineVertex_MouseLeave;
 
                 TileCanvas.Children.Add(dot);
-                Panel.SetZIndex(dot, 1001); // OPRAVA: 1000 -> 1001 (nad polyline čarou)
+                Panel.SetZIndex(dot, 1000000); // OPRAVA: 1000 -> 1001 (nad polyline čarou)
                 polylineVertexDots.Add(dot);
 
                 _polylineVertexMap[dot] = (currentPolyline, polylinePoints.Count - 1);
@@ -3983,6 +3983,14 @@ namespace V2XController
         {
             if (selectedElement == null || e.RightButton != MouseButtonState.Pressed) return;
 
+            // Prevent moving polyline vertex dots while actively drawing a polyline
+            if (_isDrawingPolyline && selectedElement is Ellipse selectedDot &&
+                selectedDot.Tag is string tag && tag == "PolylineVertex")
+            {
+                // ignore dragging of vertex dots during polyline drawing
+                return;
+            }
+
             var currentPos = e.GetPosition(TileCanvas);
             var dx = currentPos.X - mouseOffset.X;
             var dy = currentPos.Y - mouseOffset.Y;
@@ -4589,14 +4597,35 @@ namespace V2XController
 
             // *** KLÍČOVÁ OPRAVA: Najít poslední MainZone/SubZone z EXISTUJÍCÍCH segmentů ***
             int currentMainZone = 0;
-            int currentSubZone = -1; // -1 znamená "ještě nepřiřazeno"
+            int currentSubZone = -1;
 
             if (wasContinuation && _polylineToSegmentZones.TryGetValue(currentPolyline, out var existingSegs) && existingSegs.Count > 0)
             {
+                // Continuation - pokračuj od posledního segmentu této polyline
                 var lastExisting = existingSegs.OrderBy(s => s.SegmentIndex).Last();
                 currentMainZone = lastExisting.MainZone;
                 currentSubZone = lastExisting.SubZone;
                 Console.WriteLine($"[FINALIZE] Continuation from existing: Main={currentMainZone}, Sub={currentSubZone}");
+            }
+            else if (!wasContinuation)
+            {
+                // Nová polyline - hledej v ActivationZonesCollection (tam jsou finalizované segmenty)
+                var lastGlobal = ActivationZonesCollection
+                    .Where(z => z.SegmentIndex >= 0) // pouze polyline segmenty
+                    .OrderByDescending(z => z.MainZone)
+                    .ThenByDescending(z => z.SubZone)
+                    .FirstOrDefault();
+
+                if (lastGlobal != null)
+                {
+                    currentMainZone = lastGlobal.MainZone;
+                    currentSubZone = lastGlobal.SubZone;
+                    Console.WriteLine($"[FINALIZE] New polyline continuing from ActivationZonesCollection: Main={currentMainZone}, Sub={currentSubZone}");
+                }
+                else
+                {
+                    Console.WriteLine($"[FINALIZE] New polyline - starting from 0/0 (no existing segments)");
+                }
             }
 
             for (int i = startSegmentIndex; i < polylinePoints.Count - 1; i++)
@@ -5028,7 +5057,7 @@ namespace V2XController
 
                     // OPRAVA Z-indexů
                     Panel.SetZIndex(polylineToAdd, 1000); // polyline čára
-                    foreach (var d in allDotsToAdd) Panel.SetZIndex(d, 1001); // dots NAD čarou
+                    foreach (var d in allDotsToAdd) Panel.SetZIndex(d, 1000000); // dots NAD čarou
                     foreach (var c in allCirclesToAdd) Panel.SetZIndex(c, 500); // circles POD čarou ale NAD tilesy
 
                     isDirty = true;
@@ -8917,7 +8946,21 @@ namespace V2XController
                     segment.Color = newColor;
                     Console.WriteLine($"[POLYLINE] MainZone→{segment.MainZone} → Color={newColor} for seg {segment.SegmentIndex}");
                 }
-                return; // Rebuild se zavolá automaticky díky Color PropertyChanged
+
+                if(_polylineGeoPoints.TryGetValue(polyline, out var geoPoints))
+                {
+                    var points = geoPoints.Select(gp =>
+                    {
+                        var (x, y) = ConvertLatLonToCanvasXY(gp.lat, gp.lon);
+                        return new Point(x, y);
+                    }).ToList();
+
+                    RebuildPolylineZoneWithVariableWidths(polyline, points);
+                    UpdatePolylineVertexPositions(polyline, points);
+                }
+
+                isDirty = true;
+                return;
             }
 
             if (propertyName == nameof(ActivationZone.Color))
@@ -11820,7 +11863,7 @@ namespace V2XController
             _replayEndUtc = null;
 
             _replayGeoFrames.Clear();
-
+            TramTable.Clear();
             _replayFrames.Clear();
             _replayVehicles.Clear();
             _playbackHeadingByIdAndTs.Clear();
@@ -14703,49 +14746,56 @@ namespace V2XController
             int segmentIndex = polylinePoints.Count - 2;
             bool isRtvMode = IsSwitchMode();
 
-            List<ActivationZone> existingSegments = null;
-            if (_polylineToSegmentZones.TryGetValue(currentPolyline, out existingSegments))
-            {
-                existingSegments = existingSegments.OrderBy(s => s.SegmentIndex).ToList();
-            }
-
             int mainZone = 0;
             int subZone = 0;
 
-            if (existingSegments != null && existingSegments.Count > 0)
+            // First check current polyline's own segments
+            if (_polylineToSegmentZones.TryGetValue(currentPolyline, out var existingSegments) && existingSegments.Count > 0)
             {
-                var lastSegment = existingSegments[existingSegments.Count - 1];
+                var lastSegment = existingSegments.OrderByDescending(s => s.MainZone).ThenByDescending(s => s.SubZone).First();
                 mainZone = lastSegment.MainZone;
                 subZone = lastSegment.SubZone + 1;
+            }
+            else if (PolylineZonesCollection.Count > 0)
+            {
+                // New polyline - continue from last zone in collection (regardless of type)
+                var lastGlobal = PolylineZonesCollection
+                    .OrderByDescending(z => z.MainZone)
+                    .ThenByDescending(z => z.SubZone)
+                    .First();
 
-                if (isRtvMode)
+                Console.WriteLine($"[SEGMENT] New polyline - continuing from last global: Main={lastGlobal.MainZone}, Sub={lastGlobal.SubZone}, Type={lastGlobal.SegmentType}");
+
+                mainZone = lastGlobal.MainZone;
+                subZone = lastGlobal.SubZone + 1;
+            }
+
+            // Advance with wrapping
+            if (isRtvMode)
+            {
+                if (subZone > 6)
                 {
-                    // RTV: SubZone 0-6 (7 zón), pak MainZone++
-                    if (subZone > 6)
+                    mainZone++;
+                    subZone = 0;
+                    if (mainZone > 4)
                     {
-                        mainZone++;
-                        subZone = 0;
-                        if (mainZone > 4)
-                        {
-                            mainZone = 4;
-                            subZone = 6;
-                            Console.WriteLine($"[SEGMENT] WARNING: Maximum RTV zones reached (4/6)!");
-                        }
+                        mainZone = 4;
+                        subZone = 6;
+                        Console.WriteLine($"[SEGMENT] WARNING: Maximum RTV zones reached (4/6)!");
                     }
                 }
-                else
+            }
+            else
+            {
+                if (subZone > 4)
                 {
-                    // WLC: SubZone 0-4 (5 zón), pak MainZone++
-                    if (subZone > 4)
+                    mainZone++;
+                    subZone = 0;
+                    if (mainZone > 3)
                     {
-                        mainZone++;
-                        subZone = 0;
-                        if (mainZone > 3)
-                        {
-                            mainZone = 3;
-                            subZone = 4;
-                            Console.WriteLine($"[SEGMENT] WARNING: Maximum WLC zones reached (3/4)!");
-                        }
+                        mainZone = 3;
+                        subZone = 4;
+                        Console.WriteLine($"[SEGMENT] WARNING: Maximum WLC zones reached (3/4)!");
                     }
                 }
             }
@@ -14866,15 +14916,15 @@ namespace V2XController
             if (points == null || points.Count < 2)
                 return;
 
-            // Choose arrow density (approx. 3-5 arrows per polyline)
+            // Arrow density: ~desiredArrows per polyline
             int desiredArrows = 4;
             int step = Math.Max(1, (points.Count - 1) / desiredArrows);
 
             // Arrow visual parameters (in canvas pixels)
             double headLen = 10.0;
             double headWidth = 10.0;
-            var stroke = polyline.Stroke as SolidColorBrush ?? Brushes.Black;
-            double thickness = Math.Max(1.0, polyline.StrokeThickness);
+            var stroke = Brushes.Black; // <- wings/arrow color forced to black
+            double thickness = Math.Max(1.0, polyline?.StrokeThickness ?? 2.0);
 
             for (int i = 0; i < points.Count - 1; i += step)
             {
@@ -14894,10 +14944,10 @@ namespace V2XController
 
                 // Tip is on the center line; arrow "wings" go backwards
                 var tip = mid;
-                var left = tip - dir * headLen + perp * headWidth * 0.5;
-                var right = tip - dir * headLen - perp * headWidth * 0.5;
+                var left = tip - dir * headLen + perp * (headWidth * 0.5);
+                var right = tip - dir * headLen - perp * (headWidth * 0.5);
 
-                // Create two Line shapes (tip->left and tip->right)
+                // Create two Line shapes (tip->left and tip->right) with black stroke
                 var l1 = new System.Windows.Shapes.Line
                 {
                     X1 = tip.X,
@@ -14921,8 +14971,8 @@ namespace V2XController
 
                 TileCanvas.Children.Add(l1);
                 TileCanvas.Children.Add(l2);
-                Panel.SetZIndex(l1, 200);
-                Panel.SetZIndex(l2, 200);
+                Panel.SetZIndex(l1, 10000000);
+                Panel.SetZIndex(l2, 10000000);
 
                 arrows.Add(l1);
                 arrows.Add(l2);
@@ -14958,7 +15008,7 @@ public class PolylineData
     public List<PolylineSegmentData> Segments { get; set; } = new List<PolylineSegmentData>();
     public DateTime CreatedAt { get; set; }
     public double TotalLengthMeters { get; set; }
-    public string ColorHex { get; set; } = "#FF0000";
+    public string ColorHex { get; set; } = "#000000";
 }
 
 public class PolylineSegmentData
