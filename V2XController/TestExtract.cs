@@ -1,9 +1,6 @@
-﻿using System;
-using System.Globalization;
+﻿using System.Globalization;
 using System.IO.Ports;
 using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
 
 /**********************************************************************************************************
  * V2X Controller - TestExtract.cs

@@ -1,18 +1,11 @@
-﻿using Google.Protobuf.Reflection;
-using System;
-using System.Collections.Generic;
-using System.Collections.ObjectModel;
+﻿using System.Collections.ObjectModel;
 using System.IO;
-using System.Linq;
 using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
-using Windows.UI.Xaml.Hosting;
 using static V2XController.ProtobufParser;
-using System.Windows.Documents;
-using System.Threading.Tasks;
 
 /**********************************************************************************************************
  * V2X Controller - ProtobufWindow.xaml.cs
@@ -53,11 +46,11 @@ namespace V2XController
         new OneofOption { FieldNumber = 30, Name = "empty_response", DisplayName = "Empty Response (field 30)" },
     }
         };
-        private OneofOption _selectedOneofOption = null;
+        private OneofOption? _selectedOneofOption = null;
 
         private int _currentSearchIndex = -1;
         private List<int> _searchMatches = new List<int>();
-        private Brush _originalBackground;
+        //private Brush _originalBackground;
         private Brush _highlightBrush = new SolidColorBrush(Color.FromRgb(255, 255, 0)); // Yellow
 
         private System.Windows.Threading.DispatcherTimer _searchDebounceTimer;
@@ -388,7 +381,7 @@ namespace V2XController
                             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
                             "V2XController",
                             "ProtoFiles",
-                            fileToRemove.FileName
+                            fileToRemove.FileName ?? string.Empty
                         );
 
                         if (File.Exists(appDataPath))
@@ -522,7 +515,7 @@ namespace V2XController
             }
 
             // Determine which message type to force (based on radio selection)
-            string forceMessageType = null;
+            string? forceMessageType = null;
             if (RsuToControllerRadio?.IsChecked == true)
             {
                 forceMessageType = "RsuToControllerMessageData";
@@ -558,16 +551,27 @@ namespace V2XController
                             // Success with opposite direction - switch radio
                             if (oppositeType == "RsuToControllerMessageData")
                             {
-                                RsuToControllerRadio.IsChecked = true;
-                                StatusLabel.Content = "Auto-switched to RSU -> Controller";
+                                if (RsuToControllerRadio != null)
+                                    RsuToControllerRadio.IsChecked = true;
+
+                                if (StatusLabel != null)
+                                    StatusLabel.Content = "Auto-switched to RSU -> Controller";
                             }
                             else
                             {
-                                ControllerToRsuRadio.IsChecked = true;
-                                StatusLabel.Content = "Auto-switched to Controller -> RSU";
+                                if (ControllerToRsuRadio != null)
+                                    ControllerToRsuRadio.IsChecked = true;
+
+                                if (StatusLabel != null)
+                                    StatusLabel.Content = "Auto-switched to Controller -> RSU";
                             }
-                            StatusLabel.Foreground = Brushes.Green;
-                            TestResultTextBox.Text = retryDecoded;
+
+                            if (StatusLabel != null)
+                                StatusLabel.Foreground = Brushes.Green;
+
+                            if (TestResultTextBox != null)
+                                TestResultTextBox.Text = retryDecoded;
+
                             return;
                         }
                     }
@@ -694,7 +698,7 @@ namespace V2XController
             {
                 var nestedMessage = allMessages.FirstOrDefault(m =>
                     m.Name == field.Type ||
-                    field.Type.EndsWith("." + m.Name));
+                    (field.Type != null && field.Type.EndsWith("." + m.Name)));
 
                 if (nestedMessage != null && !result.Contains(nestedMessage))
                 {
@@ -736,7 +740,7 @@ namespace V2XController
             if (field.IsRepeated)
             {
                 // Check if it's a repeated enum - generate array with one default enum value
-                if (field.Type.Contains("Enum"))
+                if (field != null && field.Type != null && field.Type.Contains("Enum"))
                 {
                     string defaultEnumValue = GetDefaultEnumValue(field.Type);
                     return $"[\"{defaultEnumValue}\"]";
@@ -744,7 +748,7 @@ namespace V2XController
 
                 // Check if it's a repeated message - generate array with one default message
                 var repeatedMessage = allMessages.FirstOrDefault(m =>
-                    m.Name == field.Type || field.Type.EndsWith("." + m.Name));
+                  field != null && field.Type != null && (m.Name == field.Type || field.Type.EndsWith("." + m.Name)));
 
                 if (repeatedMessage != null)
                 {
@@ -757,7 +761,7 @@ namespace V2XController
             }
 
             // Handle google.protobuf types FIRST
-            if (field.Type.Contains("google.protobuf"))
+            if (field != null && field.Type != null && field.Type.Contains("google.protobuf"))
             {
                 if (field.Type.Contains("Timestamp"))
                 {
@@ -794,7 +798,7 @@ namespace V2XController
             }
 
             // Handle different field types
-            switch (field.Type.ToLower())
+            switch (field != null && field.Type != null ? field.Type.ToLower() : string.Empty)
             {
                 case "int32":
                 case "int64":
@@ -823,7 +827,7 @@ namespace V2XController
 
                 default:
                     // Check if it's an enum type
-                    if (field.Type.Contains("Enum"))
+                    if (field != null && field.Type != null && field.Type.Contains("Enum"))
                     {
                         string defaultEnumValue = GetDefaultEnumValue(field.Type);
                         return $"\"{defaultEnumValue}\"";
@@ -831,8 +835,7 @@ namespace V2XController
 
                     // Check if it's a nested message type
                     var nestedMessage = allMessages.FirstOrDefault(m =>
-                        m.Name == field.Type ||
-                        field.Type.EndsWith("." + m.Name));
+                        field != null && field.Type != null && (m.Name == field.Type || field.Type.EndsWith("." + m.Name)));
 
                     if (nestedMessage != null)
                     {
@@ -1116,7 +1119,7 @@ namespace V2XController
 
 
 
-        private void SearchNext_Click(object sender, RoutedEventArgs e)
+        private void SearchNext_Click(object? sender, RoutedEventArgs? e)
         {
             if (_searchMatches.Count == 0)
                 return;
@@ -1125,7 +1128,7 @@ namespace V2XController
             HighlightCurrentMatch();
         }
 
-        private void SearchPrevious_Click(object sender, RoutedEventArgs e)
+        private void SearchPrevious_Click(object? sender, RoutedEventArgs? e)
         {
             if (_searchMatches.Count == 0)
                 return;
@@ -1198,7 +1201,7 @@ namespace V2XController
             }
         }
 
-        private async void SearchDebounceTimer_Tick(object sender, EventArgs e)
+        private async void SearchDebounceTimer_Tick(object? sender, EventArgs e)
         {
             _searchDebounceTimer.Stop();
 
@@ -1278,18 +1281,18 @@ namespace V2XController
 
     public class ProtoFileInfo
     {
-        public string FileName { get; set; }
-        public string Content { get; set; }
-        public string FilePath { get; set; }
-        public string MessageSummary { get; set; }
-        public string Status { get; set; }
-        public Brush StatusColor { get; set; }
+        public string? FileName { get; set; }
+        public string? Content { get; set; }
+        public string? FilePath { get; set; }
+        public string? MessageSummary { get; set; }
+        public string? Status { get; set; }
+        public Brush? StatusColor { get; set; }
     }
 
     public class OneofOption
     {
         public int FieldNumber { get; set; }
-        public string Name { get; set; }
-        public string DisplayName { get; set; }
+        public string? Name { get; set; }
+        public string? DisplayName { get; set; }
     }
 }

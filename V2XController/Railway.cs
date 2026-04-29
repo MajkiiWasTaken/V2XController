@@ -1,9 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-using System.Windows.Shapes;
+﻿using System.Windows.Shapes;
 
 /**********************************************************************************************************
  * V2X Controller - Railway.cs
@@ -25,7 +20,7 @@ namespace V2XController
         public double Lon1 { get; set; }
         public double Lat2 { get; set; }
         public double Lon2 { get; set; }
-        public Line Line { get; set; }
+        public Line? Line { get; set; }
         public string Color { get; set; } = "#000000";
         public double Thickness { get; set; } = 2.0;
     }

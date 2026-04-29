@@ -33,54 +33,63 @@ namespace V2XController
             var xmlDoc = new System.Xml.XmlDocument();
             xmlDoc.LoadXml(rawXml);
 
-            if (xmlDoc.DocumentElement.Name == "CAM")
+            if (xmlDoc.DocumentElement?.Name == "CAM")
             {
                 msg.MessageType = "CAM";
                 var vehPt = xmlDoc.SelectSingleNode("//vehPt");
                 if (vehPt != null)
                 {
-                    // Parse statId as VehicleID
-                    if (vehPt.Attributes["statId"] != null)
-                        msg.VehicleID = vehPt.Attributes["statId"].Value;
+                    // Use local attribute references to avoid possible null deref warnings
+                    var aStat = vehPt.Attributes?["statId"];
+                    if (aStat != null)
+                        msg.VehicleID = aStat.Value;
 
-                    if (vehPt.Attributes["lat"] != null)
-                        msg.Latitude = double.Parse(vehPt.Attributes["lat"].Value, System.Globalization.CultureInfo.InvariantCulture);
+                    var aLat = vehPt.Attributes?["lat"];
+                    if (aLat != null)
+                        msg.Latitude = double.Parse(aLat.Value, System.Globalization.CultureInfo.InvariantCulture);
 
-                    if (vehPt.Attributes["lng"] != null)
-                        msg.Longitude = double.Parse(vehPt.Attributes["lng"].Value, System.Globalization.CultureInfo.InvariantCulture);
+                    var aLng = vehPt.Attributes?["lng"];
+                    if (aLng != null)
+                        msg.Longitude = double.Parse(aLng.Value, System.Globalization.CultureInfo.InvariantCulture);
 
-                    if (vehPt.Attributes["speed"] != null)
-                        msg.Speed = double.Parse(vehPt.Attributes["speed"].Value, System.Globalization.CultureInfo.InvariantCulture);
+                    var aSpeed = vehPt.Attributes?["speed"];
+                    if (aSpeed != null)
+                        msg.Speed = double.Parse(aSpeed.Value, System.Globalization.CultureInfo.InvariantCulture);
 
-                    if (vehPt.Attributes["heading"] != null)
-                        msg.Heading = double.Parse(vehPt.Attributes["heading"].Value, System.Globalization.CultureInfo.InvariantCulture);
+                    var aHeading = vehPt.Attributes?["heading"];
+                    if (aHeading != null)
+                        msg.Heading = double.Parse(aHeading.Value, System.Globalization.CultureInfo.InvariantCulture);
 
-                    if (vehPt.Attributes["alt"] != null)
-                        msg.Altitude = double.Parse(vehPt.Attributes["alt"].Value, System.Globalization.CultureInfo.InvariantCulture);
+                    var aAlt = vehPt.Attributes?["alt"];
+                    if (aAlt != null)
+                        msg.Altitude = double.Parse(aAlt.Value, System.Globalization.CultureInfo.InvariantCulture);
 
-                    if (vehPt.Attributes["lastRec"] != null)
-                        msg.Timestamp = DateTime.Parse(vehPt.Attributes["lastRec"].Value, null, System.Globalization.DateTimeStyles.RoundtripKind);
+                    var aLast = vehPt.Attributes?["lastRec"];
+                    if (aLast != null)
+                        msg.Timestamp = DateTime.Parse(aLast.Value, null, System.Globalization.DateTimeStyles.RoundtripKind);
                 }
-
             }
-            else if (xmlDoc.DocumentElement.Name == "SRV")
+            else if (xmlDoc.DocumentElement?.Name == "SRV")
             {
                 msg.MessageType = "SRV";
                 var service = xmlDoc.SelectSingleNode("//service");
                 if (service != null)
                 {
-                    if (service.Attributes["logicalId"] != null)
-                        msg.VehicleID = service.Attributes["logicalId"].Value;
+                    var aLogical = service.Attributes?["logicalId"];
+                    if (aLogical != null)
+                        msg.VehicleID = aLogical.Value;
 
-                    if (service.Attributes["dt"] != null)
-                        msg.Timestamp = DateTime.Parse(service.Attributes["dt"].Value, null, System.Globalization.DateTimeStyles.RoundtripKind);
+                    var aDt = service.Attributes?["dt"];
+                    if (aDt != null)
+                        msg.Timestamp = DateTime.Parse(aDt.Value, null, System.Globalization.DateTimeStyles.RoundtripKind);
 
-                    if (service.Attributes["lat"] != null)
-                        msg.Latitude = double.Parse(service.Attributes["lat"].Value, System.Globalization.CultureInfo.InvariantCulture);
+                    var aLat = service.Attributes?["lat"];
+                    if (aLat != null)
+                        msg.Latitude = double.Parse(aLat.Value, System.Globalization.CultureInfo.InvariantCulture);
 
-                    if (service.Attributes["lng"] != null)
-                        msg.Longitude = double.Parse(service.Attributes["lng"].Value, System.Globalization.CultureInfo.InvariantCulture);
-
+                    var aLng = service.Attributes?["lng"];
+                    if (aLng != null)
+                        msg.Longitude = double.Parse(aLng.Value, System.Globalization.CultureInfo.InvariantCulture);
                 }
             }
 

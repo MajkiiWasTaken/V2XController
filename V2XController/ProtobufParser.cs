@@ -1,11 +1,7 @@
-﻿using Google.Protobuf;
-using System;
-using System.Collections.Generic;
-using System.Globalization;
-using System.IO;
-using System.Linq;
+﻿using System.IO;
 using System.Text;
 using System.Text.Json;
+using System.Windows.Navigation;
 
 /**********************************************************************************************************
  * V2X Controller - ProtobufParser.cs
@@ -37,7 +33,7 @@ namespace V2XController
                     return messages;
 
                 var lines = protoDefinition.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-                ProtoMessage currentMessage = null;
+                ProtoMessage? currentMessage = null;
                 bool insideOneof = false;
 
                 foreach (var line in lines)
@@ -147,7 +143,10 @@ namespace V2XController
 
                 foreach (var message in messages)
                 {
-                    _compiledMessages[message.Name] = message;
+                    if (message.Name != null)
+                    {
+                        _compiledMessages[message.Name] = message;
+                    }
                 }
 
                 if (_compiledMessages.Count == 0)
@@ -233,7 +232,7 @@ namespace V2XController
                     {
                         case 0: // Varint
                             if (!TryReadVarint(data, ref pos, out _))
-                                return _compiledMessages.Values.FirstOrDefault();
+                                return _compiledMessages.Values.FirstOrDefault() ?? throw new Exception("Failed to detect message type");
                             break;
                         case 1: // 64-bit
                             pos += 8;
@@ -316,7 +315,7 @@ namespace V2XController
                             pos += 4;
                             break;
                         default:
-                            return _compiledMessages.Values.FirstOrDefault();
+                            return _compiledMessages.Values.FirstOrDefault() ?? throw new Exception("Failed to detect message type");
                     }
                 }
             }
@@ -410,7 +409,7 @@ namespace V2XController
 
             // Fallback: Scoring systém
             Console.WriteLine("[DETECT] Falling back to scoring system");
-            ProtoMessage bestMessage = null;
+            ProtoMessage? bestMessage = null;
             int bestScore = 0;
 
             string[] messageTypesToTry = { "RsuToControllerMessageData", "ControllerToRsuMessageData" };
@@ -450,10 +449,10 @@ namespace V2XController
                 return bestMessage;
             }
 
-            return _compiledMessages.Values.FirstOrDefault();
+            return _compiledMessages.Values.FirstOrDefault() ?? throw new Exception("Failed to detect message type");
         }
 
-        public static string DecodeProtobufMessage(byte[] data, string protoDefinition, string inputFormat, string forceMessageType)
+        public static string DecodeProtobufMessage(byte[] data, string protoDefinition, string inputFormat, string? forceMessageType)
         {
             if (string.IsNullOrWhiteSpace(protoDefinition))
                 return "No proto definition loaded";
@@ -467,7 +466,7 @@ namespace V2XController
             if (_compiledMessages.Count == 0)
                 return "No messages defined in proto";
 
-            ProtoMessage messageToUse = null;
+            ProtoMessage? messageToUse = null;
 
             // If forceMessageType is specified, use it
             if (!string.IsNullOrEmpty(forceMessageType) && _compiledMessages.TryGetValue(forceMessageType, out messageToUse))
@@ -530,7 +529,7 @@ namespace V2XController
                     var cleanedInput = CleanInput(trimmedLine);
                     cleanedInput = cleanedInput.Replace(" ", "").Replace("\t", "");
 
-                    byte[] data = null;
+                    byte[]? data = null;
 
                     // Try Base64 first
                     if (IsBase64Input(cleanedInput))
@@ -647,96 +646,96 @@ namespace V2XController
 
         private static void AddHumanReadableSummary(StringBuilder sb, Dictionary<string, object> data)
         {
-            if (data.TryGetValue("crc", out object crcObj))
+            if (data.TryGetValue("crc", out object? crcObj))
             {
                 sb.AppendLine($"  CRC: {crcObj}");
             }
 
-            if (data.TryGetValue("timestamp", out object tsObj) && tsObj is Dictionary<string, object> tsDict)
+            if (data.TryGetValue("timestamp", out object? tsObj) && tsObj is Dictionary<string, object> tsDict)
             {
-                if (tsDict.TryGetValue("seconds", out object seconds))
+                if (tsDict.TryGetValue("seconds", out object? seconds))
                 {
                     var dt = DateTimeOffset.FromUnixTimeSeconds(Convert.ToInt64(seconds));
                     sb.AppendLine($"  Timestamp: {dt:yyyy-MM-dd HH:mm:ss} UTC");
                 }
             }
 
-            if (data.TryGetValue("nearby_vehicle_detection", out object nearbyObj) && nearbyObj is Dictionary<string, object> nearbyDict)
+            if (data.TryGetValue("nearby_vehicle_detection", out object? nearbyObj) && nearbyObj is Dictionary<string, object> nearbyDict)
             {
                 sb.AppendLine($"   Nearby Vehicle Detection:");
 
                 // NOVÉ: Zobrazení Vehicle Info
-                if (nearbyDict.TryGetValue("vehicle_info", out object vehInfoObj) && vehInfoObj is Dictionary<string, object> vehDict)
+                if (nearbyDict.TryGetValue("vehicle_info", out object? vehInfoObj) && vehInfoObj is Dictionary<string, object> vehDict)
                 {
-                    if (vehDict.TryGetValue("vehicle_id", out object vid))
+                    if (vehDict.TryGetValue("vehicle_id", out object? vid))
                     {
                         sb.AppendLine($"     Vehicle ID: {vid}");
                     }
-                    if (vehDict.TryGetValue("vehicle_type", out object vtype))
+                    if (vehDict.TryGetValue("vehicle_type", out object? vtype))
                     {
                         sb.AppendLine($"     Type: {GetVehicleTypeName(vtype)}");
                     }
-                    if (vehDict.TryGetValue("vehicle_role", out object vrole))
+                    if (vehDict.TryGetValue("vehicle_role", out object? vrole))
                     {
                         sb.AppendLine($"     Role: {GetVehicleRoleName(vrole)}");
                     }
                 }
 
                 // Timestamp detection
-                if (nearbyDict.TryGetValue("timestamp", out object detTsObj) && detTsObj is Dictionary<string, object> detTsDict)
+                if (nearbyDict.TryGetValue("timestamp", out object? detTsObj) && detTsObj is Dictionary<string, object> detTsDict)
                 {
-                    if (detTsDict.TryGetValue("seconds", out object detSeconds))
+                    if (detTsDict.TryGetValue("seconds", out object? detSeconds))
                     {
                         var detDt = DateTimeOffset.FromUnixTimeSeconds(Convert.ToInt64(detSeconds));
                         sb.AppendLine($"     Detection Time: {detDt:HH:mm:ss} UTC");
                     }
                 }
 
-                if (nearbyDict.TryGetValue("coordinates", out object coordsObj) && coordsObj is Dictionary<string, object> coordsDict)
+                if (nearbyDict.TryGetValue("coordinates", out object? coordsObj) && coordsObj is Dictionary<string, object> coordsDict)
                 {
-                    if (coordsDict.TryGetValue("latitude", out object lat) && coordsDict.TryGetValue("longitude", out object lon))
+                    if (coordsDict.TryGetValue("latitude", out object? lat) && coordsDict.TryGetValue("longitude", out object? lon))
                     {
                         sb.AppendLine($"     Position: {lat}°N, {lon}°E");
                     }
-                    if (coordsDict.TryGetValue("altitude", out object alt))
+                    if (coordsDict.TryGetValue("altitude", out object? alt))
                     {
                         sb.AppendLine($"     Altitude: {alt}m");
                     }
                 }
 
-                if (nearbyDict.TryGetValue("speed", out object spd))
+                if (nearbyDict.TryGetValue("speed", out object? spd))
                 {
                     sb.AppendLine($"     Speed: {spd} km/h");
                 }
 
-                if (nearbyDict.TryGetValue("heading", out object hdg))
+                if (nearbyDict.TryGetValue("heading", out object? hdg))
                 {
                     sb.AppendLine($"     Heading: {hdg}°");
                 }
 
-                if (nearbyDict.TryGetValue("distance", out object dist))
+                if (nearbyDict.TryGetValue("distance", out object? dist))
                 {
                     sb.AppendLine($"     Distance: {dist}m");
                 }
 
                 // Public transport data
-                if (nearbyDict.TryGetValue("public_transport_vehicle_data", out object ptObj) && ptObj is Dictionary<string, object> ptDict)
+                if (nearbyDict.TryGetValue("public_transport_vehicle_data", out object? ptObj) && ptObj is Dictionary<string, object> ptDict)
                 {
                     sb.AppendLine($"     PUBLIC TRANSPORT DATA:");
 
-                    if (ptDict.TryGetValue("vehicle_type", out object ptVtype))
+                    if (ptDict.TryGetValue("vehicle_type", out object? ptVtype))
                     {
                         sb.AppendLine($"        Type: {GetPublicTransportTypeName(ptVtype)}");
                     }
-                    if (ptDict.TryGetValue("line_number", out object lineNum))
+                    if (ptDict.TryGetValue("line_number", out object? lineNum))
                     {
                         sb.AppendLine($"        Line: {lineNum}");
                     }
-                    if (ptDict.TryGetValue("vehicle_number", out object vehNum))
+                    if (ptDict.TryGetValue("vehicle_number", out object? vehNum))
                     {
                         sb.AppendLine($"        Vehicle #: {vehNum}");
                     }
-                    if (ptDict.TryGetValue("delay", out object delay))
+                    if (ptDict.TryGetValue("delay", out object? delay))
                     {
                         int delaySeconds = Convert.ToInt32(delay);
                         string delayStr = delaySeconds > 0 ? $"+{delaySeconds}s (late)" :
@@ -752,7 +751,7 @@ namespace V2XController
         {
             if (value == null) return "Unknown";
 
-            string strValue = value.ToString();
+            string strValue = value.ToString() ?? throw new Exception("No value");
             if (strValue.Contains("("))
             {
                 // Extract enum value number
@@ -783,7 +782,7 @@ namespace V2XController
         {
             if (value == null) return "Unknown";
 
-            string strValue = value.ToString();
+            string strValue = value.ToString() ?? throw new Exception("No value");
             if (strValue.Contains("("))
             {
                 var match = System.Text.RegularExpressions.Regex.Match(strValue, @"\((\d+)\)");
@@ -815,7 +814,7 @@ namespace V2XController
         {
             if (value == null) return "Unknown";
 
-            string strValue = value.ToString();
+            string strValue = value.ToString() ?? throw new Exception("No value");
             if (strValue.Contains("("))
             {
                 var match = System.Text.RegularExpressions.Regex.Match(strValue, @"\((\d+)\)");
@@ -858,7 +857,7 @@ namespace V2XController
                     string fieldName = field?.Name ?? $"field_{fieldNumber}";
                     string fieldType = field?.Type ?? "unknown";
 
-                    object value = null;
+                    object? value = null;
 
                     switch (wireType)
                     {
@@ -873,7 +872,7 @@ namespace V2XController
                                 {
                                     // Convert enum number to string name
                                     long enumNumber = (long)varint;
-                                    string enumString = ConvertEnumNumberToString(fieldType, enumNumber);
+                                    string? enumString = ConvertEnumNumberToString(fieldType, enumNumber);
                                     value = enumString != null ? (object)enumString : (object)enumNumber; // Fallback to number if unknown
                                 }
                                 else
@@ -1159,7 +1158,7 @@ namespace V2XController
                         }
                     }
                 }
-                catch (Exception ex)
+                catch (Exception)
                 {
                     // Skip errors silently
                     break;
@@ -1169,7 +1168,7 @@ namespace V2XController
             return result;
         }
 
-        private static string ConvertEnumNumberToString(string enumType, long enumValue)
+        private static string? ConvertEnumNumberToString(string enumType, long enumValue)
         {
             // Extract enum name from full type path (e.g., "shared.geo.v1.AccuracyLevelEnum" → "AccuracyLevelEnum")
             string enumName = enumType.Contains(".") ? enumType.Split('.').Last() : enumType;
@@ -1180,7 +1179,7 @@ namespace V2XController
             Console.WriteLine($"[DECODE ENUM] Parsing enum type '{enumType}' (normalized: '{normalizedEnumName}') value {enumValue}");
 
             // Direct mapping by exact enum type name
-            Dictionary<long, string> mapping = null;
+            Dictionary<long, string>? mapping = null;
 
             // Check exact matches first (case insensitive)
             if (normalizedEnumName == "VEHICLETYPEENUM")
@@ -1385,7 +1384,7 @@ namespace V2XController
             }
 
             // Try to find value in mapping
-            if (mapping != null && mapping.TryGetValue(enumValue, out string enumString))
+            if (mapping != null && mapping.TryGetValue(enumValue, out string? enumString))
             {
                 Console.WriteLine($"[DECODE ENUM] {enumType} value {enumValue} → {enumString}");
                 return enumString;
@@ -1424,7 +1423,7 @@ namespace V2XController
                         PropertyNameCaseInsensitive = false
                     };
 
-                    jsonObject = JsonSerializer.Deserialize<Dictionary<string, object>>(cleanJson, jsonOptions);
+                    jsonObject = JsonSerializer.Deserialize<Dictionary<string, object>>(cleanJson, jsonOptions) ?? throw new Exception("Failed to deserialize JSON");
                     if (jsonObject == null)
                     {
                         errorMessage = "Invalid JSON format - parsed as null";
@@ -1516,7 +1515,7 @@ namespace V2XController
                         PropertyNameCaseInsensitive = false
                     };
 
-                    jsonObject = JsonSerializer.Deserialize<Dictionary<string, object>>(cleanJson, jsonOptions);
+                    jsonObject = JsonSerializer.Deserialize<Dictionary<string, object>>(cleanJson, jsonOptions) ?? throw new Exception("Failed to decode JSON");
                     if (jsonObject == null)
                     {
                         errorMessage = "Invalid JSON format - parsed as null";
@@ -1603,43 +1602,54 @@ namespace V2XController
             return string.Join("\n", cleanedLines);
         }
 
-        private static byte[] EncodeMessageToBytes(Dictionary<string, object> jsonObject, ProtoMessage message)
+        private static byte[] EncodeMessageToBytes(Dictionary<string, object>? jsonObject, ProtoMessage? message)
         {
-            Console.WriteLine($"[ENCODE] Encoding message '{message.Name}' with {jsonObject.Count} fields");
+            Console.WriteLine($"[ENCODE] Encoding message '{message?.Name}' with {jsonObject?.Count ?? 0} fields");
 
             using (var ms = new MemoryStream())
             {
-                foreach (var field in message.Fields.OrderBy(f => f.Number))
+                var fields = message?.Fields.OrderBy(f => f.Number) ?? Enumerable.Empty<ProtoField>();
+
+                foreach (var field in fields)
                 {
-                    if (!jsonObject.TryGetValue(field.Name, out var value))
+                    // Ensure we always assign 'value' and handle missing jsonObject safely
+                    object? value = null;
+                    bool found = false;
+
+                    if (jsonObject != null && !string.IsNullOrEmpty(field?.Name))
                     {
-                        Console.WriteLine($"[ENCODE]   Field '{field.Name}' (#{field.Number}) - NOT FOUND in JSON");
+                        found = jsonObject.TryGetValue(field!.Name, out var tmp);
+                        if (found)
+                            value = tmp;
+                    }
+
+                    if (!found)
+                    {
+                        Console.WriteLine($"[ENCODE]   Field '{field?.Name}' (#{field?.Number}) - NOT FOUND in JSON");
                         continue;
                     }
 
                     if (value == null)
                     {
-                        Console.WriteLine($"[ENCODE]   Field '{field.Name}' (#{field.Number}) - NULL value, skipping");
+                        Console.WriteLine($"[ENCODE]   Field '{field?.Name}' (#{field?.Number}) - NULL value, skipping");
                         continue;
                     }
 
-                    Console.WriteLine($"[ENCODE]   Field '{field.Name}' (#{field.Number}, type={field.Type}) - value type: {value.GetType().Name}");
-
+                    Console.WriteLine($"[ENCODE]   Field '{field?.Name}' (#{field?.Number}, type={field?.Type}) - value type: {value.GetType().Name}");
                     // Handle JsonElement
                     if (value is JsonElement je)
                     {
                         Console.WriteLine($"[ENCODE]     JsonElement.ValueKind = {je.ValueKind}");
 
                         // Skip default/empty values EXCEPT for important fields
-                        if (IsDefaultOrEmptyValue(je, field.Type))
+                        if (IsDefaultOrEmptyValue(je, field?.Type ?? ""))
                         {
-                            // Check if this is an important field that should be encoded even if 0/default
-                            bool isImportantField = field.Name.Contains("id") ||
-                                field.Name.Contains("crc") ||
-                                field.Name.Contains("seconds") ||
-                                field.Name.Contains("nanos") ||
-                                field.Name.Contains("number") ||
-                                field.Name.Contains("revision");
+                            bool isImportantField = (field?.Name?.Contains("id") == true) ||
+                                                    (field?.Name?.Contains("crc") == true) ||
+                                                    (field?.Name?.Contains("seconds") == true) ||
+                                                    (field?.Name?.Contains("nanos") == true) ||
+                                                    (field?.Name?.Contains("number") == true) ||
+                                                    (field?.Name?.Contains("revision") == true);
 
                             if (!isImportantField)
                             {
@@ -1652,7 +1662,7 @@ namespace V2XController
                             }
                         }
 
-                        if (field.IsRepeated && je.ValueKind == JsonValueKind.Array)
+                        if (field?.IsRepeated == true && je.ValueKind == JsonValueKind.Array)
                         {
                             int arrayLen = je.GetArrayLength();
                             Console.WriteLine($"[ENCODE]     Repeated field, array length: {arrayLen}");
@@ -1667,20 +1677,20 @@ namespace V2XController
                         }
                         else
                         {
-                            WriteField(ms, field, je);
+                            WriteField(ms, field ?? throw new Exception("Field is null"), je);
                         }
                     }
                     else
                     {
                         // Direct object (not JsonElement)
-                        if (IsDefaultOrEmptyValueDirect(value, field.Type))
+                        if (IsDefaultOrEmptyValueDirect(value, field?.Type ?? ""))
                         {
-                            // Check if this is an important field
-                            bool isImportantField = field.Name.Contains("id") ||
-                                                    field.Name.Contains("crc") ||
-                                                    field.Name.Contains("seconds") ||
-                                                    field.Name.Contains("nanos") ||
-                                                    field.Name.Contains("number");
+                            bool isImportantField = (field?.Name?.Contains("id") == true) ||
+                                                    (field?.Name?.Contains("crc") == true) ||
+                                                    (field?.Name?.Contains("seconds") == true) ||
+                                                    (field?.Name?.Contains("nanos") == true) ||
+                                                    (field?.Name?.Contains("number") == true) ||
+                                                    (field?.Name?.Contains("revision") == true);
 
                             if (!isImportantField)
                             {
@@ -1693,7 +1703,7 @@ namespace V2XController
                             }
                         }
 
-                        WriteField(ms, field, value);
+                        WriteField(ms, field ?? throw new Exception("Field is null"), value);
                     }
                 }
 
@@ -1713,7 +1723,7 @@ namespace V2XController
                     return true;
 
                 case JsonValueKind.String:
-                    string strVal = je.GetString();
+                    string strVal = je.GetString() ?? throw new Exception("No value");
 
                     // Skip empty strings
                     if (string.IsNullOrEmpty(strVal))
@@ -1876,8 +1886,69 @@ namespace V2XController
             return true;
         }
 
-        private static void WriteField(MemoryStream ms, ProtoField field, object value)
+        private static byte[] EncodeGoogleTimestamp(JsonElement je)
         {
+            using (var ms = new MemoryStream())
+            {
+                if (je.TryGetProperty("seconds", out var secondsProp) && secondsProp.ValueKind == JsonValueKind.Number)
+                {
+                    long seconds = secondsProp.GetInt64();
+                    if (seconds != 0)
+                    {
+                        WriteVarint(ms, (1UL << 3) | 0UL); // Tag for field 1 (varint)
+                        WriteVarint(ms, (ulong)seconds);
+                    }
+                }
+
+                if (je.TryGetProperty("nanos", out var nanosProp) && nanosProp.ValueKind == JsonValueKind.Number)
+                {
+                    int nanos = nanosProp.GetInt32();
+                    if (nanos != 0)
+                    {
+                        WriteVarint(ms, (2UL << 3) | 0UL); // Tag for field 2 (varint)
+                        WriteVarint(ms, (ulong)nanos);
+                    }
+                }
+
+                return ms.ToArray();
+            }
+        }
+
+        private static byte[] EncodeGoogleDoubleValue(JsonElement je)
+        {
+            using (var ms = new MemoryStream())
+            {
+                if (je.TryGetProperty("value", out var valueProp) && valueProp.ValueKind == JsonValueKind.Number)
+                {
+                    double val = valueProp.GetDouble();
+                    WriteVarint(ms, (1UL << 3) | 1UL); // Tag for field 1 (64-bit)
+                    byte[] wrapperBytes = BitConverter.GetBytes(val);
+                    ms.Write(wrapperBytes, 0, wrapperBytes.Length);
+                }
+                return ms.ToArray();
+            }
+        }
+
+        private static byte[] EncodeGoogleFloatValue(JsonElement je)
+        {
+            using (var ms = new MemoryStream())
+            {
+                if (je.TryGetProperty("value", out var valueProp) && valueProp.ValueKind == JsonValueKind.Number)
+                {
+                    float val = valueProp.GetSingle();
+                    WriteVarint(ms, (1UL << 3) | 5UL); // Tag for field 1 (32-bit)
+                    byte[] wrapperBytes = BitConverter.GetBytes(val);
+                    ms.Write(wrapperBytes, 0, wrapperBytes.Length);
+                }
+                return ms.ToArray();
+            }
+        }
+
+        private static void WriteField(MemoryStream ms, ProtoField? field, object value)
+        {
+            if (field == null)
+                throw new Exception("Field is null");
+
             // For nested messages, check if COMPLETELY empty before writing tag
             if (value is JsonElement je && je.ValueKind == JsonValueKind.Object)
             {
@@ -1897,9 +1968,13 @@ namespace V2XController
             }
 
             int wireType = GetWireType(field.Type);
-            ulong tag = ((ulong)field.Number << 3) | (ulong)wireType;
 
-            Console.WriteLine($"[ENCODE]     Writing field tag: {tag} (field#{field.Number}, wireType={wireType})");
+            // Use a non-null integer for shifting to avoid implicit widening/sign-extension
+            int fieldNumber = field.Number;
+            ulong v = ((ulong)fieldNumber << 3);
+            ulong tag = v | (ulong)wireType;
+
+            Console.WriteLine($"[ENCODE]     Writing field tag: {tag} (field#{fieldNumber}, wireType={wireType})");
 
             WriteVarint(ms, tag);
 
@@ -1913,67 +1988,9 @@ namespace V2XController
             }
         }
 
-        private static byte[] EncodeGoogleTimestamp(JsonElement je)
-        {
-            using (var ms = new MemoryStream())
-            {
-                if (je.TryGetProperty("seconds", out var secondsProp) && secondsProp.ValueKind == JsonValueKind.Number)
-                {
-                    long seconds = secondsProp.GetInt64();
-                    if (seconds != 0)
-                    {
-                        WriteVarint(ms, (1 << 3) | 0); // Tag for field 1 (varint)
-                        WriteVarint(ms, (ulong)seconds);
-                    }
-                }
-
-                if (je.TryGetProperty("nanos", out var nanosProp) && nanosProp.ValueKind == JsonValueKind.Number)
-                {
-                    int nanos = nanosProp.GetInt32();
-                    if (nanos != 0)
-                    {
-                        WriteVarint(ms, (2 << 3) | 0); // Tag for field 2 (varint)
-                        WriteVarint(ms, (ulong)nanos);
-                    }
-                }
-
-                return ms.ToArray();
-            }
-        }
-
-        private static byte[] EncodeGoogleDoubleValue(JsonElement je)
-        {
-            using (var ms = new MemoryStream())
-            {
-                if (je.TryGetProperty("value", out var valueProp) && valueProp.ValueKind == JsonValueKind.Number)
-                {
-                    double val = valueProp.GetDouble();
-                    WriteVarint(ms, (1 << 3) | 1); // Tag for field 1 (64-bit)
-                    byte[] wrapperBytes = BitConverter.GetBytes(val);
-                    ms.Write(wrapperBytes, 0, wrapperBytes.Length);
-                }
-                return ms.ToArray();
-            }
-        }
-
-        private static byte[] EncodeGoogleFloatValue(JsonElement je)
-        {
-            using (var ms = new MemoryStream())
-            {
-                if (je.TryGetProperty("value", out var valueProp) && valueProp.ValueKind == JsonValueKind.Number)
-                {
-                    float val = valueProp.GetSingle();
-                    WriteVarint(ms, (1 << 3) | 5); // Tag for field 1 (32-bit)
-                    byte[] wrapperBytes = BitConverter.GetBytes(val);
-                    ms.Write(wrapperBytes, 0, wrapperBytes.Length);
-                }
-                return ms.ToArray();
-            }
-        }
-
         private static void WriteFieldValue(MemoryStream ms, ProtoField field, JsonElement value)
         {
-            switch (field.Type.ToLower())
+            switch (field?.Type != null ? field?.Type.ToLower() : "")
             {
                 case "int32":
                 case "int64":
@@ -2027,7 +2044,7 @@ namespace V2XController
 
                 default:
                     // Handle enums (can be string or number)
-                    if (field.Type.Contains("Enum"))
+                    if (field?.Type != null && field.Type.Contains("Enum"))
                     {
                         if (value.ValueKind == JsonValueKind.Number)
                         {
@@ -2038,7 +2055,7 @@ namespace V2XController
                         else if (value.ValueKind == JsonValueKind.String)
                         {
                             // Parse enum string to number
-                            string enumString = value.GetString();
+                            string? enumString = value.GetString() ?? string.Empty;
                             int enumValue = ParseEnumStringToNumber(enumString);
                             Console.WriteLine($"[ENCODE]       Writing enum (string '{enumString}'): {enumValue}");
                             WriteVarint(ms, (ulong)enumValue);
@@ -2048,7 +2065,7 @@ namespace V2XController
                     else if (value.ValueKind == JsonValueKind.Object)
                     {
                         // Handle Google Protobuf wrapper types
-                        if (field.Type.Contains("Timestamp"))
+                        if (field?.Type != null && field.Type.Contains("Timestamp"))
                         {
                             Console.WriteLine($"[ENCODE]       Encoding google.protobuf.Timestamp");
                             byte[] timestampBytes = EncodeGoogleTimestamp(value);
@@ -2064,7 +2081,7 @@ namespace V2XController
                                 WriteVarint(ms, 0); // Empty message
                             }
                         }
-                        else if (field.Type.Contains("DoubleValue"))
+                        else if (field?.Type != null && field.Type.Contains("DoubleValue"))
                         {
                             Console.WriteLine($"[ENCODE]       Encoding google.protobuf.DoubleValue");
                             byte[] encodedDoubleValue = EncodeGoogleDoubleValue(value);
@@ -2078,7 +2095,7 @@ namespace V2XController
                                 WriteVarint(ms, 0);
                             }
                         }
-                        else if (field.Type.Contains("FloatValue"))
+                        else if (field?.Type != null && field.Type.Contains("FloatValue"))
                         {
                             Console.WriteLine($"[ENCODE]       Encoding google.protobuf.FloatValue");
                             byte[] encodedFloatValue = EncodeGoogleFloatValue(value);
@@ -2092,7 +2109,7 @@ namespace V2XController
                                 WriteVarint(ms, 0);
                             }
                         }
-                        else if (field.Type.Contains("Duration"))
+                        else if (field?.Type != null && field.Type.Contains("Duration"))
                         {
                             // Duration má stejnou strukturu jako Timestamp
                             Console.WriteLine($"[ENCODE]       Encoding google.protobuf.Duration");
@@ -2111,13 +2128,12 @@ namespace V2XController
                         {
                             // Standard nested message handling
                             var matchingMessage = _compiledMessages.Values.FirstOrDefault(m =>
-                                m.Name == field.Type ||
-                                field.Type.EndsWith("." + m.Name));
+                                m.Name == field?.Type || (field?.Type != null && field.Type.EndsWith("." + m.Name)));
 
                             if (matchingMessage != null)
                             {
                                 Console.WriteLine($"[ENCODE]       Found nested message type: {matchingMessage.Name}");
-                                var nestedDict = JsonSerializer.Deserialize<Dictionary<string, object>>(value.GetRawText());
+                                var nestedDict = JsonSerializer.Deserialize<Dictionary<string, object>>(value.GetRawText()) ?? throw new Exception("Failed to decode nested JSON");
                                 byte[] nestedBytes = EncodeMessageToBytes(nestedDict, matchingMessage);
 
                                 if (nestedBytes != null && nestedBytes.Length > 0)
@@ -2134,7 +2150,7 @@ namespace V2XController
                             }
                             else
                             {
-                                Console.WriteLine($"[ENCODE]       WARNING: No matching message type found for '{field.Type}'");
+                                Console.WriteLine($"[ENCODE]       WARNING: No matching message type found for '{field?.Type}'");
                             }
                         }
                     }
@@ -2333,7 +2349,7 @@ namespace V2XController
             if (value is string strValue)
             {
                 // Check if it's an enum field
-                if (field.Type.Contains("Enum"))
+                if (field?.Type != null && field.Type.Contains("Enum"))
                 {
                     int enumValue = ParseEnumStringToNumber(strValue);
                     WriteVarint(ms, (ulong)enumValue);
@@ -2348,8 +2364,8 @@ namespace V2XController
             else if (value is Dictionary<string, object> dict)
             {
                 var matchingMessage = _compiledMessages.Values.FirstOrDefault(m =>
-                    m.Name == field.Type ||
-                    field.Type.EndsWith("." + m.Name));
+                        m.Name == field.Type || (field.Type != null && field.Type.EndsWith("." + m.Name)));
+
 
                 if (matchingMessage != null)
                 {
@@ -2382,9 +2398,12 @@ namespace V2XController
             }
         }
 
-        private static int GetWireType(string type)
+        private static int GetWireType(string? type)
         {
-            switch (type.ToLower())
+            // Treat null/empty types as nested message (length-delimited)
+            var t = (type ?? string.Empty).ToLowerInvariant();
+
+            switch (t)
             {
                 case "int32":
                 case "int64":
@@ -2411,7 +2430,7 @@ namespace V2XController
 
                 default:
                     // Nested messages and enums
-                    if (type.Contains("Enum"))
+                    if (t.Contains("enum"))
                         return 0; // Varint for enums
                     else
                         return 2; // Length-delimited for messages
@@ -2433,7 +2452,7 @@ namespace V2XController
             return (ulong)((value << 1) ^ (value >> 63));
         }
 
-        private static Dictionary<string, object> DecodeTimestamp(byte[] data)
+        private static Dictionary<string, object>? DecodeTimestamp(byte[] data)
         {
             try
             {
@@ -2524,7 +2543,7 @@ namespace V2XController
             return (long)(value >> 1) ^ -(long)(value & 1);
         }
 
-        public static bool TryDecodeProtobufFromHex(string input, out string decoded, string forceMessageType = null)
+        public static bool TryDecodeProtobufFromHex(string input, out string decoded, string? forceMessageType = null)
         {
             decoded = string.Empty;
 
@@ -2550,7 +2569,7 @@ namespace V2XController
                 input = CleanInput(input);
                 input = input.Replace(" ", "").Replace("\t", "");
 
-                byte[] data = null;
+                byte[]? data = null;
                 string detectedFormat = "Unknown";
 
                 if (IsBase64Input(input))
@@ -2632,14 +2651,14 @@ namespace V2XController
 
         public class ProtoMessage
         {
-            public string Name { get; set; }
+            public string? Name { get; set; }
             public List<ProtoField> Fields { get; set; } = new List<ProtoField>();
         }
 
         public class ProtoField
         {
-            public string Name { get; set; }
-            public string Type { get; set; }
+            public string? Name { get; set; }
+            public string? Type { get; set; }
             public int Number { get; set; }
             public bool IsRepeated { get; set; }
             public bool IsOptional { get; set; }

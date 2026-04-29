@@ -18,12 +18,12 @@ using System.Windows.Shapes;
 
 public class ActivationZone : INotifyPropertyChanged
 {
-    private string name;
-    private Rectangle rectangle;
+    private string? name;
+    private Rectangle? rectangle;
     private double width;
     private double height;
     private int azimuth;
-    private string lastTramId;
+    private string? lastTramId;
     private Rect bounds;
     private bool isActive;
     private string color = "#FF0000";
@@ -64,13 +64,13 @@ public class ActivationZone : INotifyPropertyChanged
         set { startPoint = value; OnPropertyChanged(); }
     }
 
-    public string Name
+    public string? Name
     {
         get => name;
         set { name = value; OnPropertyChanged(); }
     }
 
-    public Rectangle Rectangle
+    public Rectangle? Rectangle
     {
         get => rectangle;
         set { rectangle = value; OnPropertyChanged(); }
@@ -88,7 +88,7 @@ public class ActivationZone : INotifyPropertyChanged
         set { height = Math.Round(value, 2); OnPropertyChanged(); }
     }
 
-    public string LastTramId
+    public string? LastTramId
     {
         get => lastTramId;
         set { lastTramId = value; OnPropertyChanged(); }
@@ -253,9 +253,9 @@ public class ActivationZone : INotifyPropertyChanged
         }
     }
 
-    public event PropertyChangedEventHandler PropertyChanged;
+    public event PropertyChangedEventHandler? PropertyChanged;
 
-    protected void OnPropertyChanged([CallerMemberName] string propName = null)
+    protected void OnPropertyChanged([CallerMemberName] string? propName = null)
     {
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propName));
     }

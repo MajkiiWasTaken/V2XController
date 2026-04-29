@@ -20,17 +20,17 @@ namespace V2XController
     {
         private double speed;
 
-        private string lastCamTime;
+        private string? lastCamTime;
 
         private int timeSinceLastMessage;
 
         private int secondsSinceLastCam;
 
-        public event PropertyChangedEventHandler PropertyChanged;
+        public event PropertyChangedEventHandler? PropertyChanged;
 
         ///////////////////////////////////////////////////////////
 
-        public string VehicleId { get; set; }
+        public string? VehicleId { get; set; }
 
         public double Speed
         {
@@ -38,7 +38,7 @@ namespace V2XController
             set { speed = value; OnPropertyChanged(); }
         }
 
-        public string LastCamTime
+        public string? LastCamTime
         {
             get => lastCamTime;
             set { lastCamTime = value; OnPropertyChanged(); }
@@ -53,7 +53,7 @@ namespace V2XController
         public DateTime? LastMessageTimestamp { get; set; }
 
 
-        protected void OnPropertyChanged([CallerMemberName] string propName = null)
+        protected void OnPropertyChanged([CallerMemberName] string? propName = null)
         {
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propName));
         }

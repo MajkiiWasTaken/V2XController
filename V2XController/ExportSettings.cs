@@ -1,5 +1,4 @@
 ﻿using System.Globalization;
-using System.Windows.Media.Animation;
 
 /**********************************************************************************************************
  * V2X Controller - ExportSettings.cs

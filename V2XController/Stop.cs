@@ -1,10 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-
-/**********************************************************************************************************
+﻿/**********************************************************************************************************
  * V2X Controller - Stop.cs
  * Author: Michal Švrček
  * Version: 1.0.0
@@ -15,12 +9,11 @@ using System.Threading.Tasks;
  * All rights reserved.
  *********************************************************************************************************/
 
-
 namespace V2XController
 {
     public class Stop
     {
-        public string StopName { get; set; }
+        public string? StopName { get; set; }
         public double Latitude { get; set; }
         public double Longitude { get; set; }
 

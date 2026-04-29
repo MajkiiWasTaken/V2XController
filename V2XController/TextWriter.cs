@@ -6,7 +6,7 @@ using System.Windows.Threading;
 /**********************************************************************************************************
  * V2X Controller - TextWriter.cs
  * Author: Michal Švrček
- * Version: 1.0.0
+ * Version: 1.0.1
  * Description: Provides a custom TextWriter implementation for redirecting console output to a WPF TextBox.
  *              Handles thread-safe updates to the TextBox using the Dispatcher.
  *              
@@ -34,16 +34,17 @@ namespace V2XController
             _dispatcher.Invoke(() => _textBox.AppendText(value.ToString()));
         }
 
-        public override void Write(string value)
+        // Match TextWriter signatures (nullable) to remove CS8765; handle null safely.
+        public override void Write(string? value)
         {
-            _dispatcher.Invoke(() => _textBox.AppendText(value));
+            _dispatcher.Invoke(() => _textBox.AppendText(value ?? string.Empty));
         }
 
-        public override void WriteLine(string value)
+        public override void WriteLine(string? value)
         {
             _dispatcher.Invoke(() =>
             {
-                _textBox.AppendText(value + Environment.NewLine);
+                _textBox.AppendText((value ?? string.Empty) + Environment.NewLine);
                 _textBox.ScrollToEnd();
             });
         }

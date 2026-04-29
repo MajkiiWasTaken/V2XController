@@ -1,10 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-
-/**********************************************************************************************************
+﻿/**********************************************************************************************************
 * V2X Controller - Mapsettings.cs
 * Author: Michal Švrček
 * Version: 1.0.0
@@ -14,7 +8,6 @@ using System.Threading.Tasks;
  * Copyright (c) 2025 Hroší stavby Morava a.s.
  * All rights reserved.
  *********************************************************************************************************/
-
 
 namespace V2XController
 {

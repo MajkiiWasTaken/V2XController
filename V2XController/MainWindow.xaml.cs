@@ -53,8 +53,7 @@ namespace V2XController
         private readonly object _serialIoLock = new();
 
         //HEARTBEAT
-        private DispatcherTimer _heartbeatTimer;
-        private int _heartbeatCounter = 0;
+        private DispatcherTimer? _heartbeatTimer;
 
         //Everything for the map 
         private int zoom = 18;
@@ -83,7 +82,6 @@ namespace V2XController
         TimeZoneInfo czechTimeZone = TimeZoneInfo.FindSystemTimeZoneById("Central European Standard Time");
 
         //points
-        private Point DragStart;
         private TranslateTransform translate = new TranslateTransform();
         private ScaleTransform scale = new ScaleTransform(1, 1);
         private TransformGroup transformGroup = new TransformGroup();
@@ -91,7 +89,7 @@ namespace V2XController
 
         //drawing
         private List<MapRectangle> mapRectangles = new List<MapRectangle>();
-        private MapRectangle _currentMapRectangle;
+        private MapRectangle? _currentMapRectangle;
 
         private enum RectangleDrawPhase
         {
@@ -106,13 +104,12 @@ namespace V2XController
         private Point rectSecondPoint;
         private Point rectWidthPoint;
 
-        private Line tempHeightLine;
-        private Line tempWidthLine;
-        private Polygon previewRect;
-        private Ellipse startPointEllipse;
-        private Ellipse secondPointEllipse;
-
-        private Polyline currentPolyline;
+        private Line? tempHeightLine;
+        private Line? tempWidthLine;
+        private Polygon? previewRect;
+        private Ellipse? startPointEllipse;
+        private Ellipse? secondPointEllipse;
+        private Polyline? currentPolyline;
         private List<Point> polylinePoints = new List<Point>();
         private List<Ellipse> polylineVertexDots = new List<Ellipse>();
         private double _polylineZoneWidthMeters = 50.0;
@@ -124,11 +121,10 @@ namespace V2XController
         private Dictionary<Ellipse, Ellipse> _polylineVertexToCircle = new Dictionary<Ellipse, Ellipse>();
         private Dictionary<Polyline, List<(double lat, double lon)>> _polylineGeoPoints = new Dictionary<Polyline, List<(double, double)>>();
         private bool _isDrawingPolyline = false;
-        private Ellipse _hoveredVertex = null;
+        private Ellipse? _hoveredVertex = null;
         public ObservableCollection<ActivationZone> PolylineZonesCollection { get; set; }
         private readonly HashSet<ActivationZone> _polylineRows = new HashSet<ActivationZone>();
         private bool _suspendPolylineZoneLiveSort;
-        private ActivationZone _pendingNewPolylineZone;
 
         private List<string> recordedCamMessages = new();
 
@@ -142,13 +138,11 @@ namespace V2XController
 
         private DrawingMode currentDrawingMode = DrawingMode.None;
         private bool isDrawing = false;
-        private Rectangle currentRect;
+        private Rectangle? currentRect = null;
         private Point startPoint;
-        private Point lineStartPoint;
         //private List<Railway> railwayLines;
 
         private List<Point> trailPoints = new List<Point>();
-        private Polyline tramTrail;
 
         private Brush _strokeBrush = Brushes.Red; //default brush color
 
@@ -163,24 +157,23 @@ namespace V2XController
         private Rectangle? _currentRectangle = null;
         private TextBlock? _currentSizeLabel = null;
         private bool isSelectionMode = false;
-        private Rectangle selectedRectangle = null;
+        private Rectangle? selectedRectangle = null;
 
-
-        private MapPoint[] drawnTrams = new MapPoint[2]; // 0 = X, 1 = C
+        private MapPoint?[]? drawnTrams = new MapPoint[2]; // 0 = X, 1 = C
         private int currentDrawnTramIndex = 0; // 0 = X, 1 = C
-        private string[] drawnTramIds = new[] { "0000009999", "0000001111" };
-        private string[] drawnTramNames = new[] { "tram-test1", "tram-test2" };
-        private Brush[] drawnTramColors = new[] { Brushes.Red, Brushes.Blue };
-        private Polyline[] drawnTramTrails = new Polyline[2];
-        private List<Point>[] drawnTramTrailPoints = new List<Point>[2] { new List<Point>(), new List<Point>() };
+        private string[]? drawnTramIds = new[] { "0000009999", "0000001111" };
+        private string[]? drawnTramNames = new[] { "tram-test1", "tram-test2" };
+        private Brush[]? drawnTramColors = new[] { Brushes.Red, Brushes.Blue };
+        private Polyline?[]? drawnTramTrails = new Polyline[2];
+        private List<Point>?[]? drawnTramTrailPoints = new List<Point>[2] { new List<Point>(), new List<Point>() };
         private readonly Dictionary<string, CancellationTokenSource> vehicleTrailCleanupTokens = new();
 
         //moving objects (RMB)
-        private UIElement selectedElement = null;
+        private UIElement? selectedElement = null;
         private Point mouseOffset;
 
         //rectangle dimensions textblock
-        private TextBlock dimensionTextBlock;
+        private TextBlock? dimensionTextBlock;
 
         private Stack<UndoRedoAction> undoStack = new();
         private Stack<UndoRedoAction> redoStack = new();
@@ -196,9 +189,7 @@ namespace V2XController
         private Dictionary<string, MapPoint> activeVehicles = new();
 
         //panning
-        private Point panStart;
         private bool isPanning = false;
-        private Point middleMousePanStart;
         private bool isMiddleMousePanning = false;
 
         private string[] controls = {
@@ -220,7 +211,6 @@ namespace V2XController
 
 
         //SRV STATUSES
-        SRVMessage msg;
         int srvOkCount = 0;
         int srvErrorCount = 0;
         private double? srvLatitude = null;
@@ -229,13 +219,13 @@ namespace V2XController
 
         //Activation zones
         private Dictionary<Rectangle, ActivationZone> activationZones = new();
-        private Ellipse radiusEllipse;
+        private Ellipse? radiusEllipse;
         public ObservableCollection<ActivationZone> ActivationZonesCollection { get; set; } = new();
 
 
         //dict for last cam updates 
         Dictionary<string, DateTime> lastCamUpdates = new Dictionary<string, DateTime>();
-        private DispatcherTimer cleanupTimer;
+        private DispatcherTimer? cleanupTimer;
 
         //colors for tram points
         private readonly List<Brush> vehicleColors = new List<Brush>
@@ -252,7 +242,7 @@ namespace V2XController
         private readonly Dictionary<string, Brush> vehicleColorMap = new Dictionary<string, Brush>();
 
         //timer for cam updates (seconds)
-        private DispatcherTimer camTimer;
+        private DispatcherTimer? camTimer;
 
         // xml files
         private string loadedFileName;
@@ -300,7 +290,7 @@ namespace V2XController
         private Dictionary<string, double> _playbackSpeedByIdAndTs = new(); // key = $"{vehId}|{ts.Ticks}"
 
 
-        private ActivationZone _pendingNewZone;
+        private ActivationZone? _pendingNewZone;
 
         // near other fields controlling playback state
         private string _lastReplayFile;
@@ -319,7 +309,7 @@ namespace V2XController
         private DateTime? _markOutUtc = null;
 
         // global buffers
-        private List<string> recordedManualCamMessages = new();     // manual: only simulated (drawn) CAMs while recording
+        private List<string>? recordedManualCamMessages = new();     // manual: only simulated (drawn) CAMs while recording
 
         // near other timeshift fields
         private bool _isTimeshiftPlaybackActive;           // catch-up playback running
@@ -330,8 +320,8 @@ namespace V2XController
         private bool isReplaySliderDragging = false;
         private bool wasPlayingBeforeReplayDrag = false;
 
-        private Rectangle _highlightedRect;
-        private Brush _highlightedRectOldBrush;
+        private Rectangle? _highlightedRect;
+        private Brush? _highlightedRectOldBrush;
         private double _highlightedRectOldThickness;
 
         // near other playback state fields
@@ -389,7 +379,7 @@ namespace V2XController
         public IReadOnlyList<int> SubZoneOptionsSwitch { get; } = new[] { 0, 1, 2, 3, 4, 5, 6 };
 
         private bool _suspendSwitchZoneLiveSort;
-        private ActivationZone _pendingNewSwitchZone;
+        private ActivationZone? _pendingNewSwitchZone;
 
         private bool _drawToSwitchZones;
 
@@ -402,7 +392,7 @@ namespace V2XController
 
         public List<Stop> stops = new List<Stop>();
 
-        private TerminalWindow _terminalWindow;
+        private TerminalWindow? _terminalWindow;
         private readonly List<(string text, Brush color)> _terminalBuffer = new();
         private readonly Dictionary<string, Stop?> _vehCurrentStop = new(); // current stop per vehicle (null = none)
         private const double StopRadiusMeters = 25.0;
@@ -418,7 +408,6 @@ namespace V2XController
         }
 
         private readonly ConcurrentDictionary<(int z, int x, int y), BitmapSource> _tileCache = new();
-        private CancellationTokenSource _tilesCts;
 
         private static int WrapTileX(int x, int zoom)
         {
@@ -449,8 +438,6 @@ namespace V2XController
 
         private double mapOffsetX = 0;
         private double mapOffsetY = 0;
-        private int baseTileX;
-        private int baseTileY;
 
         private int cameraX = 0;  // Camera position in world pixels
         private int cameraY = 0;
@@ -472,12 +459,12 @@ namespace V2XController
         private readonly Dictionary<Polyline, List<System.Windows.Shapes.Line>> _polylineDirectionArrows = new Dictionary<Polyline, List<System.Windows.Shapes.Line>>();
 
 
-        private ProtobufWindow _protobufWindow;
+        private ProtobufWindow? _protobufWindow;
 
         private class UndoRedoAction
         {
-            public Action UndoAction { get; set; }
-            public Action RedoAction { get; set; }
+            public Action? UndoAction { get; set; }
+            public Action? RedoAction { get; set; }
         }
 
         [DllImport("kernel32.dll")]
@@ -493,6 +480,26 @@ namespace V2XController
         public MainWindow()
         {
             InitializeComponent();
+            tempHeightLine = new Line();
+            tempWidthLine = new Line();
+            previewRect = new Polygon();
+            startPointEllipse = new Ellipse();
+            secondPointEllipse = new Ellipse();
+            currentPolyline = new Polyline();
+            playbackTimer = new DispatcherTimer();
+            radiusEllipse = new Ellipse();
+            loadedFileName = string.Empty;
+            _srvTimer = new DispatcherTimer();
+            _zoomDebounceTimer = new DispatcherTimer();
+            _pendingNewZone = new ActivationZone();
+            _lastReplayFile = string.Empty;
+            _timeshiftUiTimer = new DispatcherTimer();
+            _timeshiftPlaybackCts = new CancellationTokenSource();
+            _highlightedRect = new Rectangle();
+            _highlightedRectOldBrush = Brushes.Transparent;
+            _pendingNewSwitchZone = new ActivationZone();
+            _terminalWindow = new TerminalWindow();
+
 #if DEBUG
             AllocConsole();
             Console.WriteLine("[DEBUG] Allocating console...");
@@ -697,7 +704,7 @@ namespace V2XController
             ActivationZonesCollection.CollectionChanged += ActivationZonesCollection_CollectionChanged;
 
             //csv loading
-            var filePath = "export.csv";
+            var filePath = "export.csv" ?? throw new InvalidOperationException("CSV file path is not specified.");
             //LoadFromCSV(filePath);
 
             //RMB
@@ -754,7 +761,7 @@ namespace V2XController
         /// </summary>
         /// <param name="sender"></param>
         /// <param name="e"></param>
-        private void MainWindow_Closing(object sender, CancelEventArgs e)
+        private void MainWindow_Closing(object? sender, CancelEventArgs e)
         {
             Console.WriteLine("[APP] Closing application...");
 
@@ -853,11 +860,14 @@ namespace V2XController
         /// <param name="lat">Latitude in degrees</param>
         /// <param name="lon">Longitude in degrees</param>
         /// <returns>Canvas X/Y coordinates</returns>
-        public (double x, double y) ConvertLatLonToCanvasXY(double lat, double lon)
+        public (double x, double y) ConvertLatLonToCanvasXY(double? lat, double? lon)
         {
+            if (!lat.HasValue || !lon.HasValue)
+                return (0, 0);
+
             // Convert lat/lon to fractional tile coordinates
-            double u = LonToTileX(lon, zoom);
-            double v = LatToTileY(lat, zoom);
+            double u = LonToTileX(lon.Value, zoom);
+            double v = LatToTileY(lat.Value, zoom);
 
             // Convert tile coords to world pixels
             double worldX = u * TileSize;
@@ -920,9 +930,9 @@ namespace V2XController
 
                 if (!ct.IsCancellationRequested)
                 {
-                    await Dispatcher.InvokeAsync(() =>
+                    await Dispatcher.InvokeAsync(async () =>
                     {
-                        ReprojectAllZonesOnMapChange();
+                        await ReprojectAllZonesOnMapChange();
                         ReprojectDrawnTramsOnMapChange();
                         ReprojectActiveVehiclesOnMapChange();
                         ReprojectReplayOnMapChange();
@@ -1618,7 +1628,7 @@ namespace V2XController
         /// </summary>
         private void UpdateDrawnTramsPositions()
         {
-            for (int idx = 0; idx < drawnTrams.Length; idx++)
+            for (int idx = 0; idx < drawnTrams?.Length; idx++)
             {
                 var tram = drawnTrams[idx];
                 if (tram == null) continue;
@@ -1716,7 +1726,7 @@ namespace V2XController
                 }
 
                 // Get stored lat/lon if available
-                if (_lastLatLon.TryGetValue(pt.Label, out var geo))
+                if (_lastLatLon.TryGetValue(pt?.Label, out var geo))
                 {
                     var (x, y) = ConvertLatLonToCanvasXY(geo.lat, geo.lon);
 
@@ -1909,7 +1919,6 @@ namespace V2XController
             if (box == null) return;
 
             const double boxWidth = 15.0;  // Match UpdateOrCreateBox
-            const double boxHeight = 30.0; // Match UpdateOrCreateBox
 
             // Position: top center of the rectangle exactly at the vehicle point
             Canvas.SetLeft(box, topCenter.X - boxWidth / 2.0);
@@ -2173,13 +2182,13 @@ namespace V2XController
         /// <summary>
         /// Update positions of all overlays based on their stored geographic coordinates and the current zoom level.
         /// </summary>
-        private void UpdateOverlayPositions()
+        private async Task UpdateOverlayPositions()
         {
             // Stops are updated separately in MouseMove for better performance
             // UpdateStopsPositions();
 
             // Update other overlays
-            ReprojectAllZonesOnMapChange();
+            await ReprojectAllZonesOnMapChange();
             ReprojectActiveVehiclesOnMapChange();
             ReprojectReplayOnMapChange();
             //ReprojectRailwaysOnMapChange();
@@ -2353,7 +2362,7 @@ namespace V2XController
             SetMapCenter(lat: lat, lon: lon, updateTextBoxes: true);
 
             // Reproject overlays
-            ReprojectAllZonesOnMapChange();
+            await ReprojectAllZonesOnMapChange();
             ReprojectActiveVehiclesOnMapChange();
             ReprojectReplayOnMapChange();
             await BringAllOverlaysToFrontSafeAsync();
@@ -2574,7 +2583,7 @@ namespace V2XController
             _ = EnsureLocalAreaAltitudeAsync(force: true);
             ResetAllTramTrails();
 
-            ReprojectAllZonesOnMapChange();
+            await ReprojectAllZonesOnMapChange();
             ReprojectActiveVehiclesOnMapChange();
             ReprojectReplayOnMapChange();
             ReprojectSwitchZonesOnMapChange();
@@ -2606,7 +2615,7 @@ namespace V2XController
         /// </summary>
         /// <param name="element">The UIElement for which to find the parent in the TileCanvas.</param>
         /// <returns>The parent UIElement that is a direct child of the TileCanvas, or null if not found.</returns>
-        private UIElement GetParentElementInCanvas(UIElement element)
+        private UIElement? GetParentElementInCanvas(UIElement? element)
         {
             while (element != null && !TileCanvas.Children.Contains(element))
             {
@@ -5950,7 +5959,7 @@ namespace V2XController
         /// </summary>
         /// <param name="sender">The source of the event.</param>
         /// <param name="e">The event data.</param>
-        private void CleanupOldVehicles(object sender, EventArgs e)
+        private void CleanupOldVehicles(object? sender, EventArgs e)
         {
             var now = DateTime.Now;
 
@@ -5961,11 +5970,11 @@ namespace V2XController
             foreach (var item in toRemoveFromTable)
             {
                 // keep drawn simulated trams exempt
-                if (drawnTramIds.Any(id => id.EndsWith(item.VehicleId)))
+                if (drawnTramIds?.Any(id => id.EndsWith(item?.VehicleId ?? string.Empty)) == true)
                     continue;
 
                 // find the full vehicle ID in activeVehicles by suffix match
-                var fullId = activeVehicles.Keys.FirstOrDefault(k => k.EndsWith(item.VehicleId));
+                var fullId = activeVehicles.Keys.FirstOrDefault(k => k.EndsWith(item?.VehicleId ?? string.Empty));
                 if (fullId != null && activeVehicles.TryGetValue(fullId, out var vehicle))
                 {
                     // Remove immediately after 30 seconds (no gradual cleanup)
@@ -5979,7 +5988,7 @@ namespace V2XController
                 TramTable.Remove(item);
             }
 
-            for (int i = 0; i < drawnTrams.Length; i++)
+            for (int i = 0; i < drawnTrams?.Length; i++)
             {
                 var tram = drawnTrams[i];
                 if (tram == null) continue;
@@ -7098,7 +7107,7 @@ namespace V2XController
         /// <param name="rawXml">The raw XML representation of the V2X message.</param>
         private void HandleV2XMessage(V2XMessage msg, string rawXml)
         {
-            if (msg.IsManual)
+            if (msg.IsManual ?? false)
                 return;
 
             // ID filter only when FilterCheckBox is ON
@@ -7229,7 +7238,7 @@ namespace V2XController
                     if (AccuracyCB?.IsChecked == true && accuracyMeters >= 4)
                     {
                         // convert meters -> pixels using local latitude
-                        double mpp = MetersPerPixel(msg.Latitude, zoom);
+                        double mpp = MetersPerPixel(msg.Latitude ?? 0.0, zoom);
                         double radiusPx = accuracyMeters / Math.Max(1e-6, mpp);
 
                         SolidColorBrush fillBrush;
@@ -7288,11 +7297,11 @@ namespace V2XController
 
 
                         // store last geo + heading for reprojection
-                        _lastLatLon[msg.VehicleID] = (msg.Latitude, msg.Longitude);
-                        _lastHeadingLive[msg.VehicleID] = msg.Heading;
+                        _lastLatLon[msg.VehicleID] = (msg.Latitude ?? 0.0, msg.Longitude ?? 0.0);
+                        _lastHeadingLive[msg.VehicleID] = msg.Heading ?? 0.0;
 
                         var topCenter = new Point(x, y);
-                        var liveHeadingAdj = (msg.Heading - 180 + 360) % 360;
+                        var liveHeadingAdj = ((msg.Heading ?? 0.0) - 180 + 360) % 360;
                         UpdateOrCreateVehicleBox(msg.VehicleID, topCenter, tramColor, liveHeadingAdj);
                     }
                     else
@@ -7371,12 +7380,12 @@ namespace V2XController
                             FilterTram.Dispatcher.BeginInvoke(new Action(PopulateLiveTramBoxFromActiveVehicles));
                         }
 
-                        _lastLatLon[msg.VehicleID] = (msg.Latitude, msg.Longitude);
-                        _lastHeadingLive[msg.VehicleID] = msg.Heading;
+                        _lastLatLon[msg.VehicleID] = (msg.Latitude ?? 0.0, msg.Longitude ?? 0.0);
+                        _lastHeadingLive[msg.VehicleID] = msg.Heading ?? 0.0;
 
                         // create the oriented box
                         var topCenterNew = new Point(x, y);
-                        var liveHeadingAdj = (msg.Heading - 180 + 360) % 360;
+                        var liveHeadingAdj = ((msg.Heading ?? 0.0) - 180 + 360) % 360;
                         UpdateOrCreateVehicleBox(msg.VehicleID, topCenterNew, tramColor, liveHeadingAdj);
                     }
                 }
@@ -7385,14 +7394,14 @@ namespace V2XController
 
                 if (lastCamTimes.TryGetValue(msg.VehicleID, out var lastTime))
                     prevCamTimes[msg.VehicleID] = lastTime;
-                lastCamTimes[msg.VehicleID] = msg.Timestamp;
+                lastCamTimes[msg.VehicleID] = msg.Timestamp ?? DateTime.UtcNow;
 
                 string statId = string.IsNullOrEmpty(msg.VehicleID) ? "-" : msg.VehicleID;
                 string camIdShort = statId.Length > 4 ? statId[^4..] : statId;
 
                 // Only update table for live vehicles that we actually rendered (respecting TramBox selection)
                 if (!filtering || IsReplayFilterMatch(msg.VehicleID))
-                    UpdateOrAddVehicleData(camIdShort, msg.Speed, msg.Timestamp);
+                    UpdateOrAddVehicleData(camIdShort, msg.Speed ?? 0.0, msg.Timestamp ?? DateTime.UtcNow);
 
                 if (!(msg.VehicleID?.StartsWith("000000") ?? false))
                     UpdateVehicleTrail(msg);
@@ -7450,7 +7459,7 @@ namespace V2XController
                         srvLongitude = srvV2xMsg.Longitude;
                         _ = EnsureLocalAreaAltitudeAsync(force: true);
 
-                        _lastLatLon[srvV2xMsg.VehicleID] = (srvV2xMsg.Latitude, srvV2xMsg.Longitude);
+                        _lastLatLon[srvV2xMsg.VehicleID] = (srvV2xMsg.Latitude ?? 0.0, srvV2xMsg.Longitude ?? 0.0);
 
                         if (CircleCheckBox?.IsChecked == true)
                             DrawRadiusCircle();
@@ -7458,7 +7467,7 @@ namespace V2XController
 
                     if (activeVehicles.TryGetValue(srvV2xMsg.VehicleID, out var point))
                     {
-                        point.Position = new Point(srvV2xMsg.Longitude, srvV2xMsg.Latitude);
+                        point.Position = new Point(srvV2xMsg.Longitude ?? 0.0, srvV2xMsg.Latitude ?? 0.0);
                         point.LastUpdate = DateTime.Now;
                     }
                     else
@@ -7483,7 +7492,7 @@ namespace V2XController
 
                         var newPoint = new MapPoint
                         {
-                            Position = new Point(srvV2xMsg.Longitude, srvV2xMsg.Latitude),
+                            Position = new Point(srvV2xMsg.Longitude ?? 0.0, srvV2xMsg.Latitude ?? 0.0),
                             Label = srvV2xMsg.VehicleID,
                             Ellipse = ellipse,
                             Text = text,
@@ -7544,7 +7553,7 @@ namespace V2XController
         private void UpdateVehicleTrail(V2XMessage msg)
         {
             var isSrv = msg.MessageType == "SRV";
-            if (msg.IsManual) return;
+            if (msg.IsManual ?? false) return;
 
             Brush tramColor;
             if (isSrv)
@@ -7604,7 +7613,8 @@ namespace V2XController
 
             // Add geo coordinates to trail FIRST (before converting to canvas)
             vehicle.TrailGeoPoints ??= new List<(double lat, double lon)>();
-            vehicle.TrailGeoPoints.Add((msg.Latitude, msg.Longitude));
+            if (msg.Latitude.HasValue && msg.Longitude.HasValue)
+                vehicle.TrailGeoPoints.Add((msg.Latitude.Value, msg.Longitude.Value));
 
             // Cap geo points to at most (_maxTrailLength + 1) points => _maxTrailLength segments
             while (vehicle.TrailGeoPoints.Count > _maxTrailLength + 1)
@@ -7614,7 +7624,7 @@ namespace V2XController
             var (x, y) = ConvertLatLonToCanvasXY(msg.Latitude, msg.Longitude);
 
             // Keep MovementFrames for compatibility (but we'll use TrailGeoPoints for rendering)
-            var frame = new MovementFrame { Timestamp = msg.Timestamp.TimeOfDay, Position = new Point(x, y) };
+            var frame = new MovementFrame { Timestamp = msg.Timestamp?.TimeOfDay ?? TimeSpan.Zero, Position = new Point(x, y) };
             vehicle.MovementFrames ??= new List<MovementFrame>();
             vehicle.MovementFrames.Add(frame);
             while (vehicle.MovementFrames.Count > _maxTrailLength + 1)
@@ -8498,7 +8508,7 @@ namespace V2XController
                     var msg = V2XMessageParser.ParseV2XMessage(raw);
                     if (msg == null || msg.MessageType != "CAM") continue;
 
-                    var tsUtc = msg.Timestamp.ToUniversalTime();
+                    var tsUtc = msg.Timestamp?.ToUniversalTime() ?? DateTime.MinValue;
                     if (!minUtc.HasValue || tsUtc < minUtc) minUtc = tsUtc;
                     if (!maxUtc.HasValue || tsUtc > maxUtc) maxUtc = tsUtc;
 
@@ -8512,25 +8522,25 @@ namespace V2XController
 
                     var (rx, ry) = ConvertLatLonToCanvasXY(msg.Latitude, msg.Longitude);
                     var relTs = msg.Timestamp - firstTime.Value;
-                    list.Add(new MovementFrame { Timestamp = relTs, Position = new Point(rx, ry) });
+                    list.Add(new MovementFrame { Timestamp = relTs ?? TimeSpan.Zero, Position = new Point(rx, ry) });
 
                     if (!_replayGeoFrames.TryGetValue(msg.VehicleID, out var geoList))
                     {
                         geoList = new List<(TimeSpan ts, double lat, double lon)>();
                         _replayGeoFrames[msg.VehicleID] = geoList;
                     }
-                    geoList.Add((relTs, msg.Latitude, msg.Longitude));
+                    geoList.Add((relTs ?? TimeSpan.Zero, msg.Latitude ?? 0.0, msg.Longitude ?? 0.0));
 
                     // store heading/speed/alt as before
-                    string keyHead = $"{msg.VehicleID}|{relTs.Ticks}";
-                    _playbackHeadingByIdAndTs[keyHead] = msg.Heading;
+                    string keyHead = $"{msg.VehicleID}|{relTs?.Ticks ?? TimeSpan.Zero.Ticks}";
+                    _playbackHeadingByIdAndTs[keyHead] = msg.Heading ?? 0.0;
 
-                    string keyAll = $"{msg.VehicleID}|{relTs.Ticks}";
-                    _playbackSpeedByIdAndTs[keyAll] = msg.Speed; // m/s expected
+                    string keyAll = $"{msg.VehicleID}|{relTs?.Ticks ?? 0}";
+                    _playbackSpeedByIdAndTs[keyAll] = msg.Speed ?? 0.0; // m/s expected
 
                     if (TryExtractAltitudeFromCamXml(raw, out var altVal))
                     {
-                        string keyAlt = $"{msg.VehicleID}|{relTs.Ticks}";
+                        string keyAlt = $"{msg.VehicleID}|{relTs?.Ticks ?? 0}";
                         _playbackAltitudeByIdAndTs[keyAlt] = altVal;
                     }
 
@@ -8571,7 +8581,7 @@ namespace V2XController
 
                     if (accVal > 0)
                     {
-                        string keyAcc = $"{msg.VehicleID}|{relTs.Ticks}";
+                        string keyAcc = $"{msg.VehicleID}|{relTs?.Ticks ?? TimeSpan.Zero.Ticks}";
                         _playbackAccuracyByIdAndTs[keyAcc] = accVal;
                     }
                 }
@@ -8865,7 +8875,7 @@ namespace V2XController
         /// </summary>
         /// <param name="sender">The activation zone that changed.</param>
         /// <param name="e">The property change event arguments.</param>
-        private void ActivationZone_PropertyChanged(object sender, PropertyChangedEventArgs e)
+        private void ActivationZone_PropertyChanged(object? sender, PropertyChangedEventArgs e)
         {
             if (isUpdatingActivationZone) return;
             isUpdatingActivationZone = true;
@@ -8878,7 +8888,7 @@ namespace V2XController
                 // Handle polyline segment changes
                 if (zone.IsPolylineSegment)
                 {
-                    HandlePolylineSegmentPropertyChange(zone, e.PropertyName);
+                    HandlePolylineSegmentPropertyChange(zone, e.PropertyName ?? string.Empty);
                     isUpdatingActivationZone = false;
                     return;
                 }
@@ -9201,8 +9211,10 @@ namespace V2XController
         /// </summary>
         /// <param name="segment">The segment to search for.</param>
         /// <returns>The polyline containing the segment, or null if not found.</returns>
-        private Polyline FindPolylineContainingSegment(ActivationZone segment)
+        private Polyline? FindPolylineContainingSegment(ActivationZone? segment)
         {
+            if (segment == null) return null;
+
             foreach (var kvp in _polylineGeoPoints)
             {
                 var polyline = kvp.Key;
@@ -9371,7 +9383,7 @@ namespace V2XController
             {
                 var lat = el.GetProperty("lat").GetDouble();
                 var lon = el.GetProperty("lon").GetDouble();
-                string name = el.TryGetProperty("tags", out var tags) &&
+                string? name = el.TryGetProperty("tags", out var tags) &&
                               tags.TryGetProperty("name", out var stopNameEl)
                     ? stopNameEl.GetString()
                     : "Bez názvu";
@@ -9677,7 +9689,7 @@ namespace V2XController
                 var pos = curFrame.Position;
 
 
-                if (!vehicleColorMap.TryGetValue(id, out Brush color))
+                if (!vehicleColorMap.TryGetValue(id, out Brush? color))
                 {
                     int index = vehicleColorMap.Count % vehicleColors.Count;
                     color = vehicleColors[index];
@@ -9846,7 +9858,7 @@ namespace V2XController
                 {
                     var last = pt.MovementFrames.Last();
                     UpdatePointPosition(pt, last.Position);
-                    CheckActivationZones(last.Position, pt.Label);
+                    CheckActivationZones(last.Position, pt.Label ?? string.Empty);
                     continue;
                 }
 
@@ -9971,7 +9983,7 @@ namespace V2XController
             // Convert relative timeline to absolute UTC for display
             var msgUtc = _replayStartUtc?.Add(t) ?? DateTime.UtcNow;
 
-            string lastShortId = null;
+            string? lastShortId = null;
 
             foreach (var kv in _replayFrames)
             {
@@ -10030,7 +10042,7 @@ namespace V2XController
         {
             try
             {
-                string portName = ComPortsComboBox.SelectedItem as string;
+                string? portName = ComPortsComboBox.SelectedItem as string;
                 if (string.IsNullOrWhiteSpace(portName))
                 {
                     MessageBox.Show("Select a COM port from the list.");
@@ -10116,8 +10128,8 @@ namespace V2XController
                 // There are unsaved items or active recording — ask the user
                 var messageBuilder = new StringBuilder("Recording or buffered data present. Do you want to stop and save before disconnecting?\n\n");
                 if (isRecording) messageBuilder.AppendLine("- Manual recording is active");
-                if (hasManualRecording) messageBuilder.AppendLine($"- {recordedManualCamMessages.Count} manual CAM message(s) to save");
-                if (hasLiveBuffer) messageBuilder.AppendLine($"- {recordedCamMessages.Count} live CAM message(s) in RS485 buffer");
+                if (hasManualRecording) messageBuilder.AppendLine($"- {recordedManualCamMessages?.Count ?? 0} manual CAM message(s) to save");
+                if (hasLiveBuffer) messageBuilder.AppendLine($"- {recordedCamMessages?.Count ?? 0} live CAM message(s) in RS485 buffer");
                 var result = MessageBox.Show(messageBuilder.ToString(), "Recording active", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
 
                 if (result == MessageBoxResult.Cancel)
@@ -10144,9 +10156,9 @@ namespace V2XController
                         };
                         if (dlgManual.ShowDialog() == true)
                         {
-                            WriteCamrecWithCenter(dlgManual.FileName, recordedManualCamMessages);
+                            WriteCamrecWithCenter(dlgManual.FileName, recordedManualCamMessages ?? new List<string>());
                             MessageBox.Show("Manual CAM recording saved to:\n" + dlgManual.FileName, "Saved", MessageBoxButton.OK, MessageBoxImage.Information);
-                            recordedManualCamMessages.Clear();
+                            recordedManualCamMessages?.Clear();
                         }
                     }
 
@@ -10164,14 +10176,13 @@ namespace V2XController
                     if (isRecording)
                     {
                         isRecording = false;
-                        recordedManualCamMessages.Clear();
+                        recordedManualCamMessages?.Clear();
                     }
 
                     if (hasManualRecording)
-                        recordedManualCamMessages.Clear();
-
+                        recordedManualCamMessages?.Clear();
                     if (hasLiveBuffer)
-                        recordedCamMessages.Clear();
+                        recordedCamMessages?.Clear();
 
                     if (_timeshiftEnabled) StopTimeshiftSession();
                 }
@@ -10211,7 +10222,7 @@ namespace V2XController
         /// </summary>
         /// <param name="sender"></param>
         /// <param name="e"></param>
-        private void SaveToXML_Click(object sender, RoutedEventArgs e)
+        private void SaveToXML_Click(object? sender, RoutedEventArgs? e)
         {
             // consider activation zones and railways too
             bool hasZones = activationZones.Count > 0 || (ActivationZonesCollection?.Count > 0);
@@ -10289,7 +10300,7 @@ namespace V2XController
             if (_keyframes == null || _keyframes.Count == 0)
                 BuildPlaybackKeyframes();
 
-            if (_keyframes.Count == 0)
+            if (_keyframes == null || _keyframes.Count == 0)
             {
                 MessageBox.Show("No CAM frames to play.", "Playback", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
@@ -10494,7 +10505,7 @@ namespace V2XController
                 {
                     var polyline = new Polyline
                     {
-                        Stroke = vehicle.Ellipse.Fill,
+                        Stroke = vehicle.Ellipse?.Fill,
                         StrokeThickness = 2,
                         Tag = $"tram_trail_{vehicle.Label}"
                     };
@@ -10662,6 +10673,74 @@ namespace V2XController
 
             Console.WriteLine($"[CLEAR] Clearing all objects...");
 
+            ClearAll();
+        }
+
+        /// <summary>
+        /// Clears polyline direction arrows and their wings
+        /// </summary>
+        private void ClearPolylineDirectionArrows()
+        {
+            try
+            {
+                // Work on a snapshot to avoid collection-modification issues
+                var allEntries = _polylineDirectionArrows.ToList();
+
+                foreach (var kv in allEntries)
+                {
+                    var segments = kv.Value;
+                    if (segments == null)
+                        continue;
+
+                    foreach (var seg in segments.ToList())
+                    {
+                        if (seg == null)
+                            continue;
+
+                        // If the segment is currently attached to a panel, remove it safely on UI thread
+                        if (seg.Parent is System.Windows.Controls.Panel parentPanel)
+                        {
+                            parentPanel.Dispatcher.Invoke(() =>
+                            {
+                                if (parentPanel.Children.Contains(seg))
+                                    parentPanel.Children.Remove(seg);
+                            });
+                        }
+                        else
+                        {
+                            // Fallback: try removing via main window dispatcher searching common canvases
+                            Application.Current?.Dispatcher.Invoke(() =>
+                            {
+                                // Try common canvas names if available (TileCanvas, MapCanvas, etc.)
+                                // This is defensive: removal above should normally succeed.
+                                if (TileCanvas != null && TileCanvas.Children.Contains(seg))
+                                    TileCanvas.Children.Remove(seg);
+                            });
+                        }
+                    }
+
+                    // clear the list for this polyline
+                    segments.Clear();
+                    _polylineDirectionArrows.Remove(kv.Key);
+                }
+
+                // ensure dictionary is empty
+                _polylineDirectionArrows.Clear();
+            }
+            catch (Exception ex)
+            {
+                // don't crash UI when cleaning up; log for diagnostics
+                Console.WriteLine($"[UI CLEANUP] ClearPolylineDirectionArrows: {ex.Message}");
+            }
+        }
+
+
+
+        /// <summary>
+        /// Clears everything from the map
+        /// </summary>
+        private void ClearAll()
+        {
             var elementsToRemove = new List<UIElement>();
 
             foreach (UIElement child in TileCanvas.Children)
@@ -10715,7 +10794,7 @@ namespace V2XController
                 TileCanvas.Children.Remove(el);
             }
 
-            points.RemoveAll(p => p.Ellipse.Tag == null ||
+            points.RemoveAll(p => p.Ellipse == null || p.Ellipse.Tag == null ||
                                   (p.Ellipse.Tag.ToString() != "Tram" &&
                                    p.Ellipse.Tag.ToString() != "Srv" &&
                                    p.Ellipse.Tag.ToString() != "Stop"));
@@ -10762,7 +10841,7 @@ namespace V2XController
                 drawnTramLat[i] = null;
                 drawnTramLon[i] = null;
 
-                if (drawnTramTrails[i] != null)
+                if (drawnTramTrails?[i] != null)
                 {
                     TileCanvas.Children.Remove(drawnTramTrails[i]);
                     drawnTramTrails[i] = null;
@@ -10776,7 +10855,7 @@ namespace V2XController
                 if (!string.IsNullOrEmpty(loadedFileName))
                 {
                     var folder = System.IO.Path.GetDirectoryName(loadedFileName);
-                    loadedFileName = System.IO.Path.Combine(folder, "default_empty_save.xml");
+                    loadedFileName = System.IO.Path.Combine(folder ?? string.Empty, "default_empty_save.xml");
                 }
                 else
                 {
@@ -10795,6 +10874,7 @@ namespace V2XController
 
             Console.WriteLine($"[CLEAR] Complete - all polylines and zones cleared");
         }
+
 
 
         /// <summary>
@@ -12272,7 +12352,7 @@ namespace V2XController
                 playbackTimer.Start();
         }
 
-        private void ActivationZonesDataGrid_CellEditEnding(object sender, DataGridCellEditEndingEventArgs e)
+        private void ActivationZonesDataGrid_CellEditEnding(object? sender, DataGridCellEditEndingEventArgs e)
         {
             if (e.EditAction != DataGridEditAction.Commit) return;
             if (e.Row?.Item is not ActivationZone zone) return;
@@ -12475,7 +12555,7 @@ namespace V2XController
             lastCamUpdates.Clear();
         }
 
-        private static bool TryGetInterpolatedPosition(List<MovementFrame> frames, TimeSpan time, out Point pos, out MovementFrame prevFrameOut)
+        private static bool TryGetInterpolatedPosition(List<MovementFrame> frames, TimeSpan time, out Point pos, out MovementFrame? prevFrameOut)
         {
             pos = default;
             prevFrameOut = null;
@@ -12553,7 +12633,7 @@ namespace V2XController
         private void UpdateOrCreateReplayBox(string id, Point topCenter, Brush color, double headingDeg)
             => UpdateOrCreateBox(_replayBoxes, id, topCenter, color, headingDeg);
 
-        private static bool TryGetStepPosition(List<MovementFrame> frames, TimeSpan time, out MovementFrame current, out MovementFrame prev)
+        private static bool TryGetStepPosition(List<MovementFrame> frames, TimeSpan time, out MovementFrame? current, out MovementFrame? prev)
         {
             current = null;
             prev = null;
@@ -12717,13 +12797,13 @@ namespace V2XController
             }
 
             // Trim drawn tram trails to new length
-            for (int i = 0; i < drawnTramTrailPoints.Length; i++)
+            for (int i = 0; i < drawnTramTrailPoints?.Length; i++)
             {
-                while (drawnTramTrailPoints[i].Count > _maxTrailLength + 1)
-                    drawnTramTrailPoints[i].RemoveAt(0);
+                while (drawnTramTrailPoints[i]?.Count > _maxTrailLength + 1)
+                    drawnTramTrailPoints[i]?.RemoveAt(0);
 
-                while (drawnTramTrailGeoPoints[i].Count > _maxTrailLength + 1)
-                    drawnTramTrailGeoPoints[i].RemoveAt(0);
+                while (drawnTramTrailGeoPoints[i]?.Count > _maxTrailLength + 1)
+                    drawnTramTrailGeoPoints[i]?.RemoveAt(0);
 
                 var tram = drawnTrams[i];
                 if (tram?.TrailDots != null)
@@ -12737,9 +12817,9 @@ namespace V2XController
 
                 if (drawnTramTrails[i] != null)
                 {
-                    drawnTramTrails[i].Points.Clear();
+                    drawnTramTrails[i]?.Points.Clear();
                     foreach (var p in drawnTramTrailPoints[i])
-                        drawnTramTrails[i].Points.Add(p);
+                        drawnTramTrails[i]?.Points.Add(p);
                 }
             }
 
@@ -13048,13 +13128,13 @@ namespace V2XController
             }
         }
 
-        private void ActivationZonesDataGrid_BeginningEdit(object sender, DataGridBeginningEditEventArgs e)
+        private void ActivationZonesDataGrid_BeginningEdit(object? sender, DataGridBeginningEditEventArgs e)
         {
             _suspendZoneLiveSort = true;
             SetZonesLiveSorting(false);
         }
 
-        private void ActivationZonesDataGrid_RowEditEnding(object sender, DataGridRowEditEndingEventArgs e)
+        private void ActivationZonesDataGrid_RowEditEnding(object? sender, DataGridRowEditEndingEventArgs e)
         {
             if (e.EditAction != DataGridEditAction.Commit) return;
 
@@ -13370,13 +13450,13 @@ namespace V2XController
             EmphasizeZoneWithOwnColor(zone, revertAfter: null);
         }
 
-        private void SwitchZonesDataGrid_BeginningEdit(object sender, DataGridBeginningEditEventArgs e)
+        private void SwitchZonesDataGrid_BeginningEdit(object? sender, DataGridBeginningEditEventArgs e)
         {
             _suspendSwitchZoneLiveSort = true;
             SetSwitchZonesLiveSorting(false);
         }
 
-        private void SwitchZonesDataGrid_RowEditEnding(object sender, DataGridRowEditEndingEventArgs e)
+        private void SwitchZonesDataGrid_RowEditEnding(object? sender, DataGridRowEditEndingEventArgs e)
         {
             if (e.EditAction != DataGridEditAction.Commit) return;
 
@@ -13401,7 +13481,7 @@ namespace V2XController
             }), DispatcherPriority.Background);
         }
 
-        private void SwitchZonesDataGrid_CellEditEnding(object sender, DataGridCellEditEndingEventArgs e)
+        private void SwitchZonesDataGrid_CellEditEnding(object? sender, DataGridCellEditEndingEventArgs e)
         {
             if (e.EditAction != DataGridEditAction.Commit) return;
             if (e.Row?.Item is not ActivationZone zone) return;
@@ -13564,8 +13644,8 @@ namespace V2XController
                 _drawToSwitchZones = false;
 
             // Clear current UI zones (map + table), do not touch MPC
-            ClearMapAndTable();
-
+            _ = ClearMapAndTable();
+            ClearPolylineDirectionArrows();
             UpdateUiEnabledState();
         }
 
@@ -13576,8 +13656,8 @@ namespace V2XController
                 _drawToSwitchZones = true;
 
             // Clear current UI zones (map + table), do not touch MPC
-            ClearMapAndTable();
-
+            _ = ClearMapAndTable();
+            ClearPolylineDirectionArrows();
             UpdateUiEnabledState();
         }
 
@@ -13829,11 +13909,11 @@ namespace V2XController
             if (cam == null || string.IsNullOrWhiteSpace(cam.VehicleID)) return;
 
             // find nearest stop
-            Stop nearest = null;
+            Stop? nearest = null;
             double best = double.MaxValue;
             foreach (var s in stops)
             {
-                double d = HaversineMeters(cam.Latitude, cam.Longitude, s.Latitude, s.Longitude);
+                double d = HaversineMeters(cam.Latitude ?? 0.0, cam.Longitude ?? 0.0, s.Latitude, s.Longitude);
                 if (d < best) { best = d; nearest = s; }
             }
 
@@ -13867,7 +13947,7 @@ namespace V2XController
             }
         }
 
-        private void PopulateTramBoxFromIds(IEnumerable<string> fullIds)
+        private void PopulateTramBoxFromIds(IEnumerable<string?> fullIds)
         {
             if (TramBox == null) return;
 
@@ -14024,14 +14104,14 @@ namespace V2XController
                 }
 
                 // Drawn/manual trams: hide/show according to selection
-                for (int i = 0; i < drawnTrams.Length; i++)
+                for (int i = 0; i < drawnTrams?.Length; i++)
                 {
                     var tram = drawnTrams[i];
                     if (tram == null) continue;
-                    bool match = !filtering || IsReplayFilterMatch(tram.Label);
+                    bool match = !filtering || IsReplayFilterMatch(tram.Label ?? string.Empty);
                     if (tram.Ellipse != null) tram.Ellipse.Visibility = match ? Visibility.Visible : Visibility.Collapsed;
                     if (tram.Text != null) tram.Text.Visibility = match ? Visibility.Visible : Visibility.Collapsed;
-                    if (drawnTramTrails[i] != null) drawnTramTrails[i].Visibility = match ? Visibility.Visible : Visibility.Collapsed;
+                    if (drawnTramTrails?[i] != null) drawnTramTrails[i].Visibility = match ? Visibility.Visible : Visibility.Collapsed;
                     if (tram.TrailDots != null)
                     {
                         foreach (var d in tram.TrailDots)
@@ -14626,34 +14706,47 @@ namespace V2XController
                 // Clear drawn manual trams and trails
                 try
                 {
-                    for (int i = 0; i < drawnTrams.Length; i++)
+                    for (int i = 0; i < drawnTrams?.Length; i++)
                     {
-                        var tram = drawnTrams[i];
-                        if (tram != null)
+                        // Replace the block that accessed arrays directly with null- and bounds-checked version
+                        if (drawnTrams != null && i >= 0 && i < drawnTrams.Length)
                         {
-                            try { if (tram.Ellipse != null) TileCanvas.Children.Remove(tram.Ellipse); } catch { }
-                            try { if (tram.Text != null) TileCanvas.Children.Remove(tram.Text); } catch { }
-                            try { if (tram.Speed != null) TileCanvas.Children.Remove(tram.Speed); } catch { }
-
-                            if (tram.TrailDots != null)
+                            var tram = drawnTrams[i];
+                            if (tram != null)
                             {
-                                foreach (var d in tram.TrailDots.ToList())
-                                    try { TileCanvas.Children.Remove(d); } catch { }
-                                tram.TrailDots.Clear();
+                                try { if (tram.Ellipse != null) TileCanvas.Children.Remove(tram.Ellipse); } catch { }
+                                try { if (tram.Text != null) TileCanvas.Children.Remove(tram.Text); } catch { }
+                                try { if (tram.Speed != null) TileCanvas.Children.Remove(tram.Speed); } catch { }
+
+                                if (tram.TrailDots != null)
+                                {
+                                    foreach (var d in tram.TrailDots.ToList())
+                                        try { TileCanvas.Children.Remove(d); } catch { }
+                                    tram.TrailDots.Clear();
+                                }
                             }
                         }
 
-                        if (drawnTramTrails[i] != null)
+                        if (drawnTramTrails != null && i >= 0 && i < drawnTramTrails.Length && drawnTramTrails[i] != null)
                         {
                             try { TileCanvas.Children.Remove(drawnTramTrails[i]); } catch { }
                             drawnTramTrails[i] = null;
                         }
 
-                        drawnTramTrailPoints[i].Clear();
-                        drawnTramTrailGeoPoints[i].Clear();
-                        drawnTramLat[i] = null;
-                        drawnTramLon[i] = null;
-                        drawnTrams[i] = null;
+                        if (drawnTramTrailPoints != null && i >= 0 && i < drawnTramTrailPoints.Length && drawnTramTrailPoints[i] != null)
+                            drawnTramTrailPoints[i]?.Clear();
+
+                        if (drawnTramTrailGeoPoints != null && i >= 0 && i < drawnTramTrailGeoPoints.Length)
+                            drawnTramTrailGeoPoints[i].Clear();
+
+                        if (drawnTramLat != null && i >= 0 && i < drawnTramLat.Length)
+                            drawnTramLat[i] = null;
+
+                        if (drawnTramLon != null && i >= 0 && i < drawnTramLon.Length)
+                            drawnTramLon[i] = null;
+
+                        if (drawnTrams != null && i >= 0 && i < drawnTrams.Length)
+                            drawnTrams[i] = null;
                     }
                 }
                 catch { }
@@ -15037,13 +15130,10 @@ public class PolylineData
 public class PolylineSegmentData
 {
     public int SegmentIndex { get; set; }
-    public PolylinePointData StartPoint { get; set; }
-    public PolylinePointData EndPoint { get; set; }
+    public PolylinePointData? StartPoint { get; set; }
+    public PolylinePointData? EndPoint { get; set; }
     public double LengthMeters { get; set; }
     public int AzimuthDegrees { get; set; }
     public double WidthMeters { get; set; }
     public string SegmentType { get; set; } = "";
 }
-
-
-

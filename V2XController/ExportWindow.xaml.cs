@@ -1,24 +1,18 @@
-﻿using ComCommon;
-using Logger;
-using Microsoft.VisualBasic; // Interaction.InputBox
+﻿using Microsoft.VisualBasic; // Interaction.InputBox
 using ModbusNewLib;
-using System.CodeDom;
+using System.ComponentModel;
 using System.Globalization;
 using System.IO;
 using System.IO.Ports;
-using System.Net;
 using System.Net.Sockets;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
-using System.Windows.Media;
-using System.Windows.Media.Animation;
 using System.Windows.Threading;
-using System.ComponentModel;
-using System.Runtime.CompilerServices;
 
 /**********************************************************************************************************
  * V2X Controller - ExportWindow.xaml.cs
@@ -289,7 +283,7 @@ namespace V2XController
                     System.IO.Directory.CreateDirectory(dir);
 
                 var json = JsonSerializer.Serialize(st, new JsonSerializerOptions { WriteIndented = true });
-                System.IO.File.WriteAllText(_stateFilePath, json);
+                System.IO.File.WriteAllText(_stateFilePath ?? string.Empty, json);
             }
             catch
             {
@@ -591,8 +585,8 @@ namespace V2XController
                     try
                     {
                         UpdateTunnelIndicator(false);
-                        TunnelRemoteHostTextBox.IsEnabled = true;
-                        TunnelRemotePortTextBox.IsEnabled = true;
+                        if (TunnelRemoteHostTextBox != null) TunnelRemoteHostTextBox.IsEnabled = true;
+                        if (TunnelRemotePortTextBox != null) TunnelRemotePortTextBox.IsEnabled = true;
                     }
                     catch { }
                 }
@@ -3581,7 +3575,6 @@ namespace V2XController
             {
                 byte unitId = (byte)Math.Clamp(Settings.ModemDec ?? 1, 1, 247);
                 List<ActivationZone> zones;
-                string? error;
 
                 var progress = new Progress<(int current, int total, string message)>(p =>
                 {
@@ -3680,7 +3673,8 @@ namespace V2XController
                         return (false, "", "TCP host is required");
 
                     // Use Task.Run to avoid blocking UI
-                    var result = await Task.Run(() =>
+                    // Replace the Task.Run call so the tuple nullability is explicit
+                    var result = await Task.Run<(bool success, string value, string? error)>(() =>
                     {
                         try
                         {
@@ -3698,14 +3692,14 @@ namespace V2XController
                             if (state == ModbusStateCode.Success && block != null)
                             {
                                 string decoded = DecodeRegistersToString(block);
-                                return (true, decoded, null);
+                                return (true, decoded ?? string.Empty, (string?)null);
                             }
 
-                            return (false, "", $"Read failed: {state}");
+                            return (false, string.Empty, $"Read failed: {state}");
                         }
                         catch (Exception ex)
                         {
-                            return (false, "", $"TCP error: {ex.Message}");
+                            return (false, string.Empty, $"TCP error: {ex.Message}");
                         }
                     });
 
@@ -5061,11 +5055,11 @@ namespace V2XController
         }
 
 
-        private static async Task<(bool ok, ModbusStateCode state, string? error)> WriteActivationZoneCountRtuAsync(
+        private static Task<(bool ok, ModbusStateCode state, string? error)> WriteActivationZoneCountRtuAsync(
         ExportSettings s, byte unitId, int zoneCount, int timeoutMs)
         {
             // Per request: do not touch 0x0300 at all. Header write disabled.
-            return (true, ModbusStateCode.Success, null);
+            return Task.FromResult<(bool ok, ModbusStateCode state, string? error)>((true, ModbusStateCode.Success, null));
         }
 
 
@@ -5859,14 +5853,14 @@ namespace V2XController
             try
             {
                 _tunnelCts = new CancellationTokenSource();
-                _tunnelListener.Start();
+                _tunnelListener?.Start();
 
                 // Start accept loop: each incoming local client will be proxied to remoteHost:remotePort
-                _tunnelTask = Task.Run(() => TunnelAcceptLoopProxyAsync(_tunnelListener, remoteHost, remotePort, _tunnelCts.Token));
+                _tunnelTask = Task.Run(() => TunnelAcceptLoopProxyAsync(_tunnelListener ?? throw new InvalidOperationException("Tunnel listener is not initialized."), remoteHost, remotePort, _tunnelCts.Token));
 
                 UpdateTunnelIndicator(true);
-                TunnelRemoteHostTextBox.IsEnabled = false;
-                TunnelRemotePortTextBox.IsEnabled = false;
+                if (TunnelRemoteHostTextBox != null) TunnelRemoteHostTextBox.IsEnabled = false;
+                if (TunnelRemotePortTextBox != null) TunnelRemotePortTextBox.IsEnabled = false;
             }
             catch (Exception ex)
             {
@@ -6731,7 +6725,7 @@ namespace V2XController
             }
         }
 
-        private static async Task<(bool ok, string? msg, ExportSettings? tuned)> RtuAdaptiveProbeAsync(ExportSettings s, byte slave, int timeoutMs)
+        private static Task<(bool ok, string? msg, ExportSettings? tuned)> RtuAdaptiveProbeAsync(ExportSettings s, byte slave, int timeoutMs)
         {
             // Force Modbus ASCII framing: 8N1
             var tuned = ExportSettings.CloneFrom(s);
@@ -6739,7 +6733,7 @@ namespace V2XController
             tuned.SerialParity = "None";
             tuned.SerialStopBits = "1";
             tuned.SerialDataBits = 8;
-            return (true, "Using Modbus ASCII 8N1 on serial.", tuned);
+            return Task.FromResult<(bool ok, string? msg, ExportSettings? tuned)>((true, "Using Modbus ASCII 8N1 on serial.", tuned));
         }
 
         private static async Task<(bool ok, ushort usedBase)> AsciiProbeFirstZoneBaseAsync(ExportSettings s, byte slave, ushort baseAddr, int timeoutMs)
