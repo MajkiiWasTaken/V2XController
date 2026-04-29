@@ -21,7 +21,8 @@
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:local="clr-namespace:V2XController"
-        xmlns:sys="clr-namespace:System;assembly=mscorlib"
+        xmlns:sys="clr-namespace:System;assembly=System.Runtime"
+        xmlns:wpfdata="clr-namespace:System.Windows.Data;assembly=PresentationFramework"
         mc:Ignorable="d"
         Title="V2X Controller" Height="1010" Width="1600"
         MouseWheel="Window_MouseWheel"
@@ -151,9 +152,13 @@
 
             <!-- Active Trams Table - PŘESUNUTO POD Drawing Tools -->
             <GroupBox Header="Active Trams" Padding="8" Margin="0,0,0,4">
-                <DataGrid AutoGenerateColumns="False" HeadersVisibility="Column" 
-ItemsSource="{Binding TramTable}" IsReadOnly="True" 
-Height="75" HorizontalScrollBarVisibility="Hidden" FontSize="9">
+                <DataGrid x:Name="ActiveTramsDataGrid"
+          AutoGenerateColumns="False"
+          HeadersVisibility="Column"
+          IsReadOnly="True"
+          Height="75"
+          HorizontalScrollBarVisibility="Hidden"
+          FontSize="9">
                     <DataGrid.Columns>
                         <DataGridTextColumn Header="ID" Binding="{Binding VehicleId}" 
                   IsReadOnly="True" Width="105" CanUserResize="False"/>
@@ -373,10 +378,15 @@ Height="75" HorizontalScrollBarVisibility="Hidden" FontSize="9">
           MaxWidth="790" Width="790" Margin="2,0,0,5" VerticalAlignment="Bottom">
             <StackPanel>
                 <ScrollViewer HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Disabled">
-                    <DataGrid x:Name="ActivationZonesDataGrid" HeadersVisibility="Column" Height="110"
-                        ItemsSource="{Binding ActivationZonesCollection}" AutoGenerateColumns="False"
-                        CanUserAddRows="False" IsReadOnly="False" CellEditEnding="ActivationZonesDataGrid_CellEditEnding" CanUserReorderColumns="False"
-                        PreviewKeyDown="ActivationZonesDataGrid_PreviewKeyDown">
+                    <DataGrid x:Name="ActivationZonesDataGrid"
+          HeadersVisibility="Column"
+          Height="110"
+          AutoGenerateColumns="False"
+          CanUserAddRows="False"
+          IsReadOnly="False"
+          CellEditEnding="ActivationZonesDataGrid_CellEditEnding"
+          CanUserReorderColumns="False"
+          PreviewKeyDown="ActivationZonesDataGrid_PreviewKeyDown">
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="60" CanUserResize="False"/>
                             <DataGridTextColumn Header="Latitude [°]" Binding="{Binding Latitude, StringFormat=F6}" Width="92" CanUserResize="False"/>
@@ -386,21 +396,11 @@ Height="75" HorizontalScrollBarVisibility="Hidden" FontSize="9">
                             <DataGridTextColumn Header="Width [m]" Binding="{Binding Width}" Width="Auto" CanUserResize="False"/>
                             <DataGridTextColumn Header="Last ID" Binding="{Binding LastTramId}" IsReadOnly="True" Width="Auto" CanUserResize="False"/>
                             <DataGridCheckBoxColumn Header="Active" Binding="{Binding IsActive}" IsReadOnly="True" Width="Auto" CanUserResize="False"/>
-                            <DataGridComboBoxColumn Header="Color" SelectedItemBinding="{Binding Color, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="75" CanUserResize="False">
-                                <DataGridComboBoxColumn.ItemsSource>
-                                    <x:Array Type="{x:Type sys:String}">
-                                        <sys:String>Red</sys:String>
-                                        <sys:String>Green</sys:String>
-                                        <sys:String>Blue</sys:String>
-                                        <sys:String>Yellow</sys:String>
-                                        <sys:String>Orange</sys:String>
-                                        <sys:String>Cyan</sys:String>
-                                        <sys:String>Magenta</sys:String>
-                                        <sys:String>Black</sys:String>
-                                    </x:Array>
-                                </DataGridComboBoxColumn.ItemsSource>
-                            </DataGridComboBoxColumn>
-                            <DataGridTextColumn Header="Main zone" Binding="{Binding MainZone, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="Auto"/>
+                            <DataGridComboBoxColumn Header="Color"
+                        SelectedItemBinding="{Binding Color, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                        Width="75"
+                        CanUserResize="False"/>
+                                <DataGridTextColumn Header="Main zone" Binding="{Binding MainZone, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="Auto"/>
                             <DataGridTextColumn Header="Sub-zone" Binding="{Binding SubZone, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="Auto"/>
                         </DataGrid.Columns>
                     </DataGrid>

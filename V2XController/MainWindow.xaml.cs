@@ -594,6 +594,29 @@ namespace V2XController
                 }
             };
 
+            ActiveTramsDataGrid.ItemsSource = TramTable;
+            ActivationZonesDataGrid.ItemsSource = ActivationZonesCollection;
+
+            foreach (var column in ActivationZonesDataGrid.Columns)
+            {
+                if (column is DataGridComboBoxColumn comboColumn &&
+                    comboColumn.Header != null &&
+                    comboColumn.Header.ToString() == "Color")
+                {
+                    comboColumn.ItemsSource = new List<string>
+                    {
+                        "Red",
+                        "Green",
+                        "Blue",
+                        "Yellow",
+                        "Orange",
+                        "Cyan",
+                        "Magenta",
+                        "Black"
+                    };
+                }
+            }
+
             if (TramBox != null)
                 TramBox.SelectionChanged += TramBox_SelectionChanged;
 
