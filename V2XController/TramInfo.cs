@@ -52,7 +52,7 @@ namespace V2XController
 
         public DateTime? LastMessageTimestamp { get; set; }
 
-        
+
         protected void OnPropertyChanged([CallerMemberName] string propName = null)
         {
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propName));

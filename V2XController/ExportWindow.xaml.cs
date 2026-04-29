@@ -428,7 +428,7 @@ namespace V2XController
             bool exportingWLC = zonesAct.Count > 0;
             bool exportingRTV = zonesSw.Count > 0;
 
-            if (deviceType != null) 
+            if (deviceType != null)
             {
                 string zonesType = exportingWLC ? "WLC (Activation Zones)" : "RTV (Switches)";
                 string deviceTypeStr = isDeviceWLC ? "WLC" : (isDeviceRTV ? "RTV" : "Unknown");
@@ -673,9 +673,9 @@ namespace V2XController
                     allRegisters.Add(((ushort)(zoneBase + 7), widthHi));
                     allRegisters.Add(((ushort)(zoneBase + 8), azLo));
                     allRegisters.Add(((ushort)(zoneBase + 9), azHi));
-                
 
-                Console.WriteLine($"[ZONE] Zone {mainZone}-{subZone}: base=0x{zoneBase:X4}, 10 regs");
+
+                    Console.WriteLine($"[ZONE] Zone {mainZone}-{subZone}: base=0x{zoneBase:X4}, 10 regs");
                 }
 
                 Console.WriteLine($"[ZONE] Total registers to write: {allRegisters.Count}");
@@ -6922,6 +6922,6 @@ namespace V2XController
             return (true, slave, func, payload, null);
         }
 
-        
+
     }
 }

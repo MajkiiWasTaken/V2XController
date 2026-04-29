@@ -40,13 +40,13 @@ namespace V2XController
                 Stroke = Brushes.Black,
                 StrokeThickness = 1,
                 ToolTip = Tooltip
-                
+
             };
 
             Canvas.SetLeft(rect, X);
             Canvas.SetTop(rect, Y);
 
-          
+
             rect.MouseLeftButtonDown += (s, e) =>
             {
                 e.Handled = true;

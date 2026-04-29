@@ -493,10 +493,10 @@ namespace V2XController
         public MainWindow()
         {
             InitializeComponent();
-            #if DEBUG
+#if DEBUG
             AllocConsole();
             Console.WriteLine("[DEBUG] Allocating console...");
-            #endif
+#endif
             Console.WriteLine("[INIT] MainWindow initialized");
             this.WindowStyle = WindowStyle.SingleBorderWindow;
             this.ResizeMode = ResizeMode.CanMinimize;
@@ -1290,7 +1290,7 @@ namespace V2XController
                 _zoomDebounceTimer.Tick += async (s, ev) =>
                 {
                     _zoomDebounceTimer.Stop();
-                    
+
                     int oldZoom = zoom;
 
                     double worldMouseX = cameraX + _lastWheelPos.X;
@@ -2167,7 +2167,7 @@ namespace V2XController
             {
                 _tileSemaphore.Release();
             }
-        
+
         }
 
         /// <summary>
@@ -3801,7 +3801,7 @@ namespace V2XController
         /// <param name="e">The mouse button event data.</param>
         private void TileCanvas_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
         {
-            
+
         }
 
         /// <summary>
@@ -4704,7 +4704,7 @@ namespace V2XController
                         }
                     }
                 }
-                
+
 
                 string color = GetColorForMainZone(currentMainZone, IsSwitchMode());
 
@@ -5231,7 +5231,7 @@ namespace V2XController
 
                 // Rebuild with per-segment widths
                 RebuildPolylineZoneWithVariableWidths(polyline, polyline.Points.ToList());
-                
+
                 // Update vertex positions (dots and circles)
                 UpdatePolylineVertexPositions(polyline, polyline.Points.ToList());
                 UpdatePolylineDirectionArrows(polyline, polyline.Points.ToList());
@@ -6296,7 +6296,7 @@ namespace V2XController
         private void AddUndoRedo(Action undo, Action redo)
         {
             undoStack.Push(new UndoRedoAction { UndoAction = undo, RedoAction = redo });
-            redoStack.Clear(); 
+            redoStack.Clear();
         }
 
 
@@ -6516,7 +6516,7 @@ namespace V2XController
             }
             root.Add(zonesElement);
 
-            
+
 
             if (recordedCamMessages.Count > 0)
             {
@@ -7488,7 +7488,7 @@ namespace V2XController
                             Ellipse = ellipse,
                             Text = text,
                             LastUpdate = DateTime.Now,
-                            TrailGeoPoints = new List<(double lat, double lon)>() 
+                            TrailGeoPoints = new List<(double lat, double lon)>()
                         };
 
                         activeVehicles[srvV2xMsg.VehicleID] = newPoint;
@@ -8139,7 +8139,7 @@ namespace V2XController
                     isDirty = false;
                 }
 
-                
+
             }
 
             var camElements = doc.Descendants("CAM").ToList();
@@ -8970,7 +8970,7 @@ namespace V2XController
                     Console.WriteLine($"[POLYLINE] MainZone→{segment.MainZone} → Color={newColor} for seg {segment.SegmentIndex}");
                 }
 
-                if(_polylineGeoPoints.TryGetValue(polyline, out var geoPoints))
+                if (_polylineGeoPoints.TryGetValue(polyline, out var geoPoints))
                 {
                     var points = geoPoints.Select(gp =>
                     {
@@ -10053,7 +10053,7 @@ namespace V2XController
                     UpdateUiEnabledState();
                     Console.WriteLine($"[CONNECT] User connected on port {portName} at {baudRate} baud/s.");
                     MessageBox.Show($"Connected on {portName} at {baudRate} bps.");
-                    
+
                 }
                 else
                 {
@@ -14734,7 +14734,7 @@ namespace V2XController
                 Console.WriteLine($"[POLYLINE] Zone width set to {_polylineZoneWidthMeters:F1} m (±{_polylineZoneWidthMeters / 2:F1} m from line)");
             }
         }
-        
+
 
         private void PolylineZonesCollection_CollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
         {

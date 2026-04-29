@@ -54,7 +54,7 @@ namespace V2XController
 
                     if (vehPt.Attributes["heading"] != null)
                         msg.Heading = double.Parse(vehPt.Attributes["heading"].Value, System.Globalization.CultureInfo.InvariantCulture);
-                    
+
                     if (vehPt.Attributes["alt"] != null)
                         msg.Altitude = double.Parse(vehPt.Attributes["alt"].Value, System.Globalization.CultureInfo.InvariantCulture);
 

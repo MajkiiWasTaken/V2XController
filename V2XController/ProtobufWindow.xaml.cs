@@ -1114,7 +1114,7 @@ namespace V2XController
             }
         }
 
-        
+
 
         private void SearchNext_Click(object sender, RoutedEventArgs e)
         {
@@ -1190,7 +1190,7 @@ namespace V2XController
                 SearchNext_Click(null, null);
                 e.Handled = true;
             }
-           
+
             else if (e.Key == Key.F2 && Keyboard.Modifiers == ModifierKeys.None)
             {
                 SearchPrevious_Click(null, null);
