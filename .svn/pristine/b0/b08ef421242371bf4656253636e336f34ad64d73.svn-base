@@ -73,12 +73,10 @@
                                  TextChanged="BaudrateTB_TextChanged"/>
                     </Grid>
 
-                    <Button x:Name="RefreshComPorts" Content="Refresh ports ↺" Margin="0,10,0,0"
+                    <Button x:Name="RefreshComPorts" Content="Refresh ports" Margin="0,10,0,0"
                             Click="RefreshComPorts_Click" ToolTip="Refresh all COM ports"/>
                 </StackPanel>
             </GroupBox>
-            
-            
 
             <!-- RSU Settings -->
             <GroupBox Header="RSU Settings" Padding="10" Margin="0,0,0,10">
@@ -125,19 +123,19 @@
                             <RowDefinition Height="Auto"/>
                         </Grid.RowDefinitions>
 
-                        <Button x:Name="rectButton" Content="Activation Zone  ▭" Grid.Row="0" Grid.Column="0"
+                        <Button x:Name="rectButton" Content="Activation Zone" Grid.Row="0" Grid.Column="0"
                                 ToolTip="Draw zones" Click="rectButton_Click"/>
-                        <Button x:Name="Polyline" Content="Polyline  /" Grid.Row="0" Grid.Column="2"
+                        <Button x:Name="Polyline" Content="Polyline" Grid.Row="0" Grid.Column="2"
                                 ToolTip="Draw polyline" Click="PolylineButton_Click"/>
 
-                        <Button x:Name="StopDrawing" Content="Stop Drawing  ✕" Grid.Row="2" Grid.Column="0"
+                        <Button x:Name="StopDrawing" Content="Stop Drawing" Grid.Row="2" Grid.Column="0"
                                 ToolTip="Stop active drawing" Click="StopDrawing_Click"/>
-                        <Button x:Name="DrawPoints" Content="Tram Simulation  ⟿" Grid.Row="2" Grid.Column="2"
+                        <Button x:Name="DrawPoints" Content="Tram Simulation" Grid.Row="2" Grid.Column="2"
                                 ToolTip="Draw test trams" Click="DrawPoints_Click"/>
 
-                        <Button x:Name="SaveToXML" Content="Save To XML  ⤓" Grid.Row="4" Grid.Column="0"
+                        <Button x:Name="SaveToXML" Content="Save To XML" Grid.Row="4" Grid.Column="0"
                                 ToolTip="Save the map state to XML file" Click="SaveToXML_Click"/>
-                        <Button x:Name="LoadFromXML" Content="Load From XML  ⤒" Grid.Row="4" Grid.Column="2"
+                        <Button x:Name="LoadFromXML" Content="Load From XML" Grid.Row="4" Grid.Column="2"
                                 ToolTip="Load XML file" Click="LoadFromXML_Click"/>
                     </Grid>
 
@@ -211,7 +209,7 @@
             <!-- SRV Messages -->
             <GroupBox Header="SRV Messages" Padding="10" Margin="0,0,0,10">
                 <StackPanel>
-                    <Button x:Name="SendSrv" Content="Send SRV message  ⌁" Margin="0,0,0,10"
+                    <Button x:Name="SendSrv" Content="Send SRV message" Margin="0,0,0,10"
                             ToolTip="Send test SRV message" Click="SendSrv_Click"/>
                     <CheckBox x:Name="SrvCheckBox" Content="Send SRV message every minute" 
                               Checked="SrvCheckBox_Checked"/>
@@ -228,18 +226,18 @@
                             <ColumnDefinition Width="10"/>
                             <ColumnDefinition Width="*"/>
                         </Grid.ColumnDefinitions>
-                        <Button x:Name="btnStartRecording" Content="Record movement  ●" Grid.Column="0"
+                        <Button x:Name="btnStartRecording" Content="Record movement" Grid.Column="0"
                                 ToolTip="Records movement of trams" Click="btnRecordMovement_Click"/>
-                        <Button x:Name="btnStopRecording" Content="Stop recording  ■" Grid.Column="2"
+                        <Button x:Name="btnStopRecording" Content="Stop recording" Grid.Column="2"
                                 ToolTip="Stop active recording" Click="btnStopRecording_Click"/>
                     </Grid>
 
                     <Separator Margin="0,5"/>
 
                     <Label Content="Playback" FontWeight="Bold" Padding="0,10,0,5"/>
-                    <Button x:Name="btnPlaybackFile" Content="Select Playback file  ◇" Margin="0,0,0,5"
+                    <Button x:Name="btnPlaybackFile" Content="Select Playback file" Margin="0,0,0,5"
                             ToolTip="Select which replay file to play (.camrec)" Click="btnPlaybackFile_Click"/>
-                    <Button x:Name="ReloadReplay" Content="Reload Replay  ↺" Margin="0,0,0,10"
+                    <Button x:Name="ReloadReplay" Content="Reload Replay" Margin="0,0,0,10"
                             ToolTip="Reload whole replay file" Click="ReloadReplay_Click"/>
 
                     <Grid>
@@ -254,14 +252,14 @@
                             <RowDefinition Height="Auto"/>
                         </Grid.RowDefinitions>
 
-                        <Button x:Name="PlayMovement" Content="Play movement  ▶" Grid.Row="0" Grid.Column="0"
+                        <Button x:Name="PlayMovement" Content="Play movement" Grid.Row="0" Grid.Column="0"
                                 ToolTip="Plays selected recording from the start" Click="PlayMovement_Click"/>
-                        <Button x:Name="btnPause" Content="Pause  ||" Grid.Row="0" Grid.Column="2"
+                        <Button x:Name="btnPause" Content="Pause" Grid.Row="0" Grid.Column="2"
                                 ToolTip="Pause active replay" Click="btnPause_Click"/>
 
-                        <Button x:Name="btnPlay" Content="Resume  ⏵" Grid.Row="2" Grid.Column="0"
+                        <Button x:Name="btnPlay" Content="Resume" Grid.Row="2" Grid.Column="0"
                                 ToolTip="Resume played replay" Click="btnPlay_Click"/>
-                        <Button x:Name="StopReplay" Content="Stop Replay  ■" Grid.Row="2" Grid.Column="2"
+                        <Button x:Name="StopReplay" Content="Stop Replay" Grid.Row="2" Grid.Column="2"
                                 ToolTip="Stops active replay file" Click="StopReplay_Click"/>
                     </Grid>
 
@@ -339,14 +337,12 @@
 
             <!-- Map Canvas -->
             <Border BorderBrush="Black" BorderThickness="2" Width="710" Height="864">
-                <Grid ClipToBounds="True">
+                <Grid>
                     <Canvas x:Name="TileCanvas" Width="706" Height="860" ClipToBounds="True"
-                        Background="White"
-                        Focusable="True"
-                        IsHitTestVisible="True"
-                        MouseLeftButtonDown="TileCanvas_MouseLeftButtonDown"
-                        MouseMove="TileCanvas_MouseMove"
-                        MouseLeftButtonUp="TileCanvas_MouseLeftButtonUp"/>  
+                Background="Transparent"
+                MouseLeftButtonDown="TileCanvas_MouseLeftButtonDown"
+                MouseMove="TileCanvas_MouseMove"
+                MouseLeftButtonUp="TileCanvas_MouseLeftButtonUp"/>
 
                     <StackPanel x:Name="PolylineWidthPanel" 
                     Visibility="Collapsed"
@@ -404,33 +400,40 @@
                         SelectedItemBinding="{Binding Color, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                         Width="75"
                         CanUserResize="False"/>
-                            <DataGridTextColumn Header="Main zone" Binding="{Binding MainZone, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="Auto"/>
+                                <DataGridTextColumn Header="Main zone" Binding="{Binding MainZone, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="Auto"/>
                             <DataGridTextColumn Header="Sub-zone" Binding="{Binding SubZone, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="Auto"/>
                         </DataGrid.Columns>
                     </DataGrid>
                 </ScrollViewer>
 
                 <UniformGrid Rows="1" Columns="4" Margin="0,10,0,0">
-                    <Button x:Name="NewRow" Content="Add table row  +" Margin="5,0"
+                    <Button x:Name="NewRow" Content="Add table row" Margin="5,0"
                         Click="NewRow_Click" ToolTip="Adds new table row"/>
-                    <Button x:Name="ExportButton" Content="Export Table  ⇲" Margin="5,0"
+                    <Button x:Name="ExportButton" Content="Export Table" Margin="5,0"
                         Click="ExportButton_Click" ToolTip="Export zones to MPC registers"/>
-                    <Button x:Name="ReadButtonMain" Content="Read from MPC  ⇱" Margin="5,0"
+                    <Button x:Name="ReadButtonMain" Content="Read from MPC" Margin="5,0"
                         Click="ReadButtonMain_Click" ToolTip="Read all zone registers from MPC"/>
-                    <Button x:Name="ClearButton" Content="Clear all objects  ✕" Margin="5,0"
+                    <Button x:Name="ClearButton" Content="Clear all objects" Margin="5,0"
                         Click="ClearButton_Click" ToolTip="Clear all drawn objects on the map plot"/>
                 </UniformGrid>
             </StackPanel>
         </GroupBox>
 
         <!-- Debug Terminal Button -->
+        <Button x:Name="OpenTerminal" Content="Debug terminal" HorizontalAlignment="Right"
+        Width="165" Height="20" Margin="0,0,890,199" VerticalAlignment="Bottom"
+        Click="OpenTerminal_Click" ToolTip="Open debug terminal window" Panel.ZIndex="100"/>
 
-        <Button x:Name="btnRefreshMap" Content="Refresh map ↺" HorizontalAlignment="Left" VerticalAlignment="Bottom"
-        Width="125" Height="20" Margin="340,0,0,271"
+        <Button x:Name="btnRefreshMap" Content="Refresh map" HorizontalAlignment="Left" VerticalAlignment="Bottom"
+        Width="165" Height="20" Margin="340,0,0,249"
         Click="RefreshMap_Click" ToolTip="Refreshes whole map loading" Panel.ZIndex="100"/>
 
-        <Button Content="Protobuf Translator ⇄" HorizontalAlignment="Left" VerticalAlignment="Bottom" Background="#025a7a"
-        Width="126" Height="20" Margin="502,0,0,271"
+        <Button x:Name="btnExportMap" Content="Export map" HorizontalAlignment="Left" VerticalAlignment="Bottom"
+        Width="165" Height="20" Margin="340,0,0,199"
+        Click="ExportMap_Click" ToolTip="Exports map state into an image (.png)" Panel.ZIndex="100"/>
+
+        <Button Content="Protobuf Translator" HorizontalAlignment="Left" VerticalAlignment="Bottom" Background="#025a7a"
+        Width="166" Height="20" Margin="510,0,0,249"
         Click="OpenProtobuf_Click" ToolTip="Open Protobuf message translator" Panel.ZIndex="100">
             <Button.Style>
                 <Style TargetType="Button">
@@ -445,9 +448,8 @@
             </Button.Style>
         </Button>
 
-        <Button x:Name="MapControls" Content="Map controls ⌖" HorizontalAlignment="Left" VerticalAlignment="Bottom"
-        Width="125" Height="20" Margin="665,0,0,271"
-        Click="MapControls_Click" ToolTip="Displays map controls" Panel.ZIndex="100" RenderTransformOrigin="0.515,1.12"/>
-
+            <Button x:Name="MapControls" Content="Map controls" HorizontalAlignment="Left" VerticalAlignment="Bottom"
+        Width="109" Height="20" Margin="681,0,0,249"
+        Click="MapControls_Click" ToolTip="Displays map controls" Panel.ZIndex="100"/>
     </Grid>
 </Window>

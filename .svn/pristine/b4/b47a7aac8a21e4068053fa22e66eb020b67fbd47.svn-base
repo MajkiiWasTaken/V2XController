@@ -54,7 +54,7 @@ namespace V2XController
         private Brush _highlightBrush = new SolidColorBrush(Color.FromRgb(255, 255, 0)); // Yellow
 
         private System.Windows.Threading.DispatcherTimer _searchDebounceTimer;
-        private bool _suppressRadioChange = false;
+
 
         public ProtobufWindow()
         {
@@ -519,31 +519,23 @@ namespace V2XController
             if (RsuToControllerRadio?.IsChecked == true)
             {
                 forceMessageType = "RsuToControllerMessageData";
-                Console.WriteLine("[DECODE UI] Forcing RSU->Controller");
             }
             else if (ControllerToRsuRadio?.IsChecked == true)
             {
                 forceMessageType = "ControllerToRsuMessageData";
-                Console.WriteLine("[DECODE UI] Forcing Controller->RSU");
             }
-            else if (AllRadio?.IsChecked == true)
-            {
-                Console.WriteLine("[DECODE UI] Auto-detect mode");
-            }
+            // If AllRadio is checked, leave forceMessageType as null (auto-detect)
 
-            // DECODE
+            // DECODE: Always uses the forceMessageType to decode
+            // This respects the ComboBox selection (RsuToController vs ControllerToRsu)
             if (ProtobufParser.TryDecodeProtobufFromHex(input, out string decoded, forceMessageType))
             {
-                Console.WriteLine($"[DECODE UI] Decode successful, result length: {decoded.Length}");
-
                 // Check if result is empty
                 string trimmedResult = decoded.Trim();
                 bool isEmpty = trimmedResult == "{}" || trimmedResult == "{ }" || string.IsNullOrWhiteSpace(trimmedResult);
 
                 if (isEmpty && inputLines.Count == 1 && forceMessageType != null)
                 {
-                    Console.WriteLine("[DECODE UI] Empty result, trying opposite direction");
-
                     // Empty with forced type - try opposite direction
                     string oppositeType = forceMessageType == "RsuToControllerMessageData"
                         ? "ControllerToRsuMessageData"
@@ -556,37 +548,32 @@ namespace V2XController
 
                         if (!retryIsEmpty)
                         {
-                            Console.WriteLine($"[DECODE UI] Opposite direction successful: {oppositeType}");
-
                             // Success with opposite direction - switch radio
-                            SwitchToDetectedMessageType(oppositeType);
+                            if (oppositeType == "RsuToControllerMessageData")
+                            {
+                                if (RsuToControllerRadio != null)
+                                    RsuToControllerRadio.IsChecked = true;
+
+                                if (StatusLabel != null)
+                                    StatusLabel.Content = "Auto-switched to RSU -> Controller";
+                            }
+                            else
+                            {
+                                if (ControllerToRsuRadio != null)
+                                    ControllerToRsuRadio.IsChecked = true;
+
+                                if (StatusLabel != null)
+                                    StatusLabel.Content = "Auto-switched to Controller -> RSU";
+                            }
+
+                            if (StatusLabel != null)
+                                StatusLabel.Foreground = Brushes.Green;
 
                             if (TestResultTextBox != null)
                                 TestResultTextBox.Text = retryDecoded;
 
                             return;
                         }
-                    }
-                }
-
-                // NEW: If we're in auto-detect mode, switch radio to detected type
-                if (AllRadio?.IsChecked == true && !isEmpty)
-                {
-                    Console.WriteLine("[DECODE UI] Auto-detect mode - detecting type from JSON");
-
-                    // Try to detect which type was actually decoded
-                    string detectedType = DetectDecodedMessageType(decoded);
-
-                    Console.WriteLine($"[DECODE UI] Detected type: '{detectedType}'");
-
-                    if (!string.IsNullOrEmpty(detectedType))
-                    {
-                        Console.WriteLine($"[DECODE UI] Switching to detected type: {detectedType}");
-                        SwitchToDetectedMessageType(detectedType);
-                    }
-                    else
-                    {
-                        Console.WriteLine("[DECODE UI] Could not detect type from JSON");
                     }
                 }
 
@@ -602,168 +589,11 @@ namespace V2XController
             }
             else
             {
-                Console.WriteLine("[DECODE UI] Decode failed");
                 TestResultTextBox.Text = decoded;
                 StatusLabel.Content = "Decode failed";
                 StatusLabel.Foreground = Brushes.Red;
             }
         }
-
-        // Helper method to detect message type from decoded JSON
-        private string DetectDecodedMessageType(string decodedJson)
-        {
-            if (string.IsNullOrWhiteSpace(decodedJson))
-            {
-                Console.WriteLine("[DETECT TYPE] Empty JSON");
-                return string.Empty;
-            }
-
-            try
-            {
-                Console.WriteLine($"[DETECT TYPE] Parsing JSON (length: {decodedJson.Length})");
-                Console.WriteLine($"[DETECT TYPE] JSON content: {decodedJson}");
-
-                // Parse JSON to detect fields
-                var jsonDoc = System.Text.Json.JsonDocument.Parse(decodedJson);
-                var root = jsonDoc.RootElement;
-
-                Console.WriteLine($"[DETECT TYPE] JSON parsed successfully, ValueKind: {root.ValueKind}");
-
-                // Log all properties in the JSON
-                if (root.ValueKind == System.Text.Json.JsonValueKind.Object)
-                {
-                    var properties = new List<string>();
-                    foreach (var prop in root.EnumerateObject())
-                    {
-                        properties.Add(prop.Name);
-                    }
-                    Console.WriteLine($"[DETECT TYPE] JSON properties: {string.Join(", ", properties)}");
-                }
-
-                // Check for RSU -> Controller fields
-                bool hasNearbyVehicle = root.TryGetProperty("nearby_vehicle_detection", out _);
-                bool hasIntersectionRequest = root.TryGetProperty("intersection_request", out _);
-                bool hasHeartbeat = root.TryGetProperty("heartbeat", out _);
-                bool hasPollRequest = root.TryGetProperty("poll_request", out _);
-
-                Console.WriteLine($"[DETECT TYPE] RSU->Controller checks: nearby={hasNearbyVehicle}, request={hasIntersectionRequest}, heartbeat={hasHeartbeat}, poll={hasPollRequest}");
-
-                if (hasNearbyVehicle || hasIntersectionRequest || hasHeartbeat || hasPollRequest)
-                {
-                    Console.WriteLine("[DETECT TYPE] → RsuToControllerMessageData");
-                    return "RsuToControllerMessageData";
-                }
-
-                // Check for Controller -> RSU fields
-                bool hasIntersectionStatus = root.TryGetProperty("intersection_status", out _);
-                bool hasPassRequestStatus = root.TryGetProperty("intersection_pass_request_status", out _);
-                bool hasEmptyResponse = root.TryGetProperty("empty_response", out _);
-
-                Console.WriteLine($"[DETECT TYPE] Controller->RSU checks: status={hasIntersectionStatus}, passStatus={hasPassRequestStatus}, empty={hasEmptyResponse}");
-
-                if (hasIntersectionStatus || hasPassRequestStatus || hasEmptyResponse)
-                {
-                    Console.WriteLine("[DETECT TYPE] → ControllerToRsuMessageData");
-                    return "ControllerToRsuMessageData";
-                }
-
-                // NEW: Check if message contains ONLY metadata (crc, timestamp, device_id)
-                // This indicates an empty_response (ControllerToRsu)
-                bool hasCrc = root.TryGetProperty("crc", out _);
-                bool hasTimestamp = root.TryGetProperty("timestamp", out _);
-                bool hasDeviceId = root.TryGetProperty("device_id", out _);
-
-                var allProps = new HashSet<string>();
-                foreach (var prop in root.EnumerateObject())
-                {
-                    allProps.Add(prop.Name);
-                }
-
-                // If we have ONLY metadata fields (and maybe revision/other common fields), it's likely empty_response
-                bool onlyMetadata = allProps.All(p =>
-                    p == "crc" ||
-                    p == "timestamp" ||
-                    p == "device_id" ||
-                    p == "revision" ||
-                    p == "message_number"
-                );
-
-                if (onlyMetadata && (hasCrc || hasTimestamp || hasDeviceId))
-                {
-                    Console.WriteLine("[DETECT TYPE] → ControllerToRsuMessageData (metadata-only, likely empty_response)");
-                    return "ControllerToRsuMessageData";
-                }
-
-                Console.WriteLine("[DETECT TYPE] No matching fields found");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[DETECT TYPE] Exception: {ex.Message}");
-            }
-
-            return string.Empty;
-        }
-
-        // Helper method to switch radio buttons and update UI
-        private void SwitchToDetectedMessageType(string messageType)
-        {
-            Console.WriteLine($"[SWITCH TYPE] Requested switch to: {messageType}");
-
-            if (messageType == "RsuToControllerMessageData")
-            {
-                if (RsuToControllerRadio != null && RsuToControllerRadio.IsChecked != true)
-                {
-                    Console.WriteLine("[SWITCH TYPE] Switching to RSU->Controller radio");
-
-                    // Temporarily suppress the Changed event to avoid regenerating default message
-                    _suppressRadioChange = true;
-                    RsuToControllerRadio.IsChecked = true;
-                    _suppressRadioChange = false;
-
-                    _currentDirection = MessageDirection.RsuToController;
-                    PopulateMessageTypeDropdown("RsuToControllerMessageData");
-
-                    StatusLabel.Content = "Auto-switched to: RSU → Controller";
-                    StatusLabel.Foreground = Brushes.Green;
-
-                    Console.WriteLine("[SWITCH TYPE] Switch complete");
-                }
-                else
-                {
-                    Console.WriteLine("[SWITCH TYPE] Already on RSU->Controller");
-                }
-            }
-            else if (messageType == "ControllerToRsuMessageData")
-            {
-                if (ControllerToRsuRadio != null && ControllerToRsuRadio.IsChecked != true)
-                {
-                    Console.WriteLine("[SWITCH TYPE] Switching to Controller->RSU radio");
-
-                    // Temporarily suppress the Changed event to avoid regenerating default message
-                    _suppressRadioChange = true;
-                    ControllerToRsuRadio.IsChecked = true;
-                    _suppressRadioChange = false;
-
-                    _currentDirection = MessageDirection.ControllerToRsu;
-                    PopulateMessageTypeDropdown("ControllerToRsuMessageData");
-
-                    StatusLabel.Content = "Auto-switched to: Controller → RSU";
-                    StatusLabel.Foreground = Brushes.Green;
-
-                    Console.WriteLine("[SWITCH TYPE] Switch complete");
-                }
-                else
-                {
-                    Console.WriteLine("[SWITCH TYPE] Already on Controller->RSU");
-                }
-            }
-            else
-            {
-                Console.WriteLine($"[SWITCH TYPE] Unknown message type: {messageType}");
-            }
-        }
-
-        
 
         private void GenerateDefaultMessage_Click(object sender, RoutedEventArgs e)
         {
@@ -771,55 +601,42 @@ namespace V2XController
         }
         private void MessageDirection_Changed(object sender, RoutedEventArgs e)
         {
-            if (_suppressRadioChange)
-                return;
-
-            if (sender is not RadioButton rb || rb.IsChecked != true)
-                return;
-
-            // Ensure all radio buttons are initialized
-            if (RsuToControllerRadio == null || ControllerToRsuRadio == null || AllRadio == null)
-                return;
-
-            // Clear any existing selection/state
-            _selectedOneofOption = null;
-
-            if (rb == RsuToControllerRadio)
+            if (sender is RadioButton rb && rb.IsChecked == true)
             {
-                _currentDirection = MessageDirection.RsuToController;
-                PopulateMessageTypeDropdown("RsuToControllerMessageData");
-                StatusLabel.Content = "Direction: RSU → Controller";
-                StatusLabel.Foreground = Brushes.Blue;
-            }
-            else if (rb == ControllerToRsuRadio)
-            {
-                _currentDirection = MessageDirection.ControllerToRsu;
-                PopulateMessageTypeDropdown("ControllerToRsuMessageData");
-                StatusLabel.Content = "Direction: Controller → RSU";
-                StatusLabel.Foreground = Brushes.Blue;
-            }
-            else if (rb == AllRadio)
-            {
-                // "All" mode - disable dropdown and show auto-detect message
-                if (MessageTypeComboBox != null)
+                // Add null checks for radio buttons
+                if (RsuToControllerRadio != null && rb.Name == "RsuToControllerRadio")
                 {
-                    MessageTypeComboBox.ItemsSource = null;
-                    MessageTypeComboBox.SelectedItem = null;
-                    MessageTypeComboBox.IsEnabled = false;
+                    _currentDirection = MessageDirection.RsuToController;
+                    PopulateMessageTypeDropdown("RsuToControllerMessageData");
+                }
+                else if (ControllerToRsuRadio != null && rb.Name == "ControllerToRsuRadio")
+                {
+                    _currentDirection = MessageDirection.ControllerToRsu;
+                    PopulateMessageTypeDropdown("ControllerToRsuMessageData");
+                }
+                else if (AllRadio != null && rb.Name == "AllRadio")
+                {
+                    // "All" mode - clear dropdown
+                    if (MessageTypeComboBox != null)
+                    {
+                        MessageTypeComboBox.ItemsSource = null;
+                        MessageTypeComboBox.IsEnabled = false;
+                    }
+
+                    if (TestResultTextBox != null)
+                    {
+                        TestResultTextBox.Text = "Auto-detect mode: Paste protobuf data to decode";
+                    }
+                    if (StatusLabel != null)
+                    {
+                        StatusLabel.Content = "Auto-detect mode active";
+                        StatusLabel.Foreground = Brushes.Blue;
+                    }
+                    return;
                 }
 
-                if (TestResultTextBox != null)
-                {
-                    TestResultTextBox.Text = "Auto-detect mode: Paste protobuf data to decode";
-                }
-
-                StatusLabel.Content = "Auto-detect mode active";
-                StatusLabel.Foreground = Brushes.Blue;
-                return; // Don't generate default message in auto-detect mode
+                GenerateAndShowDefaultMessage();
             }
-
-            // Generate default message for the selected direction
-            GenerateAndShowDefaultMessage();
         }
 
         private void PopulateMessageTypeDropdown(string messageType)
@@ -979,13 +796,6 @@ namespace V2XController
                            new string(' ', indentLevel * 2) + "}";
                 }
             }
-
-            if (field?.Type == "EmptyResponse" || field?.Name == "empty_response")
-            {
-                // EmptyResponse is an empty message {}
-                return "{}";
-            }
-
 
             // Handle different field types
             switch (field != null && field.Type != null ? field.Type.ToLower() : string.Empty)

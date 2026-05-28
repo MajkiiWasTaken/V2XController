@@ -214,8 +214,6 @@ namespace V2XController
             var field10InnerFieldNumbers = new HashSet<int>();
             var field20Data = new List<byte[]>();
             var field20InnerFieldNumbers = new HashSet<int>();
-            var field30Data = new List<byte[]>();
-            var field30InnerFieldNumbers = new HashSet<int>();
             int pos = 0;
 
             try
@@ -247,7 +245,7 @@ namespace V2XController
                                     byte[] bytes = new byte[length];
                                     Array.Copy(data, pos, bytes, 0, (int)length);
 
-                                    // Analyze field 10
+                                    // Analyze field 10 (nearby_vehicle_detection vs intersection_status)
                                     if (fieldNumber == 10)
                                     {
                                         field10Data.Add(bytes);
@@ -278,7 +276,7 @@ namespace V2XController
                                         }
                                         catch { }
                                     }
-                                    // Analyze field 20
+                                    // Analyze field 20 (intersection_request vs intersection_pass_request_status)
                                     else if (fieldNumber == 20)
                                     {
                                         field20Data.Add(bytes);
@@ -293,37 +291,6 @@ namespace V2XController
                                                 int innerFieldNumber = (int)(innerTag >> 3);
                                                 int innerWireType = (int)(innerTag & 0x7);
                                                 field20InnerFieldNumbers.Add(innerFieldNumber);
-
-                                                switch (innerWireType)
-                                                {
-                                                    case 0: TryReadVarint(bytes, ref innerPos, out _); break;
-                                                    case 1: innerPos += 8; break;
-                                                    case 2:
-                                                        if (TryReadVarint(bytes, ref innerPos, out ulong innerLen))
-                                                            innerPos += (int)innerLen;
-                                                        break;
-                                                    case 5: innerPos += 4; break;
-                                                    default: innerPos = bytes.Length; break;
-                                                }
-                                            }
-                                        }
-                                        catch { }
-                                    }
-                                    // NEW: Analyze field 30
-                                    else if (fieldNumber == 30)
-                                    {
-                                        field30Data.Add(bytes);
-                                        int innerPos = 0;
-                                        try
-                                        {
-                                            while (innerPos < bytes.Length)
-                                            {
-                                                if (!TryReadVarint(bytes, ref innerPos, out ulong innerTag))
-                                                    break;
-
-                                                int innerFieldNumber = (int)(innerTag >> 3);
-                                                int innerWireType = (int)(innerTag & 0x7);
-                                                field30InnerFieldNumbers.Add(innerFieldNumber);
 
                                                 switch (innerWireType)
                                                 {
@@ -362,50 +329,21 @@ namespace V2XController
                 Console.WriteLine($"[DETECT] Field 10 inner: {string.Join(", ", field10InnerFieldNumbers.OrderBy(x => x))}");
             if (field20InnerFieldNumbers.Count > 0)
                 Console.WriteLine($"[DETECT] Field 20 inner: {string.Join(", ", field20InnerFieldNumbers.OrderBy(x => x))}");
-            if (field30InnerFieldNumbers.Count > 0)
-                Console.WriteLine($"[DETECT] Field 30 inner: {string.Join(", ", field30InnerFieldNumbers.OrderBy(x => x))}");
 
-            // **UPDATED DECISION LOGIC**
+            // **DECISION LOGIC**
 
-            // 1. Field 30 disambiguation: Heartbeat vs EmptyResponse
-            if (fieldNumbers.Contains(30))
+            // 1. Heartbeat (field 30)
+            if (fieldNumbers.Contains(30) && !fieldNumbers.Contains(10) && !fieldNumbers.Contains(20))
             {
-                // Check field 30 content
-                bool field30IsEmpty = field30Data.Count > 0 && field30Data[0].Length == 0;
-                bool field30HasInnerFields = field30InnerFieldNumbers.Count > 0;
-
-                // EmptyResponse má typicky prázdný obsah nebo jen několik základních polí
-                // Heartbeat má obvykle timestamp (field 1) a další data
-                bool looksLikeEmptyResponse = field30IsEmpty ||
-                    (field30InnerFieldNumbers.Count == 0) ||
-                    (field30InnerFieldNumbers.Count <= 2 && !field30InnerFieldNumbers.Contains(1));
-
-                bool looksLikeHeartbeat = field30HasInnerFields &&
-                    (field30InnerFieldNumbers.Contains(1) || field30InnerFieldNumbers.Count > 2);
-
-                // If only field 30 + metadata fields (1, 2, 5), decide based on content
-                if (!fieldNumbers.Contains(10) && !fieldNumbers.Contains(20))
+                if (_compiledMessages.TryGetValue("RsuToControllerMessageData", out var rsuMsg))
                 {
-                    if (looksLikeEmptyResponse)
-                    {
-                        if (_compiledMessages.TryGetValue("ControllerToRsuMessageData", out var ctrlMsg))
-                        {
-                            Console.WriteLine("→ ControllerToRsuMessageData (field 30 = empty_response)");
-                            return ctrlMsg;
-                        }
-                    }
-                    else if (looksLikeHeartbeat)
-                    {
-                        if (_compiledMessages.TryGetValue("RsuToControllerMessageData", out var rsuMsg))
-                        {
-                            Console.WriteLine("→ RsuToControllerMessageData (field 30 = heartbeat)");
-                            return rsuMsg;
-                        }
-                    }
+                    Console.WriteLine("→ RsuToControllerMessageData (field 30 = heartbeat)");
+                    return rsuMsg;
                 }
             }
 
             // 2. IntersectionPassRequest (field 20 in RsuToController)
+            //    Has fields like: request_id(1), intersection_id(2), request_type(10), request_timing(30), request_direction(40), requestor_info(50)
             if (fieldNumbers.Contains(20) && field20InnerFieldNumbers.Count > 0)
             {
                 bool hasRequestId = field20InnerFieldNumbers.Contains(1);
@@ -425,6 +363,7 @@ namespace V2XController
 
                 // IntersectionPassRequestStatus má: request_id(1), intersection_id(2), status(10), direction(30)
                 bool hasStatus = field20InnerFieldNumbers.Contains(10);
+                bool hasDirection = field20InnerFieldNumbers.Contains(30);
 
                 if ((hasRequestId || hasIntersectionId) && hasStatus && !hasRequestorInfo)
                 {
@@ -491,7 +430,6 @@ namespace V2XController
                         if (testDecode.ContainsKey("intersection_pass_request_status")) score += 15;
                         if (testDecode.ContainsKey("intersection_request")) score += 15;
                         if (testDecode.ContainsKey("heartbeat")) score += 15;
-                        if (testDecode.ContainsKey("empty_response")) score += 15;
 
                         if (score > bestScore)
                         {
@@ -1674,6 +1612,7 @@ namespace V2XController
 
                 foreach (var field in fields)
                 {
+                    // Ensure we always assign 'value' and handle missing jsonObject safely
                     object? value = null;
                     bool found = false;
 
@@ -1697,43 +1636,13 @@ namespace V2XController
                     }
 
                     Console.WriteLine($"[ENCODE]   Field '{field?.Name}' (#{field?.Number}, type={field?.Type}) - value type: {value.GetType().Name}");
-
-                    // **NEW: Special handling for empty_response as empty object**
-                    if (field?.Name == "empty_response" && field?.Number == 30)
-                    {
-                        // Check if it's an empty object {}
-                        bool isEmpty = false;
-
-                        if (value is JsonElement je && je.ValueKind == JsonValueKind.Object)
-                        {
-                            isEmpty = !je.EnumerateObject().Any();
-                        }
-                        else if (value is Dictionary<string, object> dict)
-                        {
-                            isEmpty = dict.Count == 0;
-                        }
-
-                        if (isEmpty)
-                        {
-                            Console.WriteLine($"[ENCODE]     empty_response is empty object - encoding as field 30 with length 0");
-
-                            // Write tag for field 30 (length-delimited)
-                            ulong tag = ((ulong)30 << 3) | 2UL;
-                            WriteVarint(ms, tag);
-
-                            // Write length = 0 (empty message)
-                            WriteVarint(ms, 0);
-                            continue;
-                        }
-                    }
-
                     // Handle JsonElement
-                    if (value is JsonElement jeVal)
+                    if (value is JsonElement je)
                     {
-                        Console.WriteLine($"[ENCODE]     JsonElement.ValueKind = {jeVal.ValueKind}");
+                        Console.WriteLine($"[ENCODE]     JsonElement.ValueKind = {je.ValueKind}");
 
                         // Skip default/empty values EXCEPT for important fields
-                        if (IsDefaultOrEmptyValue(jeVal, field?.Type ?? ""))
+                        if (IsDefaultOrEmptyValue(je, field?.Type ?? ""))
                         {
                             bool isImportantField = (field?.Name?.Contains("id") == true) ||
                                                     (field?.Name?.Contains("crc") == true) ||
@@ -1753,22 +1662,22 @@ namespace V2XController
                             }
                         }
 
-                        if (field?.IsRepeated == true && jeVal.ValueKind == JsonValueKind.Array)
+                        if (field?.IsRepeated == true && je.ValueKind == JsonValueKind.Array)
                         {
-                            int arrayLen = jeVal.GetArrayLength();
+                            int arrayLen = je.GetArrayLength();
                             Console.WriteLine($"[ENCODE]     Repeated field, array length: {arrayLen}");
 
                             if (arrayLen == 0)
                                 continue;
 
-                            foreach (var item in jeVal.EnumerateArray())
+                            foreach (var item in je.EnumerateArray())
                             {
                                 WriteField(ms, field, item);
                             }
                         }
                         else
                         {
-                            WriteField(ms, field ?? throw new Exception("Field is null"), jeVal);
+                            WriteField(ms, field ?? throw new Exception("Field is null"), je);
                         }
                     }
                     else

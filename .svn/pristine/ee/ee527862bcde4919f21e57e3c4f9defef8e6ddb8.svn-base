@@ -1,6 +1,4 @@
-﻿using Google.Protobuf.WellKnownTypes;
-using System.Collections.Concurrent;
-using System.Collections.Generic;
+﻿using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
 using System.Collections.Specialized;
 using System.ComponentModel;
@@ -8,7 +6,6 @@ using System.Globalization;
 using System.IO;
 using System.IO.Ports;
 using System.Net.Http;
-using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Windows;
@@ -22,6 +19,7 @@ using System.Windows.Shapes;
 using System.Windows.Threading;
 using System.Xml;
 using System.Xml.Linq;
+using System.Runtime.InteropServices;
 
 
 /**********************************************************************************************************
@@ -41,34 +39,6 @@ using System.Xml.Linq;
 
 
 //TODO: Polyline
-
-/* Budoucí rozšíření: stav návěstidla / SPATEM + MAPEM
- * 
- * V současné implementaci jsou zprávy SPATEM/MAPEM zpracovávány na straně RSU, takže aplikace zatím nepracuje přímo se stavem návěstidel ani s geometrií křižovatky.
- * 
- * Do budoucna by bylo možné přidat podporu pro:
- * - příjem a dekódování SPATEM zpráv,
- * - zobrazení aktuálního stavu návěstidla,
- * - čas do změny fáze,
- * - mapování signálních skupin na konkrétní pruhy,
- * - příjem MAPEM geometrie křižovatky,
- * - vykreslení pruhů, stop čar a povolených směrů do mapy.
- * 
- * Smysl by to mělo hlavně pro vizualizaci křižovatek, diagnostiku RSU a zpětné přehrávání dopravních situací.
- *
- * FEATURE: Vizualizace stavů návěstidel z V2X zpráv
- *
- * Priorita: nízká / budoucí rozšíření
- *
- * Popis:
- * Aplikace by mohla v budoucnu zobrazovat stav návěstidla na základě SPATEM zpráv a napojit jej na geometrii křižovatky z MAPEM zpráv.
- *
- * Aktuální stav:
- * SPATEM/MAPEM zprávy řeší RSU, aplikace je zatím nepřijímá ani nedekóduje.
- *
- * Přínos:
- * Lepší diagnostika RSU, vizualizace signálních skupin, možnost replaye dopravních scén.
- */
 
 namespace V2XController
 {
@@ -102,8 +72,6 @@ namespace V2XController
         private readonly List<string> _recentLocalWrites = new();
         private readonly object _recentLocalWritesLock = new();
         private const int RecentLocalWritesMax = 16;
-
-        private const int MaxCachedTiles = 2000;
 
         //tram table
         public ObservableCollection<TramInfo> TramTable { get; set; }
@@ -228,13 +196,11 @@ namespace V2XController
             "Zoom: MWheel",
             "Pan: Press MWhell (MB3)",
             "Draw: LMB",
-            "Move objects: hold RMB",
-            "Delete objects: hold RMB + Del",
+            "Move objects: RMB",
+            "Delete objects: RMB + Del",
             "Stop drawing: ESC",
             "Undo: Ctrl + Z",
-            "Redo: Ctrl + Y",
-            "Rotate selected rectangle clockwise: hold RMB + E",
-            "Rotate selected rectangle counterclockwise: hold RMB + Q"
+            "Redo: Ctrl + Y"
         };
         private string ControlsMessage => string.Join(" \n", controls);
 
@@ -312,12 +278,8 @@ namespace V2XController
 
 
         private List<TimeSpan> _keyframes = new();
-        
         private int _playbackIndex = 0;
 
-
-        
-        private readonly Dictionary<ActivationZone, DispatcherTimer> _zoneDeactivateTimers = new();
 
         // debounce zoom preview
         private DispatcherTimer _zoomDebounceTimer;
@@ -358,7 +320,6 @@ namespace V2XController
         private bool isReplaySliderDragging = false;
         private bool wasPlayingBeforeReplayDrag = false;
 
-        private readonly Dictionary<Rectangle, ScaleTransform> _rectHighlightScales = new();
         private Rectangle? _highlightedRect;
         private Brush? _highlightedRectOldBrush;
         private double _highlightedRectOldThickness;
@@ -431,6 +392,7 @@ namespace V2XController
 
         public List<Stop> stops = new List<Stop>();
 
+        private TerminalWindow? _terminalWindow;
         private readonly List<(string text, Brush color)> _terminalBuffer = new();
         private readonly Dictionary<string, Stop?> _vehCurrentStop = new(); // current stop per vehicle (null = none)
         private const double StopRadiusMeters = 25.0;
@@ -496,18 +458,6 @@ namespace V2XController
         private int _polylineCommittedPointsCount = 0;
         private readonly Dictionary<Polyline, List<System.Windows.Shapes.Line>> _polylineDirectionArrows = new Dictionary<Polyline, List<System.Windows.Shapes.Line>>();
 
-        private DispatcherTimer? _protobufTestTimer;
-        private bool _protobufTestRunning = false;
-        private double _protobufTestLatOffset = 0.0;
-        private bool _protobufTestDirection = true; // true = increasing, false = decreasing
-        private string _protobufTestDecoded = ""; // Uložená dekódovaná zpráva
-
-        private readonly Dictionary<Rectangle, Polygon> _zoneArrows = new Dictionary<Rectangle, Polygon>();
-        private readonly Dictionary<string, HashSet<ActivationZone>> _vehicleActiveZones = new();
-
-
-        private Transform? _highlightedRectOldTransform;
-
 
         private ProtobufWindow? _protobufWindow;
 
@@ -535,12 +485,12 @@ namespace V2XController
             previewRect = new Polygon();
             startPointEllipse = new Ellipse();
             secondPointEllipse = new Ellipse();
-            currentPolyline = null;
-            playbackTimer = null;
+            currentPolyline = new Polyline();
+            playbackTimer = new DispatcherTimer();
             radiusEllipse = new Ellipse();
             loadedFileName = string.Empty;
-            _srvTimer = null;
-            _zoomDebounceTimer = null;
+            _srvTimer = new DispatcherTimer();
+            _zoomDebounceTimer = new DispatcherTimer();
             _pendingNewZone = new ActivationZone();
             _lastReplayFile = string.Empty;
             _timeshiftUiTimer = new DispatcherTimer();
@@ -548,6 +498,7 @@ namespace V2XController
             _highlightedRect = new Rectangle();
             _highlightedRectOldBrush = Brushes.Transparent;
             _pendingNewSwitchZone = new ActivationZone();
+            _terminalWindow = new TerminalWindow();
 
 #if DEBUG
             AllocConsole();
@@ -1000,7 +951,7 @@ namespace V2XController
         }
 
         /// <summary>
-        /// Fetches a map tile asynchronously, memory safe.
+        /// Fetches a map tile asynchronously.
         /// </summary>
         /// <param name="z">Zoom level</param>
         /// <param name="x">Tile X coordinate</param>
@@ -1009,8 +960,6 @@ namespace V2XController
         /// <returns>BitmapSource of the tile or null if fetch failed</returns>
         private async Task<BitmapSource?> FetchTileAsync(int z, int x, int y, CancellationToken ct)
         {
-            // formula for all tiles is 2^Z * 2^Z where Z is the zoom level
-
             if (_tileCache.TryGetValue((z, x, y), out var cached))
                 return cached;
 
@@ -1032,8 +981,7 @@ namespace V2XController
                 bmp.EndInit();
                 bmp.Freeze(); // cross-thread safe
 
-                AddToCache((z, x, y), bmp);
-
+                _tileCache[(z, x, y)] = bmp;
                 return bmp;
             }
             catch (OperationCanceledException)
@@ -1044,44 +992,6 @@ namespace V2XController
             {
                 Console.WriteLine($"Tile fetch failed {url}: {ex.Message}");
                 return null; // draw nothing for this tile
-            }
-        }
-
-
-        /// <summary>
-        /// Adds tiles to cache and ensures the cache size is under control by trimming old entries if necessary.
-        /// </summary>
-        /// <param name="key">The key of the tile (zoom, x, y).</param>
-        /// <param name="bmp">The BitmapSource of the tile.</param>
-        private void AddToCache((int z, int x, int y) key, BitmapSource bmp)
-        {
-            if (_tileCache.Count > MaxCachedTiles)
-            {
-                _tileCache.Clear();
-            }
-
-            _tileCache[key] = bmp;
-        }
-
-
-        /// <summary>
-        /// Memory safe tile trimming: removes tiles that are not in the current view and keeps cache size under control.
-        /// </summary>
-        /// <param name="currentTiles">Set of tiles that are currently in view and should be kept in the cache.</param>
-        private void TrimTileCache(HashSet<(int z, int x, int y)> currentTiles)
-        {
-            const int MaxCachedTiles = 2000;
-
-            if (_tileCache.Count <= MaxCachedTiles)
-                return;
-
-            var keysToRemove = _tileCache.Keys
-                .Where(key => !currentTiles.Contains(key))
-                .ToList();
-
-            foreach (var key in keysToRemove)
-            {
-                _tileCache.TryRemove(key, out _);
             }
         }
 
@@ -1102,7 +1012,7 @@ namespace V2XController
             };
 
             // fade-in
-            var fade = new DoubleAnimation(0.0, 1.0, new System.Windows.Duration(TimeSpan.FromMilliseconds(250)))
+            var fade = new DoubleAnimation(0.0, 1.0, new Duration(TimeSpan.FromMilliseconds(250)))
             {
                 EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut }
             };
@@ -1370,13 +1280,9 @@ namespace V2XController
         private void Window_MouseWheel(object sender, MouseWheelEventArgs e)
         {
             int delta = e.Delta > 0 ? 1 : -1;
-            int newZoom = Math.Clamp(zoom + delta, 3, 18);
+            int newZoom = Math.Clamp(zoom + delta, 1, 18);
 
-            if (newZoom == zoom)
-            {
-                Console.WriteLine($"[ZOOM] Already at limit: {zoom}");
-                return; // Už jsme na limitu
-            }
+            if (newZoom == zoom) return; // Už jsme na limitu
 
             _pendingZoom = newZoom;
 
@@ -1388,117 +1294,73 @@ namespace V2XController
             scale.ScaleX = previewScale;
             scale.ScaleY = previewScale;
 
-            Console.WriteLine($"[ZOOM] Wheel event: {zoom} → {_pendingZoom}, scale: {previewScale:F2}");
+            if (_zoomDebounceTimer == null)
+            {
+                _zoomDebounceTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(350) };
+                _zoomDebounceTimer.Tick += async (s, ev) =>
+                {
+                    _zoomDebounceTimer.Stop();
 
-            // Vždy znovu vytvořit timer, aby se zajistilo, že funguje
-            if (_zoomDebounceTimer != null)
+                    int oldZoom = zoom;
+
+                    double worldMouseX = cameraX + _lastWheelPos.X;
+                    double worldMouseY = cameraY + _lastWheelPos.Y;
+
+                    double oldTileMouseX = worldMouseX / TileSize;
+                    double oldTileMouseY = worldMouseY / TileSize;
+
+                    double mouseLatLon_lon = TileXToLon(oldTileMouseX, oldZoom);
+                    double mouseLatLon_lat = TileYToLat(oldTileMouseY, oldZoom);
+
+                    zoom = _pendingZoom;
+                    scale.ScaleX = 1;
+                    scale.ScaleY = 1;
+
+                    double newTileMouseX = LonToTileX(mouseLatLon_lon, zoom);
+                    double newTileMouseY = LatToTileY(mouseLatLon_lat, zoom);
+
+                    int newCameraX = (int)Math.Round(newTileMouseX * TileSize - _lastWheelPos.X);
+                    int newCameraY = (int)Math.Round(newTileMouseY * TileSize - _lastWheelPos.Y);
+
+                    int startX = (int)Math.Floor((double)newCameraX / TileSize);
+                    int startY = (int)Math.Floor((double)newCameraY / TileSize);
+
+                    double offsetX = newCameraX - (startX * TileSize);
+                    double offsetY = newCameraY - (startY * TileSize);
+
+                    await LoadTilesSmoothAsync(startX, startY, offsetX, offsetY);
+
+                    double centerWorldX = cameraX + TileCanvas.ActualWidth / 2.0;
+                    double centerWorldY = cameraY + TileCanvas.ActualHeight / 2.0;
+
+                    double centerTileX = centerWorldX / TileSize;
+                    double centerTileY = centerWorldY / TileSize;
+
+                    longitude = TileXToLon(centerTileX, zoom);
+                    latitude = TileYToLat(centerTileY, zoom);
+
+                    UpdateCenterTextBoxesFromFields();
+
+                    _ = EnsureLocalAreaAltitudeAsync(force: true);
+
+                    ResetAllTramTrails();
+                    ReprojectActiveVehiclesOnMapChange();
+                    ReprojectReplayOnMapChange();
+                    DrawRadiusCircle();
+
+                    if (lastV2XMessage != null)
+                    {
+                        UpdateVehicleTrail(lastV2XMessage);
+                    }
+                };
+            }
+            else
             {
                 _zoomDebounceTimer.Stop();
-                _zoomDebounceTimer.Tick -= OnZoomDebounceTimerTick; // Odpojit starý handler
             }
-
-            _zoomDebounceTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(40) };
-            _zoomDebounceTimer.Tick += OnZoomDebounceTimerTick;
+            Console.WriteLine("[ZOOM] Current zoom: " + _pendingZoom);
             _zoomDebounceTimer.Start();
-
-            Console.WriteLine($"[ZOOM] Timer started");
             e.Handled = true;
-        }
-
-        /// <summary>
-        /// Handler pro zoom debounce timer - oddělený pro lepší správu
-        /// </summary>
-        private async void OnZoomDebounceTimerTick(object? sender, EventArgs e)
-        {
-            if (_zoomDebounceTimer == null) return;
-
-            _zoomDebounceTimer.Stop();
-            _zoomDebounceTimer.Tick -= OnZoomDebounceTimerTick;
-
-            int oldZoom = zoom;
-            Console.WriteLine($"[ZOOM] Timer fired: processing zoom {oldZoom} → {_pendingZoom}");
-
-            try
-            {
-                double worldMouseX = cameraX + _lastWheelPos.X;
-                double worldMouseY = cameraY + _lastWheelPos.Y;
-
-                double oldTileMouseX = worldMouseX / TileSize;
-                double oldTileMouseY = worldMouseY / TileSize;
-
-                double mouseLatLon_lon = TileXToLon(oldTileMouseX, oldZoom);
-                double mouseLatLon_lat = TileYToLat(oldTileMouseY, oldZoom);
-
-                zoom = _pendingZoom;
-
-                // KRITICKÉ: Reset scale transform PŘED načítáním nových dlaždic
-                scale.ScaleX = 1;
-                scale.ScaleY = 1;
-
-                Console.WriteLine($"[ZOOM] Scale reset to 1.0, new zoom level: {zoom}");
-
-                // Vyčistit všechny staré dlaždice
-                var oldTiles = TileCanvas.Children
-                    .OfType<Image>()
-                    .Where(img => img.Tag is ValueTuple<int, int, int>)
-                    .ToList();
-
-                foreach (var tile in oldTiles)
-                {
-                    TileCanvas.Children.Remove(tile);
-                }
-                Console.WriteLine($"[ZOOM] Removed {oldTiles.Count} old tiles");
-
-                double newTileMouseX = LonToTileX(mouseLatLon_lon, zoom);
-                double newTileMouseY = LatToTileY(mouseLatLon_lat, zoom);
-
-                int newCameraX = (int)Math.Round(newTileMouseX * TileSize - _lastWheelPos.X);
-                int newCameraY = (int)Math.Round(newTileMouseY * TileSize - _lastWheelPos.Y);
-
-                int startX = (int)Math.Floor((double)newCameraX / TileSize);
-                int startY = (int)Math.Floor((double)newCameraY / TileSize);
-
-                double offsetX = newCameraX - (startX * TileSize);
-                double offsetY = newCameraY - (startY * TileSize);
-
-                Console.WriteLine($"[ZOOM] Loading tiles at ({startX}, {startY}) with offset ({offsetX:F1}, {offsetY:F1})");
-
-                await LoadTilesSmoothAsync(startX, startY, offsetX, offsetY);
-
-                double centerWorldX = cameraX + TileCanvas.ActualWidth / 2.0;
-                double centerWorldY = cameraY + TileCanvas.ActualHeight / 2.0;
-
-                double centerTileX = centerWorldX / TileSize;
-                double centerTileY = centerWorldY / TileSize;
-
-                longitude = TileXToLon(centerTileX, zoom);
-                latitude = TileYToLat(centerTileY, zoom);
-
-                UpdateCenterTextBoxesFromFields();
-
-                _ = EnsureLocalAreaAltitudeAsync(force: true);
-
-                ResetAllTramTrails();
-                ReprojectActivationZonesOnMapChange();
-                ReprojectActiveVehiclesOnMapChange();
-                ReprojectReplayOnMapChange();
-                DrawRadiusCircle();
-
-                if (lastV2XMessage != null)
-                {
-                    UpdateVehicleTrail(lastV2XMessage);
-                }
-
-                Console.WriteLine($"[ZOOM] ✓ Complete: {oldZoom} → {zoom}");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[ZOOM] ERROR: {ex.Message}");
-                // V případě chyby obnovit zoom na původní hodnotu
-                zoom = oldZoom;
-                scale.ScaleX = 1;
-                scale.ScaleY = 1;
-            }
         }
 
         /// <summary>
@@ -1510,14 +1372,13 @@ namespace V2XController
         {
             if (e.ChangedButton == MouseButton.Middle)
             {
-                Console.WriteLine("[MMB] PreviewMouseDown - setting flags");
                 isDragging = true;
-                isMiddleMousePanning = true;
                 lastMousePos = e.GetPosition(TileCanvas);
                 TileCanvas.CaptureMouse();
                 e.Handled = true;
             }
         }
+
 
         /// <summary>
         /// Handles panning on the map when the middle mouse button is held down and the mouse is moved.
@@ -1661,34 +1522,31 @@ namespace V2XController
                     bool hasContinuation = (_polylineCommittedPointsCount > 0 && poly == currentPolyline);
                     bool hasTableSegments = (_polylineToSegmentZones.ContainsKey(poly) && _polylineToSegmentZones[poly].Count > 0);
 
-                    // Při aktivním kreslení synchronizovat poly.Points s potvrzenými body (bez preview bodu)
-                    if (isActiveDrawing)
-                    {
-                        poly.Points.Clear();
-                        foreach (var pt in rebuildPoints)
-                            poly.Points.Add(pt);
-                    }
-
                     if (isActiveDrawing && hasContinuation && hasTableSegments)
                     {
                         // Pokračování v existující polyline - použít variable widths
                         Console.WriteLine($"[UPDATE POS] Rebuilding with VARIABLE widths (continuation, committed={_polylineCommittedPointsCount})");
                         RebuildPolylineZoneWithVariableWidths(poly, rebuildPoints);
-                        UpdatePolylineDirectionArrows(poly, rebuildPoints);
+                        RebuildPolylineZoneWithVariableWidths(poly, poly.Points.ToList());
+                        UpdatePolylineDirectionArrows(poly, poly.Points.ToList());
                     }
                     else if (!isActiveDrawing && hasTableSegments)
                     {
                         // Finalizovaná polyline s table segments
                         Console.WriteLine($"[UPDATE POS] Rebuilding with VARIABLE widths (finalized)");
                         RebuildPolylineZoneWithVariableWidths(poly, rebuildPoints);
-                        UpdatePolylineDirectionArrows(poly, rebuildPoints);
+                        RebuildPolylineZoneWithVariableWidths(poly, poly.Points.ToList());
+                        UpdatePolylineDirectionArrows(poly, poly.Points.ToList());
+
                     }
                     else
                     {
                         // Nová polyline nebo bez table segments - uniform width
                         Console.WriteLine($"[UPDATE POS] Rebuilding with UNIFORM width");
                         RebuildPolylineZone(poly, rebuildPoints, halfWidthPx);
-                        UpdatePolylineDirectionArrows(poly, rebuildPoints);
+                        RebuildPolylineZone(poly, poly.Points.ToList(), halfWidthPx);
+                        UpdatePolylineDirectionArrows(poly, poly.Points.ToList());
+
                     }
 
                     // Sync _currentPolylineSegments
@@ -1703,7 +1561,7 @@ namespace V2XController
         }
 
         /// <summary>
-        /// Gets committed polyline points on polyline vertices for a given polyline. 
+        /// Gets commited polyline points on polyline verticies for a given polyline. 
         /// If currently drawing this polyline, excludes the last point which is the 
         /// "preview" point following the mouse.
         /// </summary>
@@ -1762,7 +1620,6 @@ namespace V2XController
                 zone.StartPoint = new Point(sx, sy);
 
                 UpdateRectanglePositionFromStartPoint(zone);
-                try { EnsureZoneArrow(zone); } catch { }
             }
         }
 
@@ -2092,8 +1949,6 @@ namespace V2XController
                 zone.StartPoint = new Point(sx, sy);
 
                 UpdateRectanglePositionFromStartPoint(zone);
-
-                try { EnsureZoneArrow(zone); } catch { }
             }
         }
 
@@ -2232,8 +2087,7 @@ namespace V2XController
                 TileCanvas.Children.Remove(tile);
             }
 
-            TrimTileCache(currentTiles);
-
+            // DON'T call UpdateOverlayPositions here - it's called in UpdateAllOverlaysLive
         }
 
         /// <summary>
@@ -2432,48 +2286,6 @@ namespace V2XController
                 }
             }
 
-            // ✅ Move zone arrows - changed from simple move to recalculation
-            // This ensures arrows stay correctly positioned and scaled
-            foreach (var kvp in activationZones.ToArray())
-            {
-                try
-                {
-                    // Update zone StartPoint for panning
-                    var zone = kvp.Value;
-                    if (zone?.Rectangle != null)
-                    {
-                        double left = Canvas.GetLeft(zone.Rectangle);
-                        double top = Canvas.GetTop(zone.Rectangle);
-                        zone.StartPoint = new Point(
-                            left + zone.Rectangle.Width / 2.0,
-                            top + zone.Rectangle.Height
-                        );
-                        EnsureZoneArrow(zone);
-                    }
-                }
-                catch { }
-            }
-
-            // Also update switch zones arrows
-            foreach (var kvp in switchZones.ToArray())
-            {
-                try
-                {
-                    var zone = kvp.Value;
-                    if (zone?.Rectangle != null)
-                    {
-                        double left = Canvas.GetLeft(zone.Rectangle);
-                        double top = Canvas.GetTop(zone.Rectangle);
-                        zone.StartPoint = new Point(
-                            left + zone.Rectangle.Width / 2.0,
-                            top + zone.Rectangle.Height
-                        );
-                        EnsureZoneArrow(zone);
-                    }
-                }
-                catch { }
-            }
-
             // Move dimension text block if visible
             if (dimensionTextBlock != null && dimensionTextBlock.Visibility == Visibility.Visible)
             {
@@ -2522,7 +2334,7 @@ namespace V2XController
             }
         }
 
-            
+
         /// <summary>
         /// Handles the mouse up event on the tile canvas, committing any pan operations.
         /// </summary>
@@ -2870,12 +2682,6 @@ namespace V2XController
 
             if (currentDrawingMode == DrawingMode.Point)
             {
-                // OPRAVA 1: Kontrola MMB pro Point mode
-                if (e.MiddleButton == MouseButtonState.Pressed || isMiddleMousePanning)
-                {
-                    return;
-                }
-
                 e.Handled = true;
                 isDrawing = true;
                 startPoint = pos;
@@ -3035,6 +2841,10 @@ namespace V2XController
                     var shortId = drawnTramIds[idx] != null && drawnTramIds[idx].Length > 4
                         ? drawnTramIds[idx][^4..]
                         : drawnTramIds[idx] ?? "-";
+                    Dispatcher.Invoke(() =>
+                    {
+                        TerminalLog($"MANUAL {shortId} lat={latitudeWgs:F6} lon={longitudeWgs:F6} spd={_manualCamSpeedKmh:F1}", Brushes.LightGreen);
+                    });
                 }
                 catch { /* ignore logging errors */ }
 
@@ -3058,12 +2868,6 @@ namespace V2XController
 
             if (currentDrawingMode == DrawingMode.Rectangle)
             {
-                // OPRAVA 1: Kontrola MMB pro Rectangle mode
-                if (e.MiddleButton == MouseButtonState.Pressed || isMiddleMousePanning)
-                {
-                    return;
-                }
-
                 // Capture target tab at the start of rectangle drawing
                 if (rectPhase == RectangleDrawPhase.None)
                 {
@@ -3333,12 +3137,6 @@ namespace V2XController
 
             if (currentDrawingMode == DrawingMode.Polyline)
             {
-                // OPRAVA 1: Kontrola MMB pro Polyline mode - MUSÍ být PŘED e.Handled = true
-                if (e.MiddleButton == MouseButtonState.Pressed || isMiddleMousePanning)
-                {
-                    return;
-                }
-
                 e.Handled = true;
                 var position = e.GetPosition(TileCanvas);
                 _isDrawingPolyline = true;
@@ -3550,10 +3348,11 @@ namespace V2XController
                 dot.MouseLeave += PolylineVertex_MouseLeave;
 
                 TileCanvas.Children.Add(dot);
-                Panel.SetZIndex(dot, 1000000);
+                Panel.SetZIndex(dot, 1000000); // OPRAVA: 1000 -> 1001 (nad polyline čarou)
                 polylineVertexDots.Add(dot);
 
                 _polylineVertexMap[dot] = (currentPolyline, polylinePoints.Count - 1);
+                //_polylineVertexToCircle[dot] = circle;
 
                 if (polylinePoints.Count >= 2)
                 {
@@ -3879,8 +3678,6 @@ namespace V2XController
 
             // rotation around base of the rectangle
             ApplyZoneRotation(zone);
-
-            try { EnsureZoneArrow(zone); } catch { }
         }
 
         /// <summary>
@@ -3891,15 +3688,6 @@ namespace V2XController
         private void TileCanvas_MouseMove(object sender, MouseEventArgs e)
         {
             var pos = e.GetPosition(TileCanvas);
-
-            // OPRAVA: Reset panning flag pokud MMB není stisknuto
-            if (isMiddleMousePanning && e.MiddleButton != MouseButtonState.Pressed)
-            {
-                Console.WriteLine("[MMB] MouseMove detected MMB released - clearing panning flag");
-                isMiddleMousePanning = false;
-                isDragging = false;
-                TileCanvas.ReleaseMouseCapture();
-            }
 
             if (_hoveredVertex != null && e.LeftButton == MouseButtonState.Released)
             {
@@ -4303,8 +4091,6 @@ namespace V2XController
                     var lonlat = CanvasPixelsToLatLon(baseCenter, latitude, longitude, zoom);
                     zone.Longitude = lonlat.X;
                     zone.Latitude = lonlat.Y;
-
-                    try { EnsureZoneArrow(zone); } catch { }
                 }
                 finally
                 {
@@ -4348,14 +4134,6 @@ namespace V2XController
                 }
 
                 // ignore Esc if not drawing
-                e.Handled = true;
-                return;
-            }
-
-            if (e.Key == Key.E || e.Key == Key.Q)
-            {
-                int delta = (e.Key == Key.E) ? 5 : -5;
-                RotateSelectedActivationZone(delta);
                 e.Handled = true;
                 return;
             }
@@ -5940,19 +5718,6 @@ namespace V2XController
                     _polylineGeoPoints.Remove(currentPolyline);
                 }
 
-                // OPRAVA 2: Smazat také směrové šipky při zrušení polyline
-                if (currentPolyline != null && _polylineDirectionArrows.ContainsKey(currentPolyline))
-                {
-                    var arrows = _polylineDirectionArrows[currentPolyline];
-                    foreach (var arrow in arrows)
-                    {
-                        if (TileCanvas.Children.Contains(arrow))
-                            TileCanvas.Children.Remove(arrow);
-                    }
-                    _polylineDirectionArrows.Remove(currentPolyline);
-                    Console.WriteLine("[POLYLINE] Removed direction arrows");
-                }
-
                 currentPolyline = null;
                 polylinePoints.Clear();
                 polylineVertexDots.Clear();
@@ -6034,40 +5799,15 @@ namespace V2XController
         /// </summary>
         /// <param name="sender">The source of the event.</param>
         /// <param name="e">The event data.</param>
-        private void Rectangle_MouseEnter(object? sender, MouseEventArgs e)
+        private void Rectangle_MouseEnter(object sender, MouseEventArgs e)
         {
-            if (sender is not Rectangle rect) return;
-            if (_highlightedRect == rect) return;
-
-            _highlightedRect = rect;
-            _highlightedRectOldBrush = rect.Stroke;
-            _highlightedRectOldThickness = rect.StrokeThickness;
-
-            var scale = new ScaleTransform(1.04, 1.04, rect.Width / 2.0, rect.Height / 2.0);
-            if (rect.RenderTransform is TransformGroup tg)
+            if (isSelectionMode)
             {
-                if (!_rectHighlightScales.TryGetValue(rect, out _))
+                if (sender is Rectangle rect)
                 {
-                    tg.Children.Insert(0, scale);
-                    _rectHighlightScales[rect] = scale;
+                    rect.StrokeThickness = 5;
                 }
             }
-            else
-            {
-                var newGroup = new TransformGroup();
-                newGroup.Children.Add(scale);
-                newGroup.Children.Add(rect.RenderTransform ?? Transform.Identity);
-                rect.RenderTransform = newGroup;
-                _rectHighlightScales[rect] = scale;
-            }
-
-            if (activationZones != null && activationZones.TryGetValue(rect, out var zone))
-            {
-                var brush = TryBrushFromColor(zone.Color) ?? Brushes.Gray;
-                rect.Stroke = MakeAlphaBrush((SolidColorBrush)brush, 210);
-            }
-
-            rect.StrokeThickness = Math.Max(1.0, rect.StrokeThickness) + 1.5;
         }
 
         /// <summary>
@@ -6075,34 +5815,15 @@ namespace V2XController
         /// </summary>
         /// <param name="sender">The source of the event.</param>
         /// <param name="e">The event data.</param>
-        private void Rectangle_MouseLeave(object? sender, MouseEventArgs e)
+        private void Rectangle_MouseLeave(object sender, MouseEventArgs e)
         {
-            if (sender is not Rectangle rect) return;
-            if (_highlightedRect != rect) return;
-
-            bool zoneIsActive = false;
-            if (activationZones.TryGetValue(rect, out var az))
-                zoneIsActive = az.IsActive;
-
-            rect.Stroke = _highlightedRectOldBrush ?? rect.Stroke;
-
-            rect.StrokeThickness = zoneIsActive ? 6 : _highlightedRectOldThickness;
-
-            if (rect.RenderTransform is TransformGroup tg && _rectHighlightScales.TryGetValue(rect, out var scale))
+            if (isSelectionMode)
             {
-                tg.Children.Remove(scale);
-
-                if (tg.Children.Count == 1)
-                    rect.RenderTransform = tg.Children[0];
-                else
-                    rect.RenderTransform = tg;
-
-                _rectHighlightScales.Remove(rect);
+                if (sender is Rectangle rect)
+                {
+                    rect.StrokeThickness = 2;
+                }
             }
-
-            _highlightedRect = null;
-            _highlightedRectOldBrush = null;
-            _highlightedRectOldThickness = 0;
         }
 
         /// <summary>
@@ -6242,16 +5963,28 @@ namespace V2XController
         {
             var now = DateTime.Now;
 
-            // Řádky z tabulky starší než TableRowTimeout — jen odebrat z tabulky, vizuály řeší třetí smyčka
             var toRemoveFromTable = TramTable
                 .Where(t => (now - t.LastMessageTimestamp)?.TotalSeconds > TableRowTimeout.TotalSeconds)
                 .ToList();
 
             foreach (var item in toRemoveFromTable)
             {
+                // keep drawn simulated trams exempt
                 if (drawnTramIds?.Any(id => id.EndsWith(item?.VehicleId ?? string.Empty)) == true)
                     continue;
 
+                // find the full vehicle ID in activeVehicles by suffix match
+                var fullId = activeVehicles.Keys.FirstOrDefault(k => k.EndsWith(item?.VehicleId ?? string.Empty));
+                if (fullId != null && activeVehicles.TryGetValue(fullId, out var vehicle))
+                {
+                    // Remove immediately after 30 seconds (no gradual cleanup)
+                    RemoveVehicleCompletely(fullId, vehicle);
+                    TramTable.Remove(item);
+                    Console.WriteLine("[VEHICLE] Removed vehicle: " + fullId);
+                    continue;
+                }
+
+                // No visual exists anymore – remove the row
                 TramTable.Remove(item);
             }
 
@@ -6263,18 +5996,25 @@ namespace V2XController
                 if (tram.IsRecorded)
                 {
                     if (isPlaying) continue;
-                    if ((now - tram.LastUpdate).TotalSeconds > 30)
-                        StartDrawnTramCleanup(i, tram);
+
+                    if ((now - tram.LastUpdate).TotalSeconds > 60)
+                    {
+                        RemoveDrawnTramCompletely(i, tram);
+                    }
                 }
                 else
                 {
-                    if ((now - tram.LastUpdate).TotalSeconds > 20)
-                        StartDrawnTramCleanup(i, tram);
+                    // Remove after 30 seconds
+                    if ((now - tram.LastUpdate).TotalSeconds > 30)
+                    {
+                        RemoveDrawnTramCompletely(i, tram);
+                    }
                 }
             }
 
+            // Remove live CAM vehicles after 30 seconds
             var toRemove = activeVehicles
-                .Where(kvp => (now - kvp.Value.LastUpdate).TotalSeconds > 10)
+                .Where(kvp => (now - kvp.Value.LastUpdate).TotalSeconds > 30)
                 .Select(kvp => kvp.Key)
                 .ToList();
 
@@ -6283,108 +6023,14 @@ namespace V2XController
                 if (!activeVehicles.TryGetValue(vehicleId, out var vehicle))
                     continue;
 
+                // Skip SRV (RSU) - they can stay longer
                 if (vehicle.Ellipse?.Tag?.ToString() == "Srv")
                     continue;
 
-                if (vehicleTrailCleanupTokens.ContainsKey(vehicleId))
-                    continue;
-
-                Console.WriteLine($"[VEHICLE] Starting gradual trail removal for {vehicleId}");
-
-                HideVehicleKeepTrail(vehicleId, vehicle);
-
-                var cts = new CancellationTokenSource();
-                vehicleTrailCleanupTokens[vehicleId] = cts;
-
-                _ = RemoveTrailGradually(vehicleId, vehicle, cts.Token);
+                // Remove completely (including trail)
+                RemoveVehicleCompletely(vehicleId, vehicle);
             }
         }
-
-        private void StartDrawnTramCleanup(int idx, MapPoint tram)
-        {
-            string key = $"drawn_{idx}_trail";
-
-            if (vehicleTrailCleanupTokens.ContainsKey(key))
-                return;
-
-            var cts = new CancellationTokenSource();
-            vehicleTrailCleanupTokens[key] = cts;
-
-            _ = RemoveDrawnTramTrailGradually(idx, tram, cts.Token);
-        }
-
-        private async Task RemoveDrawnTramTrailGradually(int idx, MapPoint tram, CancellationToken token)
-        {
-            string key = $"drawn_{idx}_trail";
-
-            try
-            {
-                while (true)
-                {
-                    bool hadTrail = false;
-
-                    Dispatcher.Invoke(() =>
-                    {
-                        var trail = drawnTramTrails[idx];
-
-                        if (trail != null && trail.Points.Count > 1)
-                        {
-                            trail.Points.RemoveAt(0);
-                            hadTrail = true;
-
-                            if (tram.TrailDots != null && tram.TrailDots.Count > 0)
-                            {
-                                var firstDot = tram.TrailDots[0];
-                                TileCanvas.Children.Remove(firstDot);
-                                tram.TrailDots.RemoveAt(0);
-                            }
-
-                            if (drawnTramTrailPoints[idx].Count > 0)
-                                drawnTramTrailPoints[idx].RemoveAt(0);
-
-                            if (drawnTramTrailGeoPoints[idx].Count > 0)
-                                drawnTramTrailGeoPoints[idx].RemoveAt(0);
-                        }
-                    });
-
-                    if (!hadTrail)
-                        break;
-
-                    await Task.Delay(1000, token); // 1 sekunda mezi mazáním bodů
-                }
-
-                await Task.Delay(1000, token);
-
-                Dispatcher.Invoke(() =>
-                {
-                    if (tram.Ellipse != null)
-                        tram.Ellipse.Visibility = Visibility.Collapsed;
-
-                    if (tram.Text != null)
-                        tram.Text.Visibility = Visibility.Collapsed;
-
-                    if (tram.Speed != null)
-                        tram.Speed.Visibility = Visibility.Collapsed;
-
-                    string manualId = drawnTramIds[idx];
-
-                    if (_vehicleBoxes.TryGetValue(manualId, out var box))
-                        box.Visibility = Visibility.Collapsed;
-
-                    RemoveDrawnTramCompletely(idx, tram);
-
-                    vehicleTrailCleanupTokens.Remove(key);
-                });
-            }
-            catch (TaskCanceledException)
-            {
-                Dispatcher.Invoke(() =>
-                {
-                    vehicleTrailCleanupTokens.Remove(key);
-                });
-            }
-        }
-
 
         /// <summary>
         /// Removes a vehicle completely from the map and all associated data structures.
@@ -6464,30 +6110,6 @@ namespace V2XController
         }
 
         /// <summary>
-        /// Hides vehicle, cleans up trail
-        /// </summary>
-        private void HideVehicleKeepTrail(string vehicleId, MapPoint vehicle)
-        {
-            if (vehicle == null) return;
-
-            if (vehicle.Ellipse != null) vehicle.Ellipse.Visibility = Visibility.Collapsed;
-            if (vehicle.Text != null) vehicle.Text.Visibility = Visibility.Collapsed;
-            if (vehicle.Speed != null) vehicle.Speed.Visibility = Visibility.Collapsed;
-
-            if (_vehicleBoxes.TryGetValue(vehicleId, out var box))
-                box.Visibility = Visibility.Collapsed;
-
-            if (_liveAccuracyTextById.TryGetValue(vehicleId, out var accText))
-                accText.Visibility = Visibility.Collapsed;
-
-            var accCircles = TileCanvas.Children.OfType<Ellipse>()
-                .Where(e => e.Tag is string s && s == $"live_acc_{vehicleId}")
-                .ToList();
-            foreach (var circle in accCircles)
-                circle.Visibility = Visibility.Collapsed;
-        }
-
-        /// <summary>
         /// Removes a drawn tram completely from the map and all associated data structures.
         /// </summary>
         /// <param name="idx">The index of the drawn tram to remove.</param>
@@ -6556,21 +6178,20 @@ namespace V2XController
                     Dispatcher.Invoke(() =>
                     {
                         var trail = TileCanvas.Children.OfType<Polyline>()
-                            .FirstOrDefault(pl => pl.Tag != null && pl.Tag.ToString() == $"trail_{vehicleId}");
+                            .FirstOrDefault(pl => pl.Tag != null && pl.Tag.ToString() == $"tram_trail_{vehicleId}");
 
                         if (trail != null && trail.Points.Count > 1)
                         {
-                            trail.Points.RemoveAt(trail.Points.Count - 1);
+                            trail.Points.RemoveAt(0);
                             hadTrail = true;
 
                             if (vehicle.TrailDots != null && vehicle.TrailDots.Count > 0)
                             {
-                                var lastDot = vehicle.TrailDots[vehicle.TrailDots.Count - 1];
-                                TileCanvas.Children.Remove(lastDot);
-                                vehicle.TrailDots.RemoveAt(vehicle.TrailDots.Count - 1);
+                                TileCanvas.Children.Remove(vehicle.TrailDots[0]);
+                                vehicle.TrailDots.RemoveAt(0);
                             }
                         }
-                        else if (trail != null)
+                        else if (trail != null && trail.Points.Count == 1)
                         {
                             TileCanvas.Children.Remove(trail);
                             hadTrail = false;
@@ -6580,22 +6201,26 @@ namespace V2XController
                     if (!hadTrail)
                         break;
 
-                    await Task.Delay(300, token);
+                    await Task.Delay(2000, token); // remove one segment every 2s
                 }
 
+                // remove any remaining dots
                 Dispatcher.Invoke(() =>
                 {
-                    if (vehicle.TrailDots != null)
+                    if (vehicle.TrailDots != null && vehicle.TrailDots.Count > 0)
                     {
                         foreach (var dot in vehicle.TrailDots.ToList())
+                        {
                             TileCanvas.Children.Remove(dot);
+                        }
                         vehicle.TrailDots.Clear();
                     }
                 });
 
-                await Task.Delay(200, token);
+                // Extra 2s after last segment disappears before removing the last point/row
+                await Task.Delay(2000, token);
 
-                Dispatcher.Invoke(() => RemoveVehicleCompletely(vehicleId, vehicle));
+                RemoveVehicleCompletely(vehicleId, vehicle);
             }
             catch (TaskCanceledException)
             {
@@ -6603,7 +6228,74 @@ namespace V2XController
             }
         }
 
-        
+        /// <summary>
+        /// Gradually removes a drawn tram's trail from the map.
+        /// </summary>
+        /// <param name="idx">The index of the drawn tram whose trail is to be removed.</param>
+        /// <param name="tram">The tram object whose trail is to be removed.</param>
+        /// <param name="token">A cancellation token to cancel the operation.</param>
+        private async Task RemoveDrawnTramTrailGradually(int idx, MapPoint tram, CancellationToken token)
+        {
+            try
+            {
+                while (true)
+                {
+                    bool hadTrail = false;
+                    Dispatcher.Invoke(() =>
+                    {
+                        var trail = drawnTramTrails[idx];
+
+                        if (trail != null && trail.Points.Count > 1)
+                        {
+                            trail.Points.RemoveAt(0);
+                            hadTrail = true;
+
+                            if (tram.TrailDots != null && tram.TrailDots.Count > 0)
+                            {
+                                TileCanvas.Children.Remove(tram.TrailDots[0]);
+                                tram.TrailDots.RemoveAt(0);
+                            }
+                        }
+                        else if (trail != null)
+                        {
+                            // Remove any remaining short segment and stop
+                            TileCanvas.Children.Remove(trail);
+                            drawnTramTrails[idx] = null;
+                            hadTrail = false;
+                        }
+                    });
+
+                    if (!hadTrail)
+                        break;
+
+                    await Task.Delay(2000, token);
+                }
+
+                Dispatcher.Invoke(() =>
+                {
+                    if (tram.TrailDots != null && tram.TrailDots.Count > 0)
+                    {
+                        foreach (var dot in tram.TrailDots.ToList())
+                            TileCanvas.Children.Remove(dot);
+                        tram.TrailDots.Clear();
+                    }
+                });
+            }
+            catch (TaskCanceledException)
+            {
+                // ignore
+            }
+            finally
+            {
+                // Clear the token entry for this tram's trail cleanup
+                var key = $"drawn_{idx}_trail";
+                if (vehicleTrailCleanupTokens.TryGetValue(key, out var cts))
+                {
+                    vehicleTrailCleanupTokens.Remove(key);
+                    cts.Dispose();
+                }
+            }
+        }
 
         /// <summary>
         /// Adds an undo and redo action to the respective stacks.
@@ -7297,44 +6989,23 @@ namespace V2XController
 
                         if (string.IsNullOrWhiteSpace(rawLine)) continue;
 
-                        // =====================================================================
-                        // PROTOBUF MESSAGE DETECTION AND HANDLING
-                        // =====================================================================
                         if (IsProtobufMessage(rawLine))
                         {
                             Dispatcher.Invoke(() =>
                             {
-                                try
+                                if (ProtobufParser.TryDecodeProtobufFromHex(rawLine, out string decoded))
                                 {
-                                    // Try to decode the Protobuf message
-                                    if (ProtobufParser.TryDecodeProtobufFromHex(rawLine.Trim(), out string decoded))
-                                    {
-                                        // Successfully decoded - now handle it
-                                        HandleProtobufMessage(decoded);
-
-                                        // Log successful Protobuf reception
-                                        Console.WriteLine($"[PROTO] Received and decoded Protobuf message ({rawLine.Length} chars)", Brushes.Cyan);
-                                    }
-                                    else
-                                    {
-                                        // Failed to decode
-                                        Console.WriteLine($"[PROTO] Failed to decode Protobuf message", Brushes.Orange);
-                                        IncrementCamErrorCount();
-                                    }
+                                    TerminalLog($"PROTOBUF MESSAGE:", Brushes.Cyan);
+                                    TerminalLog(decoded, Brushes.LightCyan);
                                 }
-                                catch (Exception protoEx)
+                                else
                                 {
-                                    // Handle any exceptions during Protobuf processing
-                                    Console.WriteLine($"[PROTO] Error processing Protobuf: {protoEx.Message}", Brushes.Red);
-                                    IncrementCamErrorCount();
+                                    TerminalLog($"PROTOBUF (raw): {rawLine}", Brushes.Gray);
                                 }
                             });
                             continue;
                         }
 
-                        // =====================================================================
-                        // XML MESSAGE HANDLING (CAM/SRV)
-                        // =====================================================================
 
                         // do not mix with classic replay or timeshift catch-up rendering
                         if (_isPlaybackSessionActive || _isTimeshiftPlaybackActive) continue;
@@ -7346,6 +7017,7 @@ namespace V2XController
                         bool wasLocalEcho = false;
                         lock (_recentLocalWritesLock)
                         {
+                            // Try to remove one matching recent local write entry
                             int idx = _recentLocalWrites.FindIndex(s => s == rawXml);
                             if (idx >= 0)
                             {
@@ -7355,6 +7027,7 @@ namespace V2XController
                         }
                         if (wasLocalEcho)
                         {
+                            // ignore echo and continue reading loop
                             continue;
                         }
 
@@ -7372,29 +7045,36 @@ namespace V2XController
                                 {
                                     var shortId = string.IsNullOrEmpty(msg.VehicleID) ? "-" : (msg.VehicleID.Length > 4 ? msg.VehicleID[^4..] : msg.VehicleID);
                                     var crcTxt = valid ? "CRC OK" : "CRC ERR";
+                                    TerminalLog($"CAM {shortId} lat={msg.Latitude:F6} lon={msg.Longitude:F6} spd={msg.Speed:F1} hdg={msg.Heading:F0} [{crcTxt}]", Brushes.Beige);
                                     if (valid) IncrementCamOkCount();
                                     else
                                     {
                                         IncrementCamErrorCount();
+                                        TerminalLog($"ERROR: CAM CRC invalid for {shortId}", Brushes.Red);
                                     }
                                 });
                             }
                             else if (msg.MessageType == "SRV")
                             {
+                                // record SRV into timeshift buffer
                                 if (_timeshiftEnabled)
                                     recordedSrvMessages.Add(rawXml);
                             }
 
+                            // while paused: keep buffering (above) but suppress live rendering
                             if (_timeshiftEnabled && _timeshiftPaused)
                                 continue;
 
+                            // normal live rendering
                             Dispatcher.Invoke(() => HandleV2XMessage(msg, rawXml));
                         }
                         catch (Exception ex)
                         {
+                            // In the catch (Exception ex) of StartV2XListenerAsync receive loop, append:
                             Dispatcher.Invoke(() =>
                             {
                                 IncrementCamErrorCount();
+                                TerminalLog($"ERROR: Parse failed - {ex.Message}", Brushes.Red);
                             });
                         }
                     }
@@ -7512,6 +7192,12 @@ namespace V2XController
                             _lastLiveAccuracyById[msg.VehicleID] = accuracyMeters;
                         else
                             _lastLiveAccuracyById[msg.VehicleID] = null;
+                    }
+
+                    // Write parsed accuracy to terminal for live CAMs
+                    if (accuracyMeters > 0)
+                    {
+                        TerminalLog($"acc = {accuracyMeters:F1} m", Brushes.LightBlue);
                     }
                 }
                 catch
@@ -7742,11 +7428,15 @@ namespace V2XController
                         lastRecTime = local.ToString("HH:mm:ss");
 
                         var shortId = logicalId.Length > 4 ? logicalId[^4..] : logicalId;
+                        TerminalLog($"SRV {shortId} lat={srvMsg.Latitude:F6} lon={srvMsg.Longitude:F6}", Brushes.HotPink);
+                        if (!isValid)
+                            TerminalLog($"ERROR: SRV CRC invalid for {shortId}", Brushes.Red);
                     }
                 }
                 catch (Exception ex)
                 {
                     IncrementSrvErrorCount();
+                    TerminalLog($"ERROR: SRV parse failed - {ex.Message}", Brushes.Red);
                 }
 
                 if (isValid) IncrementSrvOkCount();
@@ -7919,7 +7609,6 @@ namespace V2XController
                     TrailGeoPoints = new List<(double lat, double lon)>() // Initialize geo trail
                 };
                 activeVehicles[msg.VehicleID] = vehicle;
-                vehicle.LastUpdate = DateTime.Now;
             }
 
             // Add geo coordinates to trail FIRST (before converting to canvas)
@@ -7975,7 +7664,6 @@ namespace V2XController
             }
 
             UpdateVehicleCanvasPosition(vehicle, new Point(x, y), tramColor, isSrv, msg.VehicleID, msg.Speed);
-            vehicle.LastUpdate = DateTime.Now;
 
             if (!isSrv)
             {
@@ -8224,86 +7912,38 @@ namespace V2XController
         /// <param name="vehicleId">The ID of the vehicle.</param>
         private void CheckActivationZones(Point pos, string vehicleId)
         {
+            // Use only last 4 digits for the table
             string shortId = string.IsNullOrEmpty(vehicleId) ? "-" :
                              (vehicleId.Length > 4 ? vehicleId[^4..] : vehicleId);
 
-            var nowInZones = new HashSet<ActivationZone>();
-
             foreach (var zone in activationZones.Values)
             {
+                // First check bounding box for quick rejection
                 if (!zone.Bounds.Contains(pos))
                     continue;
 
-                if (!IsPointInRotatedRectangle(pos, zone))
-                    continue;
-
-                nowInZones.Add(zone);
-            }
-
-            if (!_vehicleActiveZones.TryGetValue(vehicleId, out var previousZones))
-                previousZones = new HashSet<ActivationZone>();
-
-            foreach (var leftZone in previousZones)
-            {
-                if (nowInZones.Contains(leftZone))
-                    continue;
-
-                if (_zoneDeactivateTimers.TryGetValue(leftZone, out var t))
+                // Now check if point is actually inside the rotated rectangle
+                if (IsPointInRotatedRectangle(pos, zone))
                 {
-                    t.Stop();
-                    _zoneDeactivateTimers.Remove(leftZone);
-                }
-
-                leftZone.IsActive = false;
-                if (leftZone.Rectangle != null)
-                    leftZone.Rectangle.StrokeThickness = 2;
-            }
-
-            foreach (var zone in nowInZones)
-            {
-                zone.LastTramId = shortId;
-
-                if (!zone.IsActive)
-                {
+                    zone.LastTramId = shortId;
                     zone.IsActive = true;
+
+                    // always make the rectangle thicker when activated
                     if (zone.Rectangle != null)
                         zone.Rectangle.StrokeThickness = 6;
-                }
 
-                // Fallback timer pro případ že vozidlo zmizí z mapy bez další zprávy
-                if (_zoneDeactivateTimers.TryGetValue(zone, out var existing))
-                {
-                    existing.Stop();
-                    existing.Start();
-                }
-                else
-                {
-                    var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
+                    // timer for deactivation
+                    var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(0.5) };
                     timer.Tick += (s, e) =>
                     {
                         zone.IsActive = false;
                         if (zone.Rectangle != null)
                             zone.Rectangle.StrokeThickness = 2;
                         ((DispatcherTimer)s).Stop();
-                        _zoneDeactivateTimers.Remove(zone);
-
-                        // Vyčistit ze sledování
-                        if (_vehicleActiveZones.TryGetValue(vehicleId, out var vz))
-                            vz.Remove(zone);
                     };
-                    _zoneDeactivateTimers[zone] = timer;
                     timer.Start();
+                    break;
                 }
-            }
-
-            _vehicleActiveZones[vehicleId] = nowInZones;
-        
-        
-
-            // Placeholder
-            foreach (var poly in _polylineToSegmentZones.Values)
-            {
-                continue;
             }
         }
 
@@ -9275,15 +8915,11 @@ namespace V2XController
                     var latlon = CanvasPixelsToLatLon(baseCenterPoint, latitude, longitude, zoom);
                     zone.Latitude = latlon.Y;
                     zone.Longitude = latlon.X;
-
-                    try { EnsureZoneArrow(zone); } catch { }
                 }
                 else if (e.PropertyName == nameof(ActivationZone.Azimuth))
                 {
                     ApplyZoneRotation(zone);
                     UpdateActivationZoneBounds(zone);
-
-                    try { EnsureZoneArrow(zone); } catch { }
                 }
                 else if (e.PropertyName == nameof(ActivationZone.Color))
                 {
@@ -9292,8 +8928,6 @@ namespace V2XController
                         var brush = TryBrushFromColor(zone.Color) ?? Brushes.Red;
                         zone.Rectangle.Stroke = brush;
                         EmphasizeZoneWithOwnColor(zone, TimeSpan.FromMilliseconds(800));
-
-                        EnsureZoneArrow(zone);
                     }
                     catch { }
                 }
@@ -9305,8 +8939,6 @@ namespace V2XController
 
                     UpdateRectanglePositionFromStartPoint(zone);
                     UpdateActivationZoneBounds(zone);
-
-                    try { EnsureZoneArrow(zone); } catch { }
 
                     isDirty = true;
                 }
@@ -9723,51 +9355,7 @@ namespace V2XController
             double w = rect.Width;
             double h = rect.Height;
 
-            // If there's a TransformGroup and it contains a ScaleTransform (our hover), keep it and set/update the RotateTransform child.
-            if (rect.RenderTransform is TransformGroup tg)
-            {
-                // find scale (if any) and rotate (if any)
-                var scale = tg.Children.OfType<ScaleTransform>().FirstOrDefault();
-                var rotate = tg.Children.OfType<RotateTransform>().FirstOrDefault();
-
-                if (rotate != null)
-                {
-                    // update existing rotate transform
-                    rotate.Angle = zone.Azimuth;
-                    rotate.CenterX = w / 2.0;
-                    rotate.CenterY = h;
-                }
-                else
-                {
-                    // create new rotate and add it after scale (so rotate applies after scale)
-                    var newRotate = new RotateTransform(zone.Azimuth, w / 2.0, h);
-                    if (scale != null)
-                        tg.Children.Add(newRotate);
-                    else
-                    {
-                        // no scale present, insert at front (behaviour same as before)
-                        tg.Children.Add(newRotate);
-                    }
-                }
-
-                rect.RenderTransform = tg;
-                EnsureZoneArrow(zone);
-            }
-            else if (rect.RenderTransform is ScaleTransform existingScale)
-            {
-                // If there's only a ScaleTransform (unlikely) keep it and add rotate
-                var group = new TransformGroup();
-                group.Children.Add(existingScale);
-                group.Children.Add(new RotateTransform(zone.Azimuth, w / 2.0, h));
-                rect.RenderTransform = group;
-            }
-            else
-            {
-                // simple case - set rotate transform (no hover scale currently)
-                rect.RenderTransform = new RotateTransform(zone.Azimuth, w / 2.0, h);
-                EnsureZoneArrow(zone);
-            }
-            try { EnsureZoneArrow(zone); } catch { }
+            rect.RenderTransform = new RotateTransform(zone.Azimuth, w / 2.0, h);
         }
         //|||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
 
@@ -9971,22 +9559,6 @@ namespace V2XController
             Console.WriteLine("[POLYLINE] Polyline drawing mode activated");
             isSelectionMode = false;
             currentDrawingMode = DrawingMode.Polyline;
-            _isDrawingPolyline = true;
-
-            // OPRAVA: Vytvořit preview polyline hned při aktivaci mode
-            if (currentPolyline == null)
-            {
-                currentPolyline = new Polyline
-                {
-                    Stroke = _strokeBrush,
-                    StrokeThickness = 2,
-                    Fill = null,
-                    IsHitTestVisible = false // Preview je non-interactive
-                };
-                TileCanvas.Children.Add(currentPolyline);
-                Panel.SetZIndex(currentPolyline, 100);
-                Console.WriteLine("[POLYLINE] Created preview polyline");
-            }
 
             if (PolylineWidthPanel != null)
                 PolylineWidthPanel.Visibility = Visibility.Visible;
@@ -11171,11 +10743,6 @@ namespace V2XController
         {
             var elementsToRemove = new List<UIElement>();
 
-            foreach (var kv in _zoneArrows.ToArray())
-                if (TileCanvas.Children.Contains(kv.Value))
-                    TileCanvas.Children.Remove(kv.Value);
-            _zoneArrows.Clear();
-
             foreach (UIElement child in TileCanvas.Children)
             {
                 if (child is Rectangle || child is Polyline || child is Line)
@@ -11785,8 +11352,7 @@ namespace V2XController
             FilterCheckBox?.SetValue(IsEnabledProperty, _isConnected || _playbackLoaded);
             ExportButton?.SetValue(IsEnabledProperty, ActivationZonesCollection != null && ActivationZonesCollection.Count > 0);
             CircleCheckBox?.SetValue(IsEnabledProperty, _isConnected);
-            PrevCam?.SetValue(IsEnabledProperty, _playbackLoaded);
-            NextCam?.SetValue(IsEnabledProperty, _playbackLoaded);
+            TramTrailLengthTB?.SetValue(IsEnabledProperty, _isConnected);
         }
 
 
@@ -11854,7 +11420,7 @@ namespace V2XController
         /// <summary>
         /// Reprojects all zones if the map changes (panning, zooming, etc.)
         /// </summary>
-        public async Task  ReprojectAllZonesOnMapChange()
+        public async Task ReprojectAllZonesOnMapChange()
         {
             ReprojectActivationZonesOnMapChange();
             ReprojectSwitchZonesOnMapChange();
@@ -14263,6 +13829,66 @@ namespace V2XController
         public bool IsSwitchModeSelected => SwitchRadio?.IsChecked == true;
 
         // Replace OpenTerminal_Click body
+        private void OpenTerminal_Click(object sender, RoutedEventArgs e)
+        {
+            // Build header according to connected port state
+            string header;
+            if (serialPort != null && serialPort.IsOpen)
+                header = $"Debug terminal - {serialPort.PortName}";
+            else
+                header = "Debug terminal";
+
+            if (_terminalWindow == null)
+            {
+                _terminalWindow = new TerminalWindow { Owner = this };
+                _terminalWindow.Closed += (s, ev) => _terminalWindow = null;
+
+                // Remove any previous header-like entries from buffer to avoid duplicates
+                _terminalBuffer.RemoveAll(item => item.text.IndexOf("Debug terminal", StringComparison.OrdinalIgnoreCase) >= 0);
+
+                // Prepend header to buffer so it appears at the top when flushed
+                _terminalBuffer.Insert(0, (header, Brushes.LightGray));
+
+                // flush buffered lines into the new window
+                foreach (var (text, color) in _terminalBuffer)
+                    _terminalWindow.Append(text, color);
+
+                // set window title to show port when connected
+                _terminalWindow.Title = header;
+
+                _terminalWindow.Show();
+            }
+            else
+            {
+                // Update title every time terminal is (re)opened/activated
+                _terminalWindow.Title = header;
+
+                // append a short header line to indicate focus / current port
+                var headerLine = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {header}";
+                _terminalBuffer.Add((headerLine, Brushes.LightGray));
+                try { _terminalWindow.Append(headerLine, Brushes.LightGray); } catch { /* ignore UI append errors */ }
+
+                if (_terminalWindow.WindowState == WindowState.Minimized)
+                    _terminalWindow.WindowState = WindowState.Normal;
+                _terminalWindow.Activate();
+            }
+        }
+
+        private void TerminalLog(string text, Brush color)
+        {
+            string line = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {text}";
+
+            // buffer
+            _terminalBuffer.Add((line, color));
+            if (_terminalBuffer.Count > 2000)
+                _terminalBuffer.RemoveAt(0);
+
+            // live window
+            if (_terminalWindow != null)
+            {
+                try { _terminalWindow.Append(line, color); } catch { /* ignore */ }
+            }
+        }
 
         private static double HaversineMeters(double lat1, double lon1, double lat2, double lon2)
         {
@@ -14303,9 +13929,11 @@ namespace V2XController
                 if (current != null)
                 {
                     string prevName = string.IsNullOrWhiteSpace(current.StopName) ? "(bez názvu)" : current.StopName;
+                    TerminalLog($"DEPART: {cam.VehicleID[^Math.Min(4, cam.VehicleID.Length)..]} from {prevName}", Brushes.LimeGreen);
                 }
 
                 string name = string.IsNullOrWhiteSpace(nearest.StopName) ? "(bez názvu)" : nearest.StopName;
+                TerminalLog($"ARRIVE: {cam.VehicleID[^Math.Min(4, cam.VehicleID.Length)..]} at {name} ({best:F0} m)", Brushes.LimeGreen);
                 _vehCurrentStop[cam.VehicleID] = nearest;
                 return;
             }
@@ -14314,6 +13942,7 @@ namespace V2XController
             if (!insideNow && current != null)
             {
                 string name = string.IsNullOrWhiteSpace(current.StopName) ? "(bez názvu)" : current.StopName;
+                TerminalLog($"DEPART: {cam.VehicleID[^Math.Min(4, cam.VehicleID.Length)..]} from {name}", Brushes.LimeGreen);
                 _vehCurrentStop[cam.VehicleID] = null;
             }
         }
@@ -14760,140 +14389,6 @@ namespace V2XController
             }
         }
 
-        /// <summary>
-        /// Rotate the currently selected activation rectangle (if any) by deltaDegrees.
-        /// Updates the ActivationZone.Azimuth and reapplies the visual rotation + positioning.
-        /// </summary>
-        private void RotateSelectedActivationZone(int deltaDegrees)
-        {
-            try
-            {
-                ActivationZone? zone = null;
-                Rectangle? rect = null;
-
-                // Prefer rectangle currently selected by selection logic
-                if (selectedElement is Rectangle selRect && activationZones.TryGetValue(selRect, out var mappedZone))
-                {
-                    rect = selRect;
-                    zone = mappedZone;
-                }
-                // Fallback: use selectedRectangle field if set
-                else if (selectedRectangle != null && activationZones.TryGetValue(selectedRectangle, out mappedZone))
-                {
-                    rect = selectedRectangle;
-                    zone = mappedZone;
-                }
-
-                if (zone == null || zone.Rectangle == null)
-                    return;
-
-                // Update azimuth and normalize to [0..359]
-                int newAz = (zone.Azimuth + deltaDegrees) % 360;
-                if (newAz < 0) newAz += 360;
-                zone.Azimuth = newAz;
-
-                // Reposition/rotate visually around start point
-                UpdateRectanglePositionFromStartPoint(zone);
-
-                isDirty = true;
-                Console.WriteLine($"[ROTATE] Zone '{zone.Name}' rotated to {zone.Azimuth}°");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[ROTATE] Error rotating zone: {ex.Message}");
-            }
-        }
-
-        private Polygon CreateZoneArrow()
-        {
-            var p = new Polygon
-            {
-                Opacity = 0.20,
-                StrokeThickness = 0.5,
-                IsHitTestVisible = false,
-                SnapsToDevicePixels = true
-            };
-            Panel.SetZIndex(p, 950);
-            return p;
-        }
-
-                private void EnsureZoneArrow(ActivationZone zone)
-        {
-            if (zone?.Rectangle == null) return;
-            var rect = zone.Rectangle;
-
-            if (!_zoneArrows.TryGetValue(rect, out var arrow))
-            {
-                arrow = CreateZoneArrow();
-                _zoneArrows[rect] = arrow;
-                if (!TileCanvas.Children.Contains(arrow))
-                    TileCanvas.Children.Add(arrow);
-            }
-
-            double left = Canvas.GetLeft(rect);
-            double top = Canvas.GetTop(rect);
-            double w = rect.Width;
-            double h = rect.Height;
-            if (double.IsNaN(left) || double.IsNaN(top) || w <= 0 || h <= 0) return;
-
-            double arrowW = Math.Clamp(w * 0.14, 8.0, 36.0);
-            double arrowH = Math.Clamp(h * 0.14, 8.0, 36.0);
-
-            arrow.Points = new PointCollection
-            {
-                new Point(arrowW * 0.5, 0),
-                new Point(arrowW, arrowH * 0.86),
-                new Point(arrowW * 0.66, arrowH * 0.86),
-                new Point(arrowW * 0.66, arrowH * 1.62),
-                new Point(arrowW * 0.34, arrowH * 1.62),
-                new Point(arrowW * 0.34, arrowH * 0.86),
-                new Point(0, arrowH * 0.86)
-            };
-
-            // ✅ Calculate arrow position relative to rectangle's unrotated position
-            double arrowLeft = left + (w - arrowW) / 2.0;
-            double arrowTop = top + Math.Max(4.0, h * 0.06);
-
-            var brush = TryBrushFromColor(zone.Color) ?? Brushes.Gray;
-            arrow.Fill = brush;
-            arrow.Stroke = brush;
-
-            // ✅ Apply the same rotation as the rectangle, but adjust the center point
-            // The arrow should rotate around the same center as the rectangle (bottom center of rect)
-            double rectCenterX = left + w / 2.0;
-            double rectCenterY = top + h;
-
-            // Calculate arrow's own center for its local rotation
-            double arrowCenterX = arrowW / 2.0;
-            double arrowCenterY = arrowH / 2.0;
-
-            // Create rotation around rectangle's rotation center
-            var rotateTransform = new RotateTransform(
-                zone.Azimuth,
-                rectCenterX - arrowLeft,  // offset from arrow's left to rect's center
-                rectCenterY - arrowTop    // offset from arrow's top to rect's center
-            );
-
-            arrow.RenderTransform = rotateTransform;
-            Canvas.SetLeft(arrow, arrowLeft);
-            Canvas.SetTop(arrow, arrowTop);
-        }
-
-
-        /// <summary>
-        /// Remove arrow associated with rectangle (call before removing rectangle).
-        /// </summary>
-        private void RemoveZoneArrow(Rectangle? rect)
-        {
-            if (rect == null) return;
-            if (_zoneArrows.TryGetValue(rect, out var arrow))
-            {
-                if (TileCanvas.Children.Contains(arrow))
-                    TileCanvas.Children.Remove(arrow);
-                _zoneArrows.Remove(rect);
-            }
-        }
-
 
         private void ActivationZonesCollection_CollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
         {
@@ -14907,9 +14402,6 @@ namespace V2XController
 
                         if (zone.Rectangle != null)
                         {
-                            // ✅ Remove arrow before removing rectangle
-                            RemoveZoneArrow(zone.Rectangle);
-
                             if (TileCanvas.Children.Contains(zone.Rectangle))
                                 TileCanvas.Children.Remove(zone.Rectangle);
 
@@ -14932,9 +14424,6 @@ namespace V2XController
                 {
                     if (!ActivationZonesCollection.Contains(kvp.Value))
                     {
-                        // ✅ Remove arrow before removing rectangle
-                        RemoveZoneArrow(kvp.Key);
-
                         if (TileCanvas.Children.Contains(kvp.Key))
                             TileCanvas.Children.Remove(kvp.Key);
                         activationZones.Remove(kvp.Key);
@@ -14953,6 +14442,7 @@ namespace V2XController
                 {
                     if (zone == null) continue;
 
+                    // ⭐ PŘESKOČIT POLYLINE SEGMENTY!
                     if (_polylineRows.Contains(zone))
                     {
                         // Polyline segmenty NEMAJÍ Rectangle - jen se zapíší do tabulky
@@ -15004,8 +14494,6 @@ namespace V2XController
 
                         zone.PropertyChanged += ActivationZone_PropertyChanged;
 
-                        try { EnsureZoneArrow(zone); } catch { }
-
                         isDirty = true;
                     }
                     else
@@ -15026,8 +14514,6 @@ namespace V2XController
                         Panel.SetZIndex(zone.Rectangle, 100);
 
                         zone.PropertyChanged += ActivationZone_PropertyChanged;
-
-                        try { EnsureZoneArrow(zone); } catch { }
                     }
                 }
             }
@@ -15158,11 +14644,6 @@ namespace V2XController
             Dispatcher.Invoke(() =>
             {
                 var elementsToRemove = new List<UIElement>();
-
-                foreach (var kv in _zoneArrows.ToArray())
-                    if (TileCanvas.Children.Contains(kv.Value))
-                        TileCanvas.Children.Remove(kv.Value);
-                _zoneArrows.Clear();
 
                 foreach (UIElement child in TileCanvas.Children)
                 {
@@ -15307,41 +14788,19 @@ namespace V2XController
             }
         }
 
-        /// <summary>
-        /// Detects if a line contains a Protobuf message (Base64 or Hex)
-        /// </summary>
         private bool IsProtobufMessage(string line)
         {
-            if (string.IsNullOrWhiteSpace(line))
-                return false;
+            if (line.StartsWith("PB:", StringComparison.OrdinalIgnoreCase))
+                return true;
 
-            line = line.Trim();
-
-            // Skip XML messages
-            if (line.StartsWith("<") || line.Contains("<CAM") || line.Contains("<SRV"))
-                return false;
-
-            // Base64 detection: valid chars + correct padding
-            if (line.Length >= 8 && line.Length % 4 == 0)
+            // Nebo detekujte čistý hex string (všechny znaky jsou 0-9, A-F)
+            var trimmed = line.Trim().Replace(" ", "");
+            if (trimmed.Length > 0 && trimmed.All(c =>
+                (c >= '0' && c <= '9') ||
+                (c >= 'A' && c <= 'F') ||
+                (c >= 'a' && c <= 'f')))
             {
-                if (line.All(c => (c >= 'A' && c <= 'Z') ||
-                                 (c >= 'a' && c <= 'z') ||
-                                 (c >= '0' && c <= '9') ||
-                                 c == '+' || c == '/' || c == '='))
-                {
-                    return true;
-                }
-            }
-
-            // Hex detection: even length, only hex chars
-            if (line.Length >= 16 && line.Length % 2 == 0)
-            {
-                if (line.All(c => (c >= '0' && c <= '9') ||
-                                 (c >= 'A' && c <= 'F') ||
-                                 (c >= 'a' && c <= 'f')))
-                {
-                    return true;
-                }
+                return trimmed.Length >= 4; // minimální délka pro validní protobuf
             }
 
             return false;
@@ -15646,240 +15105,7 @@ namespace V2XController
             }
         }
 
-        /// <summary>
-        /// Handles decoded Protobuf messages and displays them on the map
-        /// </summary>
-        /// <param name="decodedJson">Decoded JSON from ProtobufParser</param>
-        public void HandleProtobufMessage(string decodedJson)
-        {
-            try
-            {
-                bool isCamMessage = decodedJson.Contains("nearby_vehicle_detection");
-                bool isSrvMessage = decodedJson.Contains("heartbeat");
-
-                if (isCamMessage)
-                {
-                    HandleProtobufCamMessage(decodedJson);
-                }
-                else if (isSrvMessage)
-                {
-                    HandleProtobufSrvMessage(decodedJson);
-                }
-                else
-                {
-                    Console.WriteLine("[PROTO] Unknown Protobuf message type");
-                    IncrementCamErrorCount();
-                }
-            }
-            catch (Exception ex)
-            {
-                IncrementCamErrorCount();
-                Console.WriteLine($"[PROTO] Message handling failed - {ex.Message}");
-            }
-        }
-
-        /// <summary>
-        /// Handles Protobuf CAM messages (Nearby Vehicle Detection)
-        /// </summary>
-        private void HandleProtobufCamMessage(string decodedJson)
-        {
-            try
-            {
-                var protoCam = ProtoCam.ParseFromJson(decodedJson);
-                if (protoCam == null)
-                {
-                    Console.WriteLine("[PROTO CAM] Failed to parse message");
-                    IncrementCamErrorCount();
-                    return;
-                }
-
-                // Convert to V2XMessage for display
-                var v2xMsg = protoCam.ToV2XMessage();
-
-                // Validate accuracy - if available, include it
-                double accuracy = protoCam.AccuracyInMeters ?? 0.0;
-
-                // Create fake raw XML for compatibility with existing HandleV2XMessage
-                var fakeXml = $@"
-            <vehPt 
-                lat=""{v2xMsg.Latitude}"" 
-                lon=""{v2xMsg.Longitude}"" 
-                speed=""{v2xMsg.Speed}"" 
-                heading=""{v2xMsg.Heading}"" 
-                accuracy=""{accuracy}"" 
-            />";
-
-                // Log to terminal
-                var shortId = v2xMsg.VehicleID.Length > 4 ? v2xMsg.VehicleID[^4..] : v2xMsg.VehicleID;
-                Console.WriteLine($"PROTO CAM {shortId} lat={v2xMsg.Latitude:F6} lon={v2xMsg.Longitude:F6} spd={v2xMsg.Speed:F1} hdg={v2xMsg.Heading:F0}");
-
-                if (protoCam.AccuracyInMeters.HasValue && protoCam.AccuracyInMeters.Value > 0)
-                    Console.WriteLine($"  acc={protoCam.AccuracyInMeters.Value:F1} m");
-
-                // Record for timeshift if enabled
-                if (_timeshiftEnabled && !(v2xMsg.VehicleID?.StartsWith("000000") ?? false))
-                {
-                    recordedCamMessages.Add(fakeXml);
-                }
-
-                // Skip live rendering if timeshift is paused
-                if (_timeshiftEnabled && _timeshiftPaused)
-                    return;
-
-                // Skip if in playback or timeshift catchup mode
-                if (_isPlaybackSessionActive || _isTimeshiftPlaybackActive)
-                    return;
-
-                // Use existing rendering logic
-                HandleV2XMessage(v2xMsg, fakeXml);
-
-                // Increment CAM OK counter
-                IncrementCamOkCount();
-            }
-            catch (Exception ex)
-            {
-                IncrementCamErrorCount();
-                Console.WriteLine($"[PROTO CAM] Error: {ex.Message}");
-            }
-        }
-
-        /// <summary>
-        /// Handles Protobuf SRV messages (Heartbeat)
-        /// </summary>
-        private void HandleProtobufSrvMessage(string decodedJson)
-        {
-            try
-            {
-                var protoSrv = ProtoSrv.ParseFromJson(decodedJson);
-                if (protoSrv == null)
-                {
-                    Console.WriteLine("[PROTO SRV] Failed to parse message");
-                    IncrementSrvErrorCount();
-                    return;
-                }
-
-                // Convert to SRVMessage for display
-                var srvMsg = protoSrv.ToSrvMessage();
-
-                // Log to terminal
-                Console.WriteLine($"PROTO SRV dev={protoSrv.DeviceId ?? "?"} lat={srvMsg.Latitude:F6} lon={srvMsg.Longitude:F6}");
-
-                if (protoSrv.AccuracyInMeters.HasValue && protoSrv.AccuracyInMeters.Value > 0)
-                    Console.WriteLine($"  acc={protoSrv.AccuracyInMeters.Value:F1} m");
-
-                if (protoSrv.Altitude.HasValue)
-                    Console.WriteLine($"  alt={protoSrv.Altitude.Value:F1} m");
-
-                // Record for timeshift if enabled
-                if (_timeshiftEnabled)
-                {
-                    // Create fake XML for recording
-                    var fakeXml = $@"<SRV lat=""{srvMsg.Latitude}"" lon=""{srvMsg.Longitude}"" />";
-                    recordedSrvMessages.Add(fakeXml);
-                }
-
-                // Skip live rendering if timeshift is paused
-                if (_timeshiftEnabled && _timeshiftPaused)
-                    return;
-
-                // Skip if in playback or timeshift catchup mode
-                if (_isPlaybackSessionActive || _isTimeshiftPlaybackActive)
-                    return;
-
-                // Draw SRV point on map
-                DrawSrvPoint(srvMsg);
-
-                // Increment SRV OK counter
-                IncrementSrvOkCount();
-            }
-            catch (Exception ex)
-            {
-                IncrementSrvErrorCount();
-                Console.WriteLine($"[PROTO SRV] Error: {ex.Message}", Brushes.Red);
-            }
-        }
-
-        private void TestProtobuf_Click(object sender, RoutedEventArgs e)
-        {
-            try
-            {
-                // První kliknutí - dekódovat a uložit zprávu
-                if (string.IsNullOrEmpty(_protobufTestDecoded))
-                {
-                    string testMessage = "COvDAxILCJrg8c8GEKTWiiFShwEKCwia4PHPBhCk1oohEhAKCjIzNTg5NDUwMTcQPBgKUjoKCQkAAACgmRlsQBEBP/Tu2etIQBnCNdKtMkgyQFIbUB6iAQUN4XqkQJIDDgoFDeF6pEASBQ3heqRAXTMzP0FlZuaqQ6UBuKeAQ/IBGQgUogEEMTMzOfIBBDIwMDSABQDCDAPwAQA=";
-
-                    if (!ProtobufParser.TryDecodeProtobufFromHex(testMessage, out _protobufTestDecoded))
-                    {
-                        Console.WriteLine("ERROR: Failed to decode");
-                        return;
-                    }
-
-                    Console.WriteLine("Click to toggle tram position");
-                    _protobufTestLatOffset = 0.0;
-                    _protobufTestDirection = true;
-                }
-
-                // Parsovat zprávu
-                var protoCam = ProtoCam.ParseFromJson(_protobufTestDecoded);
-                if (protoCam == null)
-                {
-                    Console.WriteLine("ERROR: Parse failed");
-                    return;
-                }
-
-                // Přepnout směr
-                _protobufTestDirection = !_protobufTestDirection;
-
-                double jumpMeters = 50.0;
-                double latDelta = jumpMeters / 111000.0; 
-
-                if (_protobufTestDirection)
-                {
-                    _protobufTestLatOffset += latDelta;
-                }
-                else
-                {
-                    _protobufTestLatOffset -= latDelta;
-                }
-
-                // Aplikovat offset
-                protoCam.Latitude = (protoCam.Latitude ?? 0.0) + _protobufTestLatOffset;
-                protoCam.Timestamp = DateTime.UtcNow;
-                protoCam.Speed = 15.0;
-                protoCam.Heading = _protobufTestDirection ? 0.0 : 180.0;
-
-                // Převést a vykreslit
-                var v2xMsg = protoCam.ToV2XMessage();
-                v2xMsg.MessageType = "CAM";
-
-                var fakeXml = $@"<vehPt lat=""{v2xMsg.Latitude}"" lon=""{v2xMsg.Longitude}"" speed=""{v2xMsg.Speed}"" heading=""{v2xMsg.Heading}"" accuracy=""{protoCam.AccuracyInMeters ?? 0.0}"" />";
-
-                var shortId = v2xMsg.VehicleID.Length > 4 ? v2xMsg.VehicleID[^4..] : v2xMsg.VehicleID;
-                var arrow = _protobufTestDirection ? "▲" : "▼";
-                Console.WriteLine($"{arrow} JUMP {jumpMeters}m | {shortId} | Lat={v2xMsg.Latitude:F6} | Lon={v2xMsg.Longitude} | Total delta={_protobufTestLatOffset * 111000:F0}m");
-
-                // Vykreslit na mapu
-                HandleV2XMessage(v2xMsg, fakeXml);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"ERROR: {ex.Message}", Brushes.Red);
-            }
-        }
-
-        public void StartProtobufTest(string base64Message)
-        {
-            // Už nepotřebujeme - používáme TestProtobuf_Click
-        }
-
-        public void StopProtobufTest()
-        {
-            _protobufTestDecoded = "";
-            _protobufTestLatOffset = 0.0;
-            _protobufTestDirection = true;
-        }
     }
-    
 }
 
 public class PolylinePointData

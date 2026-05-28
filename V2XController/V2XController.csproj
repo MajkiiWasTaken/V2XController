@@ -2,13 +2,13 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net8.0-windows</TargetFramework>
+    <TargetFramework>net8.0-windows8.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
     <Configurations>Debug;Release;V2XController-Debug</Configurations>
-    <ApplicationIcon>V2x icon.ico</ApplicationIcon>
 	<RuntimeIdentifier>win-x64</RuntimeIdentifier>
+	<ApplicationIcon>V2x icon.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
