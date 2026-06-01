@@ -4227,13 +4227,9 @@ namespace V2XController
         {
             if (selectedElement == null || e.RightButton != MouseButtonState.Pressed) return;
 
-            // Prevent moving polyline vertex dots while actively drawing a polyline
             if (_isDrawingPolyline && selectedElement is Ellipse selectedDot &&
                 selectedDot.Tag is string tag && tag == "PolylineVertex")
-            {
-                // ignore dragging of vertex dots during polyline drawing
                 return;
-            }
 
             var currentPos = e.GetPosition(TileCanvas);
             var dx = currentPos.X - mouseOffset.X;
@@ -4244,12 +4240,9 @@ namespace V2XController
                 _polylineVertexMap.TryGetValue(vertexDot, out var vertexInfo))
             {
                 var newPos = new Point(currentPos.X, currentPos.Y);
-
                 Canvas.SetLeft(vertexDot, newPos.X - 4);
                 Canvas.SetTop(vertexDot, newPos.Y - 4);
-
                 UpdatePolylineSegmentsAroundVertex(vertexInfo.polyline, vertexInfo.pointIndex, newPos);
-
                 mouseOffset = currentPos;
                 isDirty = true;
                 return;
@@ -4259,22 +4252,17 @@ namespace V2XController
             {
                 double left = Canvas.GetLeft(element);
                 double top = Canvas.GetTop(element);
-
-                double newLeft = left + dx;
-                double newTop = top + dy;
-
-                Canvas.SetLeft(element, newLeft);
-                Canvas.SetTop(element, newTop);
+                Canvas.SetLeft(element, left + dx);
+                Canvas.SetTop(element, top + dy);
 
                 if (selectedElement is TextBlock tb)
                 {
                     var matchingPoint = points.FirstOrDefault(p => p.Text == tb);
                     if (matchingPoint != null)
                     {
-                        var newPos = new Point(newLeft + 5, newTop + 10);
+                        var newPos = new Point(left + dx + 5, top + dy + 10);
                         matchingPoint.Position = newPos;
                         RecalculateConnectionLine();
-
                         if (isRecording)
                         {
                             matchingPoint.MovementFrames.Add(new MovementFrame
@@ -4299,17 +4287,17 @@ namespace V2XController
                 try
                 {
                     zone.StartPoint = baseCenter;
-
                     var lonlat = CanvasPixelsToLatLon(baseCenter, latitude, longitude, zoom);
                     zone.Longitude = lonlat.X;
                     zone.Latitude = lonlat.Y;
-
                     try { EnsureZoneArrow(zone); } catch { }
                 }
                 finally
                 {
                     isUpdatingActivationZone = false;
                 }
+
+                UpdateActivationZoneBounds(zone);
             }
         }
 
@@ -6039,6 +6027,11 @@ namespace V2XController
             if (sender is not Rectangle rect) return;
             if (_highlightedRect == rect) return;
 
+            bool isTableSelected =
+                (ActivationZonesDataGrid?.SelectedItem is ActivationZone az && ReferenceEquals(az.Rectangle, rect));
+
+            if (isTableSelected) return;
+
             _highlightedRect = rect;
             _highlightedRectOldBrush = rect.Stroke;
             _highlightedRectOldThickness = rect.StrokeThickness;
@@ -6268,7 +6261,7 @@ namespace V2XController
                 }
                 else
                 {
-                    if ((now - tram.LastUpdate).TotalSeconds > 20)
+                    if ((now - tram.LastUpdate).TotalSeconds > 10)
                         StartDrawnTramCleanup(i, tram);
                 }
             }
@@ -6319,10 +6312,10 @@ namespace V2XController
 
             try
             {
-                while (true)
+                bool continueRemoving = true;
+                while (continueRemoving)
                 {
-                    bool hadTrail = false;
-
+                    continueRemoving = false;
                     Dispatcher.Invoke(() =>
                     {
                         var trail = drawnTramTrails[idx];
@@ -6330,7 +6323,7 @@ namespace V2XController
                         if (trail != null && trail.Points.Count > 1)
                         {
                             trail.Points.RemoveAt(0);
-                            hadTrail = true;
+                            continueRemoving = true;
 
                             if (tram.TrailDots != null && tram.TrailDots.Count > 0)
                             {
@@ -6347,41 +6340,35 @@ namespace V2XController
                         }
                     });
 
-                    if (!hadTrail)
-                        break;
-
-                    await Task.Delay(1000, token); // 1 sekunda mezi mazáním bodů
+                    if (continueRemoving)
+                        await Task.Delay(1000, token);
                 }
 
                 await Task.Delay(1000, token);
 
                 Dispatcher.Invoke(() =>
                 {
-                    if (tram.Ellipse != null)
-                        tram.Ellipse.Visibility = Visibility.Collapsed;
+                    if (token.IsCancellationRequested)
+                        return;
 
-                    if (tram.Text != null)
-                        tram.Text.Visibility = Visibility.Collapsed;
+                    if (!vehicleTrailCleanupTokens.TryGetValue(key, out var activeCts) || activeCts.Token != token)
+                        return;
 
-                    if (tram.Speed != null)
-                        tram.Speed.Visibility = Visibility.Collapsed;
+                    if (tram.Ellipse != null) tram.Ellipse.Visibility = Visibility.Collapsed;
+                    if (tram.Text != null) tram.Text.Visibility = Visibility.Collapsed;
+                    if (tram.Speed != null) tram.Speed.Visibility = Visibility.Collapsed;
 
                     string manualId = drawnTramIds[idx];
-
                     if (_vehicleBoxes.TryGetValue(manualId, out var box))
                         box.Visibility = Visibility.Collapsed;
 
-                    RemoveDrawnTramCompletely(idx, tram);
-
                     vehicleTrailCleanupTokens.Remove(key);
+                    RemoveDrawnTramCompletely(idx, tram);
                 });
             }
             catch (TaskCanceledException)
             {
-                Dispatcher.Invoke(() =>
-                {
-                    vehicleTrailCleanupTokens.Remove(key);
-                });
+                // Cancelled — token already removed by the cancelling caller, nothing to do here
             }
         }
 
@@ -6550,9 +6537,10 @@ namespace V2XController
         {
             try
             {
-                while (true)
+                bool continueRemoving = true;
+                while (continueRemoving)
                 {
-                    bool hadTrail = false;
+                    continueRemoving = false;
                     Dispatcher.Invoke(() =>
                     {
                         var trail = TileCanvas.Children.OfType<Polyline>()
@@ -6561,7 +6549,7 @@ namespace V2XController
                         if (trail != null && trail.Points.Count > 1)
                         {
                             trail.Points.RemoveAt(trail.Points.Count - 1);
-                            hadTrail = true;
+                            continueRemoving = true;
 
                             if (vehicle.TrailDots != null && vehicle.TrailDots.Count > 0)
                             {
@@ -6573,14 +6561,11 @@ namespace V2XController
                         else if (trail != null)
                         {
                             TileCanvas.Children.Remove(trail);
-                            hadTrail = false;
                         }
                     });
 
-                    if (!hadTrail)
-                        break;
-
-                    await Task.Delay(300, token);
+                    if (continueRemoving)
+                        await Task.Delay(300, token);
                 }
 
                 Dispatcher.Invoke(() =>
@@ -6593,17 +6578,36 @@ namespace V2XController
                     }
                 });
 
-                await Task.Delay(200, token);
+                await Task.Delay(500, token);
 
-                Dispatcher.Invoke(() => RemoveVehicleCompletely(vehicleId, vehicle));
+                Dispatcher.Invoke(() =>
+                {
+                    if (token.IsCancellationRequested)
+                        return;
+
+                    if (!vehicleTrailCleanupTokens.TryGetValue(vehicleId, out var activeCts)
+                        || activeCts.Token != token)
+                        return;
+
+                    vehicleTrailCleanupTokens.Remove(vehicleId);
+                    RemoveVehicleCompletely(vehicleId, vehicle);
+                });
             }
             catch (TaskCanceledException)
             {
-                // ignored
+                Dispatcher.Invoke(() =>
+                {
+                    if (vehicle == null) return;
+                    if (vehicle.Ellipse != null) vehicle.Ellipse.Visibility = Visibility.Visible;
+                    if (vehicle.Text != null) vehicle.Text.Visibility = Visibility.Visible;
+                    if (vehicle.Speed != null) vehicle.Speed.Visibility = Visibility.Visible;
+                    if (_vehicleBoxes.TryGetValue(vehicleId, out var box))
+                        box.Visibility = Visibility.Visible;
+                    if (_liveAccuracyTextById.TryGetValue(vehicleId, out var accTb))
+                        accTb.Visibility = Visibility.Visible;
+                });
             }
         }
-
-        
 
         /// <summary>
         /// Adds an undo and redo action to the respective stacks.
@@ -6662,8 +6666,7 @@ namespace V2XController
 
             if (element is Rectangle rect)
             {
-                selectedRectangle = rect;
-                rect.Stroke = Brushes.Gold;
+                return;
             }
             else
             {
@@ -7430,7 +7433,6 @@ namespace V2XController
             if (msg.IsManual ?? false)
                 return;
 
-            // ID filter only when FilterCheckBox is ON
             if (msg.MessageType == "CAM" && ShouldFilterLiveById(msg.VehicleID))
                 return;
 
@@ -7442,7 +7444,6 @@ namespace V2XController
                 var sel = TramBox?.SelectedItem as string;
                 bool filtering = !string.IsNullOrEmpty(sel) && !string.Equals(sel, "All", StringComparison.OrdinalIgnoreCase);
 
-                // If filtering and this incoming CAM does not match the selected short id -> skip rendering entirely.
                 if (filtering)
                 {
                     if (string.IsNullOrEmpty(msg.VehicleID) || !IsReplayFilterMatch(msg.VehicleID))
@@ -7452,27 +7453,12 @@ namespace V2XController
                 var liveSel = FilterTram?.SelectedItem as string;
                 bool liveFiltering = !string.IsNullOrEmpty(liveSel) && !string.Equals(liveSel, "All", StringComparison.OrdinalIgnoreCase);
 
-                // If live filter active and incoming CAM does not match -> ignore the CAM (do not render/update)
                 if (liveFiltering)
                 {
                     if (string.IsNullOrEmpty(msg.VehicleID) || !string.Equals(msg.VehicleID.Length > 4 ? msg.VehicleID[^4..] : msg.VehicleID, liveSel, StringComparison.Ordinal))
                         return;
                 }
 
-                /*if (!string.IsNullOrWhiteSpace(msg.VehicleID) && FilterTram != null)
-                {
-                    var shortId = msg.VehicleID.Length > 4 ? msg.VehicleID[^4..] : msg.VehicleID;
-                    lock (_knownLiveShortIds)
-                    {
-                        if (!_knownLiveShortIds.Contains(shortId))
-                        {
-                            _knownLiveShortIds.Add(shortId);
-                            FilterTram.Dispatcher.BeginInvoke(new Action(PopulateLiveTramBoxFromActiveVehicles));
-                        }
-                    }
-                }*/
-
-                // Parse accuracy from rawXml (robust: several attribute names)
                 double accuracyMeters = 0.0;
                 try
                 {
@@ -7505,7 +7491,6 @@ namespace V2XController
                         }
                     }
 
-                    // Persist live accuracy (nullable: null = no accuracy provided or zero)
                     if (!string.IsNullOrWhiteSpace(msg.VehicleID))
                     {
                         if (accuracyMeters > 0)
@@ -7514,10 +7499,7 @@ namespace V2XController
                             _lastLiveAccuracyById[msg.VehicleID] = null;
                     }
                 }
-                catch
-                {
-                    // ignore parse errors
-                }
+                catch { }
 
                 if (!vehicleColorMap.TryGetValue(msg.VehicleID, out Brush tramColor))
                 {
@@ -7526,32 +7508,30 @@ namespace V2XController
                     vehicleColorMap[msg.VehicleID] = tramColor;
                 }
 
-                // Remove any previous live accuracy ellipse for this vehicle so we can redraw/move it
                 var oldLiveAcc = TileCanvas.Children.OfType<Ellipse>()
                     .Where(e => e.Tag is string s && s.Equals($"live_acc_{msg.VehicleID}", StringComparison.OrdinalIgnoreCase))
                     .ToList();
                 foreach (var a in oldLiveAcc) TileCanvas.Children.Remove(a);
 
+                // FIX: Only reset vehicle instance when cleanup is NOT already in progress.
                 if (activeVehicles.TryGetValue(msg.VehicleID, out var existing))
                 {
-                    bool tableHasRow = IsTramTableRowPresentForId(msg.VehicleID);
-                    bool tooOld = (DateTime.Now - existing.LastUpdate) > TableRowTimeout;
-
-                    if (!tableHasRow || tooOld)
+                    bool cleanupInProgress = vehicleTrailCleanupTokens.ContainsKey(msg.VehicleID);
+                    if (!cleanupInProgress)
                     {
-                        ResetVehicleInstance(msg.VehicleID);
+                        bool tableHasRow = IsTramTableRowPresentForId(msg.VehicleID);
+                        bool tooOld = (DateTime.Now - existing.LastUpdate) > TableRowTimeout;
+                        if (!tableHasRow || tooOld)
+                            ResetVehicleInstance(msg.VehicleID);
                     }
                 }
 
                 if (!(msg.VehicleID?.StartsWith("000000") ?? false) || isPlaying == true)
                 {
-                    // compute canvas pos
                     var (x, y) = ConvertLatLonToCanvasXY(msg.Latitude, msg.Longitude);
 
-                    // Draw/Update accuracy circle only if Accuracy checkbox is checked
                     if (AccuracyCB?.IsChecked == true && accuracyMeters >= 4)
                     {
-                        // convert meters -> pixels using local latitude
                         double mpp = MetersPerPixel(msg.Latitude ?? 0.0, zoom);
                         double radiusPx = accuracyMeters / Math.Max(1e-6, mpp);
 
@@ -7580,9 +7560,8 @@ namespace V2XController
                         Canvas.SetLeft(accEllipse, x - radiusPx);
                         Canvas.SetTop(accEllipse, y - radiusPx);
                         TileCanvas.Children.Add(accEllipse);
-                        Panel.SetZIndex(accEllipse, 995); // below vehicle dot but above tiles
+                        Panel.SetZIndex(accEllipse, 995);
                     }
-                    // if checkbox is not checked we purposely do not draw any accuracy circle (old ones were already removed above)
 
                     if (_liveAccuracyTextById.TryGetValue(msg.VehicleID, out var accTb))
                     {
@@ -7600,17 +7579,59 @@ namespace V2XController
                         Panel.SetZIndex(accTb, 1100);
                     }
 
-
-
                     if (activeVehicles.TryGetValue(msg.VehicleID, out var point))
                     {
-                        // update existing
+                        // Cancel live vehicle cleanup token
+                        if (vehicleTrailCleanupTokens.TryGetValue(msg.VehicleID, out var existingCts))
+                        {
+                            existingCts.Cancel();
+                            existingCts.Dispose();
+                            vehicleTrailCleanupTokens.Remove(msg.VehicleID);
+
+                            if (point.Ellipse != null) point.Ellipse.Visibility = Visibility.Visible;
+                            if (point.Text != null) point.Text.Visibility = Visibility.Visible;
+                            if (point.Speed != null) point.Speed.Visibility = Visibility.Visible;
+                            if (_vehicleBoxes.TryGetValue(msg.VehicleID, out var restoredBox))
+                                restoredBox.Visibility = Visibility.Visible;
+                            if (_liveAccuracyTextById.TryGetValue(msg.VehicleID, out var restoredAcc))
+                                restoredAcc.Visibility = Visibility.Visible;
+                        }
+
+                        // FIX: Cancel drawn tram cleanup AND refresh its LastUpdate so CleanupOldVehicles
+                        // doesn't immediately restart the cleanup on the next timer tick.
+                        if (drawnTramIds != null && drawnTrams != null)
+                        {
+                            for (int i = 0; i < drawnTramIds.Length; i++)
+                            {
+                                if (drawnTramIds[i] == msg.VehicleID)
+                                {
+                                    string drawnKey = $"drawn_{i}_trail";
+                                    if (vehicleTrailCleanupTokens.TryGetValue(drawnKey, out var drawnCts))
+                                    {
+                                        drawnCts.Cancel();
+                                        drawnCts.Dispose();
+                                        vehicleTrailCleanupTokens.Remove(drawnKey);
+                                    }
+
+                                    // Refresh LastUpdate so CleanupOldVehicles won't restart immediately
+                                    if (i < drawnTrams.Length && drawnTrams[i] != null)
+                                    {
+                                        drawnTrams[i].LastUpdate = DateTime.Now;
+
+                                        if (drawnTrams[i].Ellipse != null) drawnTrams[i].Ellipse.Visibility = Visibility.Visible;
+                                        if (drawnTrams[i].Text != null) drawnTrams[i].Text.Visibility = Visibility.Visible;
+                                        if (drawnTrams[i].Speed != null) drawnTrams[i].Speed.Visibility = Visibility.Visible;
+                                    }
+
+                                    break;
+                                }
+                            }
+                        }
+
                         point.Position = new Point(x, y);
                         point.LastUpdate = DateTime.Now;
                         UpdateVehicleCanvasPosition(point, new Point(x, y), tramColor, false, point.Label, msg.Speed);
 
-
-                        // store last geo + heading for reprojection
                         _lastLatLon[msg.VehicleID] = (msg.Latitude ?? 0.0, msg.Longitude ?? 0.0);
                         _lastHeadingLive[msg.VehicleID] = msg.Heading ?? 0.0;
 
@@ -7620,7 +7641,6 @@ namespace V2XController
                     }
                     else
                     {
-                        // create new visuals
                         var ellipse = new Ellipse
                         {
                             Width = 12,
@@ -7690,21 +7710,16 @@ namespace V2XController
                         TileCanvas.Children.Add(speedText);
 
                         if (FilterTram != null)
-                        {
                             FilterTram.Dispatcher.BeginInvoke(new Action(PopulateLiveTramBoxFromActiveVehicles));
-                        }
 
                         _lastLatLon[msg.VehicleID] = (msg.Latitude ?? 0.0, msg.Longitude ?? 0.0);
                         _lastHeadingLive[msg.VehicleID] = msg.Heading ?? 0.0;
 
-                        // create the oriented box
                         var topCenterNew = new Point(x, y);
                         var liveHeadingAdj = ((msg.Heading ?? 0.0) - 180 + 360) % 360;
                         UpdateOrCreateVehicleBox(msg.VehicleID, topCenterNew, tramColor, liveHeadingAdj);
                     }
                 }
-
-
 
                 if (lastCamTimes.TryGetValue(msg.VehicleID, out var lastTime))
                     prevCamTimes[msg.VehicleID] = lastTime;
@@ -7713,7 +7728,6 @@ namespace V2XController
                 string statId = string.IsNullOrEmpty(msg.VehicleID) ? "-" : msg.VehicleID;
                 string camIdShort = statId.Length > 4 ? statId[^4..] : statId;
 
-                // Only update table for live vehicles that we actually rendered (respecting TramBox selection)
                 if (!filtering || IsReplayFilterMatch(msg.VehicleID))
                     UpdateOrAddVehicleData(camIdShort, msg.Speed ?? 0.0, msg.Timestamp ?? DateTime.UtcNow);
 
@@ -7724,7 +7738,6 @@ namespace V2XController
             }
             else if (msg.MessageType == "SRV")
             {
-                // unchanged SRV branch...
                 SRVMessage srvMsg = null;
                 bool isValid = false;
                 string logicalId = "-";
@@ -7740,11 +7753,9 @@ namespace V2XController
 
                         var local = TimeZoneInfo.ConvertTimeFromUtc(srvMsg.Dt.ToUniversalTime(), czechTimeZone);
                         lastRecTime = local.ToString("HH:mm:ss");
-
-                        var shortId = logicalId.Length > 4 ? logicalId[^4..] : logicalId;
                     }
                 }
-                catch (Exception ex)
+                catch
                 {
                     IncrementSrvErrorCount();
                 }
@@ -8287,7 +8298,6 @@ namespace V2XController
                         ((DispatcherTimer)s).Stop();
                         _zoneDeactivateTimers.Remove(zone);
 
-                        // Vyčistit ze sledování
                         if (_vehicleActiveZones.TryGetValue(vehicleId, out var vz))
                             vz.Remove(zone);
                     };
@@ -8297,7 +8307,6 @@ namespace V2XController
             }
 
             _vehicleActiveZones[vehicleId] = nowInZones;
-        
         
 
             // Placeholder
@@ -8548,7 +8557,7 @@ namespace V2XController
                 return;
             }
 
-            var firstTime = earliest;                  // unified origin
+            var firstTime = earliest;
             DateTime? minUtc = earliest, maxUtc = earliest;
 
 
@@ -9282,6 +9291,7 @@ namespace V2XController
                 {
                     ApplyZoneRotation(zone);
                     UpdateActivationZoneBounds(zone);
+                    RevalidateZoneActiveState(zone); 
 
                     try { EnsureZoneArrow(zone); } catch { }
                 }
@@ -9291,8 +9301,6 @@ namespace V2XController
                     {
                         var brush = TryBrushFromColor(zone.Color) ?? Brushes.Red;
                         zone.Rectangle.Stroke = brush;
-                        EmphasizeZoneWithOwnColor(zone, TimeSpan.FromMilliseconds(800));
-
                         EnsureZoneArrow(zone);
                     }
                     catch { }
@@ -12896,14 +12904,20 @@ namespace V2XController
 
         private void ActivationZonesDataGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
-            // Obnov předchozí styl
             if (_highlightedRect != null)
             {
                 try
                 {
-                    _highlightedRect.Stroke = _highlightedRectOldBrush ?? _highlightedRect.Stroke;
-                    _highlightedRect.StrokeThickness = _highlightedRectOldThickness > 0 ? _highlightedRectOldThickness : _highlightedRect.StrokeThickness;
-                    // nevracíme Fill – ponecháme Transparent
+                    var prevZone = activationZones.Values.FirstOrDefault(z => ReferenceEquals(z.Rectangle, _highlightedRect));
+                    var correctBrush = prevZone != null
+                        ? (TryBrushFromColor(prevZone.Color) ?? Brushes.Red)
+                        : (_highlightedRectOldBrush ?? _highlightedRect.Stroke);
+
+                    _highlightedRect.Stroke = correctBrush;
+
+                    bool wasActive = prevZone?.IsActive == true;
+                    _highlightedRect.StrokeThickness = wasActive ? 6 : (_highlightedRectOldThickness > 0 ? _highlightedRectOldThickness : 2);
+
                     Panel.SetZIndex(_highlightedRect, 100);
                 }
                 catch { }
@@ -12916,8 +12930,8 @@ namespace V2XController
             if (zone?.Rectangle == null) return;
 
             _highlightedRect = zone.Rectangle;
-            _highlightedRectOldBrush = _highlightedRect.Stroke;
-            _highlightedRectOldThickness = _highlightedRect.StrokeThickness;
+            _highlightedRectOldBrush = TryBrushFromColor(zone.Color) ?? zone.Rectangle.Stroke;
+            _highlightedRectOldThickness = zone.IsActive ? 6 : 2;
 
             EmphasizeZoneWithOwnColor(zone, revertAfter: null);
         }
@@ -12962,7 +12976,7 @@ namespace V2XController
                 t.Tick += (s, e) =>
                 {
                     ((DispatcherTimer)s).Stop();
-                    if (zone.Rectangle != null)
+                    if (zone.Rectangle != null && !zone.IsActive)
                     {
                         zone.Rectangle.StrokeThickness = 2;
                         zone.Rectangle.Fill = Brushes.Transparent;
@@ -12973,7 +12987,6 @@ namespace V2XController
 
             Panel.SetZIndex(rect, 200);
         }
-
         private void ResetStatusUi()
         {
             // counters
@@ -13863,8 +13876,18 @@ namespace V2XController
             {
                 try
                 {
-                    _highlightedRect.Stroke = _highlightedRectOldBrush ?? _highlightedRect.Stroke;
-                    _highlightedRect.StrokeThickness = _highlightedRectOldThickness > 0 ? _highlightedRectOldThickness : _highlightedRect.StrokeThickness;
+                    var prevZone = switchZones.Values.FirstOrDefault(z => ReferenceEquals(z.Rectangle, _highlightedRect))
+                                ?? activationZones.Values.FirstOrDefault(z => ReferenceEquals(z.Rectangle, _highlightedRect));
+
+                    var correctBrush = prevZone != null
+                        ? (TryBrushFromColor(prevZone.Color) ?? Brushes.Red)
+                        : (_highlightedRectOldBrush ?? _highlightedRect.Stroke);
+
+                    _highlightedRect.Stroke = correctBrush;
+
+                    bool wasActive = prevZone?.IsActive == true;
+                    _highlightedRect.StrokeThickness = wasActive ? 6 : (_highlightedRectOldThickness > 0 ? _highlightedRectOldThickness : 2);
+
                     Panel.SetZIndex(_highlightedRect, 100);
                 }
                 catch { }
@@ -13878,8 +13901,8 @@ namespace V2XController
             if (zone?.Rectangle == null) return;
 
             _highlightedRect = zone.Rectangle;
-            _highlightedRectOldBrush = _highlightedRect.Stroke;
-            _highlightedRectOldThickness = _highlightedRect.StrokeThickness;
+            _highlightedRectOldBrush = TryBrushFromColor(zone.Color) ?? zone.Rectangle.Stroke;
+            _highlightedRectOldThickness = zone.IsActive ? 6 : 2;
 
             EmphasizeZoneWithOwnColor(zone, revertAfter: null);
         }
@@ -14068,7 +14091,52 @@ namespace V2XController
             }
         }
 
-        // Next automatic indices for switch zones (fill 0..6 in each main 0..4)
+        /// <summary>
+        /// Revalidates whether a zone should remain active based on current vehicle positions.
+        /// Deactivates the zone if no tracked vehicle is currently inside it.
+        /// </summary>
+        private void RevalidateZoneActiveState(ActivationZone zone)
+        {
+            if (!zone.IsActive) return;
+
+            bool anyVehicleInside = false;
+
+            foreach (var kvp in _vehicleActiveZones)
+            {
+                if (!kvp.Value.Contains(zone)) continue;
+
+                if (!activeVehicles.TryGetValue(kvp.Key, out var vehicle)) continue;
+
+                var pos = vehicle.Position;
+                if (zone.Bounds.Contains(pos) && IsPointInRotatedRectangle(pos, zone))
+                {
+                    anyVehicleInside = true;
+
+                    if (_zoneDeactivateTimers.TryGetValue(zone, out var existingTimer))
+                    {
+                        existingTimer.Stop();
+                        existingTimer.Start();
+                    }
+                    break;
+                }
+            }
+
+            if (!anyVehicleInside)
+            {
+                if (_zoneDeactivateTimers.TryGetValue(zone, out var t))
+                {
+                    t.Stop();
+                    _zoneDeactivateTimers.Remove(zone);
+                }
+
+                zone.IsActive = false;
+                if (zone.Rectangle != null)
+                    zone.Rectangle.StrokeThickness = 2;
+
+                foreach (var kvp in _vehicleActiveZones)
+                    kvp.Value.Remove(zone);
+            }
+        }
 
 
         private void ZoneRadio_Checked(object sender, RoutedEventArgs e)
