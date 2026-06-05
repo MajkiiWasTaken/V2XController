@@ -514,6 +514,8 @@ namespace V2XController
 
         private readonly Dictionary<(string vehicleId, ActivationZone zone), bool> _vehicleZoneValidEntry = new();
 
+        private Border? _loadingOverlay;
+        private ProgressBar? _loadingProgressBar;
 
         private ProtobufWindow? _protobufWindow;
 
@@ -6270,7 +6272,6 @@ namespace V2XController
         {
             var now = DateTime.Now;
 
-            // Řádky z tabulky starší než TableRowTimeout — jen odebrat z tabulky, vizuály řeší třetí smyčka
             var toRemoveFromTable = TramTable
                 .Where(t => (now - t.LastMessageTimestamp)?.TotalSeconds > TableRowTimeout.TotalSeconds)
                 .ToList();
@@ -6318,8 +6319,6 @@ namespace V2XController
                     continue;
 
                 Console.WriteLine($"[VEHICLE] Starting gradual trail removal for {vehicleId}");
-
-                HideVehicleKeepTrail(vehicleId, vehicle);
 
                 var cts = new CancellationTokenSource();
                 vehicleTrailCleanupTokens[vehicleId] = cts;
@@ -6945,6 +6944,7 @@ namespace V2XController
             // Now load tiles for the loaded center/zoom
             var (centerX, centerY) = LatLonToTileXY(latitude, longitude, zoom);
             await LoadTilesSmoothAsync(centerX - TileCount / 2, centerY - TileCount / 2);
+            UpdateLoadingProgress(15);
 
             _ = EnsureLocalAreaAltitudeAsync(force: true);
 
@@ -8467,11 +8467,46 @@ namespace V2XController
                    localY >= top && localY <= top + height;
         }
 
+
+        /// <summary>
+        /// Entry point for loading a playback file. Shows a loading overlay for the duration.
+        /// </summary>
+        private async void LoadPlaybackFile(string fileName)
+        {
+            StopPlaybackAndReset();
+            _replayGeoFrames.Clear();
+
+            try
+            {
+                SilentClearAll();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[PLAYBACK] Failed clearing existing zones: " + ex.Message);
+            }
+
+            if (!File.Exists(fileName))
+            {
+                MessageBox.Show("File doesn't exist");
+                return;
+            }
+
+            ShowLoadingOverlay("Loading replay...");
+            try
+            {
+                await LoadPlaybackFileCore(fileName);
+            }
+            finally
+            {
+                HideLoadingOverlay();
+            }
+        }
+
         /// <summary>
         /// Loads playback file for replay.
         /// </summary>
         /// <param name="fileName">The name of the playback file.</param>
-        private async void LoadPlaybackFile(string fileName)
+        private async Task LoadPlaybackFileCore(string fileName)
         {
             StopPlaybackAndReset();
             _replayGeoFrames.Clear();
@@ -8888,15 +8923,15 @@ namespace V2XController
             // Update replay UTC span from both CAM and SRV
             _replayStartUtc = minUtc;
             _replayEndUtc = maxUtc;
-
-            _replayStartUtc = minUtc;
-            _replayEndUtc = maxUtc;
             _playbackLoaded = true;
             _lastReplayFile = fileName;
             BuildPlaybackKeyframes();
             UpdateUiEnabledState();
-            MessageBox.Show("Playback data loaded. Use Play button to start playback.", "Playback ready", MessageBoxButton.OK, MessageBoxImage.Information);
+            UpdateReplayTimerLabel();
+            HideLoadingOverlay();
+            MessageBox.Show("CAM recording loaded. Use Play to start playback.", "Playback ready", MessageBoxButton.OK, MessageBoxImage.Information);
         }
+        
 
         /// <summary>
         /// .camrec loader, a simple custom format we defined for easy recording and replay of CAM messages without the full XML structure.
@@ -8984,6 +9019,14 @@ namespace V2XController
             int snapCameraX = cameraX;
             int snapCameraY = cameraY;
 
+            int totalMessages = Math.Max(1, camMessages.Count);
+            var progressReporter = new Progress<double>(pct =>
+            {
+                if (_loadingProgressBar != null)
+                    _loadingProgressBar.Value = Math.Clamp(pct, 0, 100);
+            });
+
+
             // Parse all messages once on a background thread to avoid freezing the UI
             var (
                 allVehicleIds,
@@ -9009,6 +9052,11 @@ namespace V2XController
                 DateTime? _minUtc = null, _maxUtc = null;
                 DateTime? _firstTime = null;
 
+                IProgress<double> prog = progressReporter;
+                int processed = 0;
+                int total = Math.Max(1, camMessages.Count);
+
+
                 // Synthetic timestamp base for standalone vehPt blocks (protobuf format)
                 var protoBase = DateTime.UtcNow;
                 int protoIndex = 0;
@@ -9020,6 +9068,10 @@ namespace V2XController
                         V2XMessage msg = null;
                         double accuracyFromProto = 0.0;
                         bool isStandalone = false;
+
+                        processed++;
+                        if (processed % 20 == 0 || processed == total)
+                            prog.Report(20.0 + 80.0 * processed / total);
 
                         // ── Protobuf raw hex řádek z COM portu ──────────────────────────────
                         if (IsProtobufMessage(raw))
@@ -9205,15 +9257,27 @@ namespace V2XController
 
             playbackMaxTime = tramFrames.Max(frames => frames.Count > 0 ? frames.Last().Timestamp : TimeSpan.Zero);
 
+            if (playbackMaxTime == TimeSpan.Zero)
+            {
+                HideLoadingOverlay();
+                MessageBox.Show(
+                    "Failed to load the recording.\n\nThe file has an invalid format or is corrupted.",
+                    "Load error",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Error);
+                return;
+            }
+
             _replayStartUtc = minUtc;
             _replayEndUtc = maxUtc;
             _playbackLoaded = true;
             _lastReplayFile = fileName;
             BuildPlaybackKeyframes();
             UpdateUiEnabledState();
-            UpdateReplayTimerLabel();
-            MessageBox.Show("CAM recording loaded. Use Play to start playback.", "Playback ready", MessageBoxButton.OK, MessageBoxImage.Information);
+            HideLoadingOverlay();
+            MessageBox.Show("Playback data loaded. Use Play button to start playback.", "Playback ready", MessageBoxButton.OK, MessageBoxImage.Information);
         }
+        
 
         /// <summary>
         /// Parses a standalone &lt;vehPt .../&gt; block (protobuf recording format).
@@ -10775,6 +10839,7 @@ namespace V2XController
                         MessageBox.Show("Error while closing port: " + ex.Message, "Disconnect", MessageBoxButton.OK, MessageBoxImage.Warning);
                     }
 
+                    ClearLiveVehiclesAndRsu();
                     StopSrvAutoTimer();
                     _isConnected = false;
                     UpdateUiEnabledState();
@@ -10864,6 +10929,7 @@ namespace V2XController
                     MessageBox.Show("Error while closing port: " + ex.Message, "Disconnect", MessageBoxButton.OK, MessageBoxImage.Warning);
                 }
 
+                ClearLiveVehiclesAndRsu();
                 StopSrvAutoTimer();
                 _isConnected = false;
 
@@ -10877,6 +10943,66 @@ namespace V2XController
                 MessageBox.Show("Error disconnecting: " + ex.Message);
             }
         }
+
+        /// <summary>
+        /// Clears all live vehicles, drawn trams, RSU markers, and the radius circle from the canvas.
+        /// Called on disconnect to leave the map clean for the next session.
+        /// </summary>
+        private void ClearLiveVehiclesAndRsu()
+        {
+            // 1. Cancel all pending trail-cleanup tokens
+            foreach (var kv in vehicleTrailCleanupTokens.ToList())
+            {
+                try { kv.Value.Cancel(); kv.Value.Dispose(); } catch { }
+            }
+            vehicleTrailCleanupTokens.Clear();
+
+            // 2. Remove all live CAM / SRV vehicles
+            foreach (var kv in activeVehicles.ToList())
+                RemoveVehicleCompletely(kv.Key, kv.Value);
+            activeVehicles.Clear();
+
+            // 3. Remove all drawn (manual) trams
+            for (int i = 0; i < drawnTrams.Length; i++)
+            {
+                if (drawnTrams[i] != null)
+                    RemoveDrawnTramCompletely(i, drawnTrams[i]);
+            }
+
+            // 4. Remove any RSU-tagged canvas elements created by the Protobuf SRV path
+            //    (these are added directly to TileCanvas without going through activeVehicles)
+            var rsuEllipses = TileCanvas.Children.OfType<Ellipse>()
+                .Where(el => el.Tag is string t && t.StartsWith("RSU", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            foreach (var el in rsuEllipses) TileCanvas.Children.Remove(el);
+
+            var rsuLabels = TileCanvas.Children.OfType<TextBlock>()
+                .Where(tb => tb.Tag is string t && t.StartsWith("RSU", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            foreach (var tb in rsuLabels) TileCanvas.Children.Remove(tb);
+
+            // 5. Remove the radius circle and reset SRV position state
+            if (radiusEllipse != null)
+            {
+                TileCanvas.Children.Remove(radiusEllipse);
+                radiusEllipse = null;
+            }
+            srvLatitude = null;
+            srvLongitude = null;
+
+            // 6. Clear supporting state so the next session starts fresh
+            TramTable.Clear();
+            vehicleColorMap.Clear();
+            _lastLatLon.Clear();
+            _lastHeadingLive.Clear();
+            _lastLiveAccuracyById.Clear();
+            _liveAccuracyTextById.Clear();
+            _vehicleActiveZones.Clear();
+            _vehicleZoneValidEntry.Clear();
+
+            Console.WriteLine("[DISCONNECT] RSU and all vehicle visuals cleared.");
+        }
+
 
 
         /// <summary>
@@ -15611,6 +15737,102 @@ namespace V2XController
                 _protobufWindow.Activate();
             }
         }
+
+        /// <summary>
+        /// Shows a loading overlay over the map canvas with a determinate progress bar.
+        /// Safe to call from any thread.
+        /// </summary>
+        private void ShowLoadingOverlay(string message = "Loading replay...")
+        {
+            Dispatcher.Invoke(() =>
+            {
+                if (_loadingOverlay != null) return;
+
+                _loadingProgressBar = new ProgressBar
+                {
+                    Width = 300,
+                    Height = 16,
+                    Minimum = 0,
+                    Maximum = 100,
+                    Value = 0,
+                    Foreground = new SolidColorBrush(Color.FromRgb(0, 120, 215))
+                };
+
+                var label = new TextBlock
+                {
+                    Text = message,
+                    Foreground = Brushes.White,
+                    FontSize = 14,
+                    FontWeight = FontWeights.Bold,
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    Margin = new Thickness(0, 0, 0, 10)
+                };
+
+                var inner = new StackPanel
+                {
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Center
+                };
+                inner.Children.Add(label);
+                inner.Children.Add(_loadingProgressBar);
+
+                var card = new Border
+                {
+                    Background = new SolidColorBrush(Color.FromArgb(235, 28, 28, 28)),
+                    CornerRadius = new CornerRadius(8),
+                    Padding = new Thickness(32, 20, 32, 20),
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Child = inner
+                };
+
+                double w = TileCanvas.ActualWidth > 0 ? TileCanvas.ActualWidth : 800;
+                double h = TileCanvas.ActualHeight > 0 ? TileCanvas.ActualHeight : 600;
+
+                _loadingOverlay = new Border
+                {
+                    Width = w,
+                    Height = h,
+                    Background = new SolidColorBrush(Color.FromArgb(160, 0, 0, 0)),
+                    IsHitTestVisible = true,
+                    Child = card
+                };
+
+                Canvas.SetLeft(_loadingOverlay, 0);
+                Canvas.SetTop(_loadingOverlay, 0);
+                Panel.SetZIndex(_loadingOverlay, int.MaxValue - 1);
+                TileCanvas.Children.Add(_loadingOverlay);
+            });
+        }
+
+        /// <summary>
+        /// Updates the loading overlay progress bar (0–100). Safe to call from any thread.
+        /// </summary>
+        private void UpdateLoadingProgress(double percent)
+        {
+            if (_loadingProgressBar == null) return;
+            Dispatcher.BeginInvoke(() =>
+            {
+                if (_loadingProgressBar != null)
+                    _loadingProgressBar.Value = Math.Clamp(percent, 0, 100);
+            });
+        }
+
+        /// <summary>
+        /// Hides and removes the loading overlay. Safe to call multiple times or from any thread.
+        /// </summary>
+        private void HideLoadingOverlay()
+        {
+            Dispatcher.Invoke(() =>
+            {
+                if (_loadingOverlay == null) return;
+                if (TileCanvas.Children.Contains(_loadingOverlay))
+                    TileCanvas.Children.Remove(_loadingOverlay);
+                _loadingOverlay = null;
+                _loadingProgressBar = null;
+            });
+        }
+
 
         /// <summary>
         /// Detects if a line contains a Protobuf message (Base64 or Hex)
