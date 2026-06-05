@@ -48,6 +48,8 @@ namespace V2XController
         };
         private OneofOption? _selectedOneofOption = null;
 
+        private List<string> _lastRawInputLines = new();
+
         private int _currentSearchIndex = -1;
         private List<int> _searchMatches = new List<int>();
         //private Brush _originalBackground;
@@ -129,6 +131,148 @@ namespace V2XController
                 StatusLabel.Foreground = Brushes.Red;
             }
         }
+
+        private static bool TryReadProtoVarint(byte[] bytes, ref int pos, out ulong value)
+        {
+            value = 0;
+            int shift = 0;
+            while (pos < bytes.Length)
+            {
+                byte b = bytes[pos++];
+                value |= ((ulong)(b & 0x7F)) << shift;
+                if ((b & 0x80) == 0) return true;
+                shift += 7;
+                if (shift >= 64) return false;
+            }
+            return false;
+        }
+
+        // Parses outer protobuf fields to distinguish RsuToControllerMessageData from ControllerToRsuMessageData.
+        // Returns the message type name, or null if undeterminable.
+        private static string? DetectOuterMessageTypeFromRawBytes(byte[] bytes)
+        {
+            int pos = 0;
+            int field10ContentOffset = -1;
+            int field10ContentLength = -1;
+
+            while (pos < bytes.Length)
+            {
+                if (!TryReadProtoVarint(bytes, ref pos, out ulong tag)) break;
+
+                int fieldNumber = (int)(tag >> 3);
+                int wireType = (int)(tag & 0x7);
+
+                switch (wireType)
+                {
+                    case 0: // varint
+                        if (!TryReadProtoVarint(bytes, ref pos, out _)) goto done;
+                        // field 6 = has_more_data (bool) — exclusive to ControllerToRsuMessageData
+                        if (fieldNumber == 6) return "ControllerToRsuMessageData";
+                        break;
+
+                    case 2: // length-delimited
+                        if (!TryReadProtoVarint(bytes, ref pos, out ulong len)) goto done;
+                        int contentStart = pos;
+                        int contentLen = (int)len;
+
+                        if (fieldNumber == 10)
+                        {
+                            field10ContentOffset = contentStart;
+                            field10ContentLength = contentLen;
+                        }
+                        else if (fieldNumber == 20)
+                        {
+                            // intersection_request (RSU→CTRL) or intersection_pass_request_status (CTRL→RSU)
+                            // Cannot distinguish here without inner inspection — leave for field10 heuristic
+                        }
+                        else if (fieldNumber == 30)
+                        {
+                            // empty_response (CTRL→RSU) is google.protobuf.Empty → length 0
+                            // Heartbeat (RSU→CTRL) has content → length > 0
+                            return contentLen == 0 ? "ControllerToRsuMessageData" : "RsuToControllerMessageData";
+                        }
+                        else if (fieldNumber == 40)
+                        {
+                            // poll_request (RSU→CTRL) is google.protobuf.Empty → always wire 2 len 0
+                            return "RsuToControllerMessageData";
+                        }
+
+                        if (pos + contentLen > bytes.Length) goto done;
+                        pos += contentLen;
+                        break;
+
+                    case 1: // 64-bit
+                        if (pos + 8 > bytes.Length) goto done;
+                        pos += 8;
+                        break;
+
+                    case 5: // 32-bit
+                        if (pos + 4 > bytes.Length) goto done;
+                        pos += 4;
+                        break;
+
+                    default:
+                        goto done;
+                }
+            }
+
+        done:
+            if (field10ContentOffset < 0 || field10ContentLength <= 0)
+                return null;
+
+            // Examine field 10 content to distinguish IntersectionStatus vs NearbyVehicleDetectionInfo
+            int innerEnd = field10ContentOffset + field10ContentLength;
+            int innerPos = field10ContentOffset;
+
+            while (innerPos < innerEnd)
+            {
+                if (!TryReadProtoVarint(bytes, ref innerPos, out ulong innerTag)) break;
+
+                int innerField = (int)(innerTag >> 3);
+                int innerWire = (int)(innerTag & 0x7);
+
+                switch (innerWire)
+                {
+                    case 0:
+                        if (!TryReadProtoVarint(bytes, ref innerPos, out _)) goto innerDone;
+                        break;
+
+                    case 2:
+                        if (!TryReadProtoVarint(bytes, ref innerPos, out ulong innerLen)) goto innerDone;
+
+                        // IntersectionStatus field 20 = intersection_lanes (wire 2) — not present in NearbyVehicleDetectionInfo
+                        if (innerField == 20) return "ControllerToRsuMessageData";
+
+                        // field 2 content: IntersectionId starts with 0x08 (int32 field 1),
+                        //                  VehicleInfo starts with 0x0A (string field 1)
+                        if (innerField == 2 && innerLen > 0 && innerPos < bytes.Length)
+                        {
+                            if (bytes[innerPos] == 0x0A) return "RsuToControllerMessageData"; // string vehicle_id
+                            if (bytes[innerPos] == 0x08) return "ControllerToRsuMessageData"; // int32 intersection_id
+                        }
+
+                        if (innerPos + (int)innerLen > bytes.Length) goto innerDone;
+                        innerPos += (int)innerLen;
+                        break;
+
+                    case 5: // 32-bit float
+                        if (innerPos + 4 > bytes.Length) goto innerDone;
+                        // NearbyVehicleDetectionInfo field 11 = speed, field 12 = heading (both float)
+                        if (innerField == 11 || innerField == 12) return "RsuToControllerMessageData";
+                        innerPos += 4;
+                        break;
+
+                    default:
+                        goto innerDone;
+                }
+            }
+
+        innerDone:
+            return null;
+        }
+
+        // Checks raw protobuf binary for the message type. Handles both single and empty-payload messages.
+        
 
         private void GenerateAndShowDefaultMessage()
         {
@@ -481,7 +625,156 @@ namespace V2XController
                 }
             }
         }
-        // Replace TestDecode_Click method (around line 1700)
+
+        private static bool IsAmbiguousOrEmptyLabel(string label) =>
+    string.IsNullOrEmpty(label) || label.Contains('/');
+
+        private static string ExtractTimestampPrefix(string line)
+        {
+            var match = System.Text.RegularExpressions.Regex.Match(line, @"^(\d{2}:\d{2}:\d{2}\.\d+)");
+            return match.Success ? match.Groups[1].Value : string.Empty;
+        }
+
+        private static Dictionary<string, Queue<string>> BuildTimestampRawQueue(List<string> rawLines)
+        {
+            var map = new Dictionary<string, Queue<string>>();
+            foreach (var line in rawLines)
+            {
+                string trimmed = line.Trim();
+                if (string.IsNullOrEmpty(trimmed))
+                    continue;
+
+                string timestamp = string.Empty;
+                string rawData = trimmed;
+
+                var match = System.Text.RegularExpressions.Regex.Match(trimmed, @"^(\d{2}:\d{2}:\d{2}\.\d+)[,\s]+(.+)$");
+                if (match.Success)
+                {
+                    timestamp = match.Groups[1].Value;
+                    rawData = match.Groups[2].Value.Trim();
+                }
+
+                if (!map.ContainsKey(timestamp))
+                    map[timestamp] = new Queue<string>();
+                map[timestamp].Enqueue(rawData);
+            }
+            return map;
+        }
+
+        // Checks raw protobuf binary for field 30 (empty_response) or field 40 (poll_request).
+        // Field 30 wire type 2 → tag varint: 0xF2 0x01
+        // Field 40 wire type 2 → tag varint: 0xC2 0x02
+        private static bool TryDetectMessageTypeFromRawBytes(string rawLine, out string label)
+        {
+            label = string.Empty;
+            if (string.IsNullOrWhiteSpace(rawLine))
+                return false;
+
+            string data = System.Text.RegularExpressions.Regex.Replace(rawLine.Trim(), @"^<\d+>", "").Trim();
+
+            byte[] bytes;
+            try
+            {
+                bytes = Convert.FromBase64String(data);
+            }
+            catch
+            {
+                try
+                {
+                    if (data.Length % 2 == 0 &&
+                        System.Text.RegularExpressions.Regex.IsMatch(data, @"^[0-9A-Fa-f]+$"))
+                        bytes = Convert.FromHexString(data);
+                    else
+                        return false;
+                }
+                catch { return false; }
+            }
+
+            string? detectedType = DetectOuterMessageTypeFromRawBytes(bytes);
+
+            if (detectedType == "ControllerToRsuMessageData")
+            {
+                bool hasField10 = false, hasField20 = false, hasField30 = false;
+                int pos = 0;
+                while (pos < bytes.Length)
+                {
+                    if (!TryReadProtoVarint(bytes, ref pos, out ulong t)) break;
+                    int fn = (int)(t >> 3);
+                    int wt = (int)(t & 7);
+                    if (wt == 2)
+                    {
+                        if (!TryReadProtoVarint(bytes, ref pos, out ulong l)) break;
+                        if (fn == 10) hasField10 = true;
+                        else if (fn == 20) hasField20 = true;
+                        else if (fn == 30) { hasField30 = true; }
+                        if (pos + (int)l > bytes.Length) break;
+                        pos += (int)l;
+                    }
+                    else if (wt == 0) { if (!TryReadProtoVarint(bytes, ref pos, out _)) break; }
+                    else if (wt == 1) { if (pos + 8 > bytes.Length) break; pos += 8; }
+                    else if (wt == 5) { if (pos + 4 > bytes.Length) break; pos += 4; }
+                    else break;
+                }
+
+                if (!hasField10 && !hasField20 && !hasField30)
+                    return false; // metadata-only, cannot determine payload type
+
+                label = hasField10 ? "CTRL -> RSU (Intersection Status)" :
+                        hasField20 ? "CTRL -> RSU (Pass Req Status)" :
+                                     "CTRL -> RSU (Empty Response)";
+                return true;
+            }
+
+            if (detectedType == "RsuToControllerMessageData")
+            {
+                bool hasField10 = false, hasField20 = false, hasField30 = false, hasField40 = false;
+                int pos = 0;
+                while (pos < bytes.Length)
+                {
+                    if (!TryReadProtoVarint(bytes, ref pos, out ulong t)) break;
+                    int fn = (int)(t >> 3);
+                    int wt = (int)(t & 7);
+                    if (wt == 2)
+                    {
+                        if (!TryReadProtoVarint(bytes, ref pos, out ulong l)) break;
+                        if (fn == 10) hasField10 = true;
+                        else if (fn == 20) hasField20 = true;
+                        else if (fn == 30) hasField30 = true;
+                        else if (fn == 40) hasField40 = true;
+                        if (pos + (int)l > bytes.Length) break;
+                        pos += (int)l;
+                    }
+                    else if (wt == 0) { if (!TryReadProtoVarint(bytes, ref pos, out _)) break; }
+                    else if (wt == 1) { if (pos + 8 > bytes.Length) break; pos += 8; }
+                    else if (wt == 5) { if (pos + 4 > bytes.Length) break; pos += 4; }
+                    else break;
+                }
+
+                if (!hasField10 && !hasField20 && !hasField30 && !hasField40)
+                    return false; // metadata-only, cannot determine payload type
+
+                label = hasField10 ? "RSU -> CTRL (Nearby Vehicle)" :
+                        hasField20 ? "RSU -> CTRL (Intersection Req)" :
+                        hasField30 ? "RSU -> CTRL (Heartbeat)" :
+                                     "RSU -> CTRL (Poll Request)";
+                return true;
+            }
+
+   
+
+            return false;
+        }
+
+        private static bool IsMetadataOnlyJson(string json) =>
+            !json.Contains("\"nearby_vehicle_detection\"") &&
+            !json.Contains("\"intersection_request\"") &&
+            !json.Contains("\"heartbeat\"") &&
+            !json.Contains("\"poll_request\"") &&
+            !json.Contains("\"intersection_status\"") &&
+            !json.Contains("\"intersection_pass_request_status\"") &&
+            !json.Contains("\"empty_response\"") &&
+            !json.Contains("\"has_more_data\"");
+
         private void TestDecode_Click(object sender, RoutedEventArgs e)
         {
             string input = TestHexTextBox.Text?.Trim() ?? string.Empty;
@@ -498,14 +791,14 @@ namespace V2XController
                 return;
             }
 
-            // Check if input contains multiple lines
             var inputLines = input.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
                                   .Where(line => !string.IsNullOrWhiteSpace(line.Trim()))
                                   .ToList();
+            _lastRawInputLines = inputLines;
+
 
             if (inputLines.Count > 1)
             {
-                // Multiple messages - switch to "All"
                 if (AllRadio != null && AllRadio.IsChecked != true)
                 {
                     AllRadio.IsChecked = true;
@@ -514,7 +807,6 @@ namespace V2XController
                 }
             }
 
-            // Determine which message type to force (based on radio selection)
             string? forceMessageType = null;
             if (RsuToControllerRadio?.IsChecked == true)
             {
@@ -531,12 +823,54 @@ namespace V2XController
                 Console.WriteLine("[DECODE UI] Auto-detect mode");
             }
 
-            // DECODE
+                        // Pre-decode: detect message type from raw bytes in auto-detect mode for accuracy
+            if (forceMessageType == null)
+            {
+                foreach (var rawLine in inputLines)
+                {
+                    string strippedLine = rawLine.Trim();
+
+                    var tokenMatch = System.Text.RegularExpressions.Regex.Match(
+                        strippedLine,
+                        @"^(?:\d{2}:\d{2}:\d{2}\.\d+[,\s]+)?(?:<\d+>)?(\S+)$"
+                    );
+
+                    string token = tokenMatch.Success ? tokenMatch.Groups[1].Value : strippedLine;
+
+                    byte[] raw;
+                    try
+                    {
+                        raw = Convert.FromBase64String(token);
+                    }
+                    catch
+                    {
+                        try
+                        {
+                            if (token.Length % 2 == 0 &&
+                                System.Text.RegularExpressions.Regex.IsMatch(token, @"^[0-9A-Fa-f]+$"))
+                                raw = Convert.FromHexString(token);
+                            else
+                        continue;
+                    }
+                        catch { continue; }
+                    }
+
+                    string? detectedFromBytes = DetectOuterMessageTypeFromRawBytes(raw);
+                    if (detectedFromBytes != null)
+                    {
+                        forceMessageType = detectedFromBytes;
+                        Console.WriteLine($"[DECODE UI] Pre-decode type from bytes: {forceMessageType}");
+                        break;
+                    }
+                    }
+                }
+
             if (ProtobufParser.TryDecodeProtobufFromHex(input, out string decoded, forceMessageType))
             {
                 Console.WriteLine($"[DECODE UI] Decode successful, result length: {decoded.Length}");
 
-                // Check if result is empty
+                decoded = SanitizeDecodedJson(decoded);
+
                 string trimmedResult = decoded.Trim();
                 bool isEmpty = trimmedResult == "{}" || trimmedResult == "{ }" || string.IsNullOrWhiteSpace(trimmedResult);
 
@@ -544,60 +878,49 @@ namespace V2XController
                 {
                     Console.WriteLine("[DECODE UI] Empty result, trying opposite direction");
 
-                    // Empty with forced type - try opposite direction
                     string oppositeType = forceMessageType == "RsuToControllerMessageData"
                         ? "ControllerToRsuMessageData"
                         : "RsuToControllerMessageData";
 
                     if (ProtobufParser.TryDecodeProtobufFromHex(input, out string retryDecoded, oppositeType))
                     {
+                        retryDecoded = SanitizeDecodedJson(retryDecoded);
                         string retryTrimmed = retryDecoded.Trim();
                         bool retryIsEmpty = retryTrimmed == "{}" || retryTrimmed == "{ }" || string.IsNullOrWhiteSpace(retryTrimmed);
 
                         if (!retryIsEmpty)
                         {
                             Console.WriteLine($"[DECODE UI] Opposite direction successful: {oppositeType}");
-
-                            // Success with opposite direction - switch radio
                             SwitchToDetectedMessageType(oppositeType);
 
                             if (TestResultTextBox != null)
-                                TestResultTextBox.Text = retryDecoded;
+                                TestResultTextBox.Text = AnnotateDecodedResult(retryDecoded);
 
+                            StatusLabel.Content = "Decode successful (opposite direction)";
+                            StatusLabel.Foreground = Brushes.Green;
                             return;
                         }
                     }
                 }
 
-                // NEW: If we're in auto-detect mode, switch radio to detected type
-                if (AllRadio?.IsChecked == true && !isEmpty)
+                var (detectedType, _) = DetectDecodedMessageType(decoded);
+                Console.WriteLine($"[DECODE UI] Detected type: '{detectedType}'");
+
+                if (AllRadio?.IsChecked != true && !isEmpty && !string.IsNullOrEmpty(detectedType))
                 {
-                    Console.WriteLine("[DECODE UI] Auto-detect mode - detecting type from JSON");
-
-                    // Try to detect which type was actually decoded
-                    string detectedType = DetectDecodedMessageType(decoded);
-
-                    Console.WriteLine($"[DECODE UI] Detected type: '{detectedType}'");
-
-                    if (!string.IsNullOrEmpty(detectedType))
-                    {
-                        Console.WriteLine($"[DECODE UI] Switching to detected type: {detectedType}");
-                        SwitchToDetectedMessageType(detectedType);
-                    }
-                    else
-                    {
-                        Console.WriteLine("[DECODE UI] Could not detect type from JSON");
-                    }
+                    Console.WriteLine($"[DECODE UI] Switching to detected type: {detectedType}");
+                    SwitchToDetectedMessageType(detectedType);
                 }
 
-                // Show result
-                TestResultTextBox.Text = decoded;
+                TestResultTextBox.Text = AnnotateDecodedResult(decoded);
 
                 string directionLabel = forceMessageType == "RsuToControllerMessageData" ? "RSU->Controller" :
-                                       forceMessageType == "ControllerToRsuMessageData" ? "Controller->RSU" :
-                                       "Auto-detect";
+                       forceMessageType == "ControllerToRsuMessageData" ? "Controller->RSU" :
+                       "Auto-detect";
 
-                StatusLabel.Content = isEmpty ? $"Decode returned empty result ({directionLabel})" : $"Decode successful ({directionLabel})";
+                StatusLabel.Content = isEmpty
+                    ? $"Decode returned empty result ({directionLabel})"
+                    : $"Decode successful ({directionLabel})";
                 StatusLabel.Foreground = isEmpty ? Brushes.Orange : Brushes.Green;
             }
             else
@@ -609,161 +932,358 @@ namespace V2XController
             }
         }
 
-        // Helper method to detect message type from decoded JSON
-        private string DetectDecodedMessageType(string decodedJson)
+
+        private static bool IsLabelCompatibleWithJson(string label, string jsonPart)
         {
-            if (string.IsNullOrWhiteSpace(decodedJson))
+            if (string.IsNullOrEmpty(label))
+                return true;
+
+            if (IsMetadataOnlyJson(jsonPart))
             {
-                Console.WriteLine("[DETECT TYPE] Empty JSON");
-                return string.Empty;
+                // Metadata-only decoded JSON can only have empty-payload labels
+                return label.Contains("Poll Request") || label.Contains("Empty Response");
             }
+
+            // For payload-containing JSON, verify the label actually matches the JSON content
+            if (jsonPart.Contains("\"nearby_vehicle_detection\"") && !label.Contains("Nearby Vehicle"))
+                return false;
+            if (jsonPart.Contains("\"heartbeat\"") && !label.Contains("Heartbeat"))
+                return false;
+            if (jsonPart.Contains("\"intersection_request\"") && !label.Contains("Intersection Req"))
+                return false;
+            if (jsonPart.Contains("\"intersection_status\"") && !label.Contains("Intersection Status"))
+                return false;
+            if (jsonPart.Contains("\"intersection_pass_request_status\"") && !label.Contains("Pass Req"))
+                return false;
+            if (jsonPart.Contains("\"empty_response\"") && !label.Contains("Empty Response"))
+                return false;
+
+            return true;
+        }
+
+        // Fixes string-valued JSON fields that actually contain raw IEEE 754 float/double bytes
+        private string SanitizeDecodedJson(string json)
+        {
+            if (string.IsNullOrWhiteSpace(json))
+                return json;
+
+            // Try whole string first (single pretty-printed message)
+            try { return SanitizeJsonDocument(json); }
+            catch { }
+
+            // Line-by-line — handles "timestamp {...}" and plain "{...}" lines
+            var sb = new StringBuilder();
+            foreach (var line in json.Split('\n'))
+            {
+                string jsonPart = ExtractJsonFromLine(line);
+
+                if (jsonPart != null)
+                {
+                    string prefix = line.Substring(0, line.IndexOf(jsonPart, StringComparison.Ordinal));
+                    try { sb.AppendLine(prefix + SanitizeJsonDocument(jsonPart)); }
+                    catch { sb.AppendLine(line); }
+                }
+                else
+                {
+                    sb.AppendLine(line);
+                }
+            }
+            return sb.ToString().TrimEnd();
+        }
+
+        // Returns the JSON substring from a line, or null if none found.
+        // Handles both "{...}" lines and "12:56:47.982 {...}" lines.
+        private static string? ExtractJsonFromLine(string line)
+        {
+            int idx = line.IndexOf('{');
+            if (idx < 0)
+                return null;
+
+            // Everything before { must be whitespace or a timestamp-like prefix (digits, colons, dots, spaces)
+            string prefix = line.Substring(0, idx);
+            if (!string.IsNullOrWhiteSpace(prefix) &&
+                !System.Text.RegularExpressions.Regex.IsMatch(prefix, @"^[\d\s:.\-]+$"))
+                return null;
+
+            return line.Substring(idx).Trim();
+        }
+
+        // Returns (messageType, shortLabel) — label is e.g. "RSU -> CTRL (Heartbeat)"
+        
+
+        private string SanitizeJsonDocument(string json)
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            var options = new System.Text.Json.JsonWriterOptions { Indented = false };
+            using var stream = new MemoryStream();
+            using var writer = new System.Text.Json.Utf8JsonWriter(stream, options);
+            WriteSanitizedElement(writer, doc.RootElement);
+            writer.Flush();
+            return Encoding.UTF8.GetString(stream.ToArray());
+        }
+
+        private void WriteSanitizedElement(System.Text.Json.Utf8JsonWriter writer, System.Text.Json.JsonElement element)
+        {
+            switch (element.ValueKind)
+            {
+                case System.Text.Json.JsonValueKind.Object:
+                    writer.WriteStartObject();
+                    foreach (var prop in element.EnumerateObject())
+                    {
+                        writer.WritePropertyName(prop.Name);
+                        WriteSanitizedElement(writer, prop.Value);
+                    }
+                    writer.WriteEndObject();
+                    break;
+
+                case System.Text.Json.JsonValueKind.Array:
+                    writer.WriteStartArray();
+                    foreach (var item in element.EnumerateArray())
+                        WriteSanitizedElement(writer, item);
+                    writer.WriteEndArray();
+                    break;
+
+                case System.Text.Json.JsonValueKind.String:
+                    var strVal = element.GetString() ?? string.Empty;
+
+                    // If string contains non-printable control characters, it's likely raw binary bytes
+                    if (strVal.Any(c => c < 0x20))
+                    {
+                        var bytes = strVal.Select(c => (byte)(c & 0xFF)).ToArray();
+
+                        if (bytes.Length == 4)
+                        {
+                            float f = BitConverter.ToSingle(bytes, 0);
+                            if (float.IsFinite(f)) { writer.WriteNumberValue(f); break; }
+                        }
+                        else if (bytes.Length == 8)
+                        {
+                            double d = BitConverter.ToDouble(bytes, 0);
+                            if (double.IsFinite(d)) { writer.WriteNumberValue(d); break; }
+                        }
+                        // Protobuf tag-prefixed 32-bit float: field 1, wire type 5 → tag byte 0x0D
+                        else if (bytes.Length == 5 && bytes[0] == 0x0D)
+                        {
+                            float f = BitConverter.ToSingle(bytes, 1);
+                            if (float.IsFinite(f)) { writer.WriteNumberValue(f); break; }
+                        }
+                        // Protobuf tag-prefixed 64-bit double: field 1, wire type 1 → tag byte 0x09
+                        else if (bytes.Length == 9 && bytes[0] == 0x09)
+                        {
+                            double d = BitConverter.ToDouble(bytes, 1);
+                            if (double.IsFinite(d)) { writer.WriteNumberValue(d); break; }
+                        }
+                    }
+
+                    writer.WriteStringValue(strVal);
+                    break;
+
+                case System.Text.Json.JsonValueKind.Number:
+                    writer.WriteRawValue(element.GetRawText());
+                    break;
+
+                case System.Text.Json.JsonValueKind.True:
+                    writer.WriteBooleanValue(true);
+                    break;
+
+                case System.Text.Json.JsonValueKind.False:
+                    writer.WriteBooleanValue(false);
+                    break;
+
+                case System.Text.Json.JsonValueKind.Null:
+                    writer.WriteNullValue();
+                    break;
+            }
+        }
+
+
+        // Prepends a "// direction (type)" comment before each decoded JSON line.
+        // For a single pretty-printed message, annotates the whole block once.
+        private string AnnotateDecodedResult(string decoded)
+        {
+            if (string.IsNullOrWhiteSpace(decoded))
+                return decoded;
+
+            var allLines = decoded.Split('\n');
+            int jsonLineCount = allLines.Count(l => ExtractJsonFromLine(l.TrimEnd()) != null);
+
+            // Single message (possibly pretty-printed) — annotate once
+            if (jsonLineCount <= 1)
+            {
+                var (_, label) = DetectDecodedMessageType(decoded);
+
+                if (IsAmbiguousOrEmptyLabel(label) && _lastRawInputLines.Count > 0)
+                    TryDetectMessageTypeFromRawBytes(_lastRawInputLines[0], out label);
+
+                return string.IsNullOrEmpty(label) ? decoded : $"// {label}\n{decoded}";
+            }
+
+            // Multiple one-liner messages — annotate each JSON line individually
+            var timestampMap = BuildTimestampRawQueue(_lastRawInputLines);
+            int rawLineIndex = 0;
+
+            var sb = new StringBuilder();
+            foreach (var line in allLines)
+            {
+                string trimmed = line.TrimEnd();
+
+                if (string.IsNullOrWhiteSpace(trimmed))
+                {
+                    sb.AppendLine();
+                    continue;
+                }
+
+                string? jsonPart = ExtractJsonFromLine(trimmed);
+                if (jsonPart != null && jsonPart.Length > 2 && jsonPart != "{}" && jsonPart != "{ }")
+                {
+                    string label = string.Empty;
+
+                    // Raw bytes detection always takes priority — most accurate source of truth
+                    string ts = ExtractTimestampPrefix(trimmed);
+                    string? rawData = null;
+
+                    if (!string.IsNullOrEmpty(ts) &&
+                        timestampMap.TryGetValue(ts, out var queue) &&
+                        queue.Count > 0)
+                    {
+                        rawData = queue.Dequeue();
+                    }
+                    else if (rawLineIndex < _lastRawInputLines.Count)
+                    {
+                        rawData = _lastRawInputLines[rawLineIndex];
+                    }
+
+                    if (rawData != null)
+                    {
+                        TryDetectMessageTypeFromRawBytes(rawData, out label);
+
+                        // Discard label if it's incompatible with the decoded JSON content
+                        // (raw bytes and decoded line belong to different messages at same timestamp)
+                        if (!IsLabelCompatibleWithJson(label, jsonPart))
+                            label = string.Empty;
+                    }
+
+                    // Fall back to JSON content detection only when raw bytes gave no result
+                    if (string.IsNullOrEmpty(label))
+                    {
+                        var (_, jsonLabel) = TryDetectSingleJson(jsonPart);
+                        label = jsonLabel;
+                    }
+
+                    rawLineIndex++;
+
+                    if (!string.IsNullOrEmpty(label))
+                        sb.AppendLine($"// {label}");
+                }
+
+                sb.AppendLine(trimmed);
+            }
+
+            return sb.ToString().TrimEnd();
+        }
+
+        private void SwitchToDetectedMessageType(string messageType)
+        {
+            _suppressRadioChange = true;
 
             try
             {
-                Console.WriteLine($"[DETECT TYPE] Parsing JSON (length: {decodedJson.Length})");
-                Console.WriteLine($"[DETECT TYPE] JSON content: {decodedJson}");
-
-                // Parse JSON to detect fields
-                var jsonDoc = System.Text.Json.JsonDocument.Parse(decodedJson);
-                var root = jsonDoc.RootElement;
-
-                Console.WriteLine($"[DETECT TYPE] JSON parsed successfully, ValueKind: {root.ValueKind}");
-
-                // Log all properties in the JSON
-                if (root.ValueKind == System.Text.Json.JsonValueKind.Object)
+                if (messageType == "RsuToControllerMessageData")
                 {
-                    var properties = new List<string>();
-                    foreach (var prop in root.EnumerateObject())
-                    {
-                        properties.Add(prop.Name);
-                    }
-                    Console.WriteLine($"[DETECT TYPE] JSON properties: {string.Join(", ", properties)}");
+                    _currentDirection = MessageDirection.RsuToController;
+                    if (RsuToControllerRadio != null)
+                        RsuToControllerRadio.IsChecked = true;
+                    PopulateMessageTypeDropdown("RsuToControllerMessageData");
                 }
-
-                // Check for RSU -> Controller fields
-                bool hasNearbyVehicle = root.TryGetProperty("nearby_vehicle_detection", out _);
-                bool hasIntersectionRequest = root.TryGetProperty("intersection_request", out _);
-                bool hasHeartbeat = root.TryGetProperty("heartbeat", out _);
-                bool hasPollRequest = root.TryGetProperty("poll_request", out _);
-
-                Console.WriteLine($"[DETECT TYPE] RSU->Controller checks: nearby={hasNearbyVehicle}, request={hasIntersectionRequest}, heartbeat={hasHeartbeat}, poll={hasPollRequest}");
-
-                if (hasNearbyVehicle || hasIntersectionRequest || hasHeartbeat || hasPollRequest)
+                else if (messageType == "ControllerToRsuMessageData")
                 {
-                    Console.WriteLine("[DETECT TYPE] → RsuToControllerMessageData");
-                    return "RsuToControllerMessageData";
+                    _currentDirection = MessageDirection.ControllerToRsu;
+                    if (ControllerToRsuRadio != null)
+                        ControllerToRsuRadio.IsChecked = true;
+                    PopulateMessageTypeDropdown("ControllerToRsuMessageData");
                 }
-
-                // Check for Controller -> RSU fields
-                bool hasIntersectionStatus = root.TryGetProperty("intersection_status", out _);
-                bool hasPassRequestStatus = root.TryGetProperty("intersection_pass_request_status", out _);
-                bool hasEmptyResponse = root.TryGetProperty("empty_response", out _);
-
-                Console.WriteLine($"[DETECT TYPE] Controller->RSU checks: status={hasIntersectionStatus}, passStatus={hasPassRequestStatus}, empty={hasEmptyResponse}");
-
-                if (hasIntersectionStatus || hasPassRequestStatus || hasEmptyResponse)
-                {
-                    Console.WriteLine("[DETECT TYPE] → ControllerToRsuMessageData");
-                    return "ControllerToRsuMessageData";
-                }
-
-                // NEW: Check if message contains ONLY metadata (crc, timestamp, device_id)
-                // This indicates an empty_response (ControllerToRsu)
-                bool hasCrc = root.TryGetProperty("crc", out _);
-                bool hasTimestamp = root.TryGetProperty("timestamp", out _);
-                bool hasDeviceId = root.TryGetProperty("device_id", out _);
-
-                var allProps = new HashSet<string>();
-                foreach (var prop in root.EnumerateObject())
-                {
-                    allProps.Add(prop.Name);
-                }
-
-                // If we have ONLY metadata fields (and maybe revision/other common fields), it's likely empty_response
-                bool onlyMetadata = allProps.All(p =>
-                    p == "crc" ||
-                    p == "timestamp" ||
-                    p == "device_id" ||
-                    p == "revision" ||
-                    p == "message_number"
-                );
-
-                if (onlyMetadata && (hasCrc || hasTimestamp || hasDeviceId))
-                {
-                    Console.WriteLine("[DETECT TYPE] → ControllerToRsuMessageData (metadata-only, likely empty_response)");
-                    return "ControllerToRsuMessageData";
-                }
-
-                Console.WriteLine("[DETECT TYPE] No matching fields found");
             }
-            catch (Exception ex)
+            finally
             {
-                Console.WriteLine($"[DETECT TYPE] Exception: {ex.Message}");
+                _suppressRadioChange = false;
             }
-
-            return string.Empty;
         }
 
-        // Helper method to switch radio buttons and update UI
-        private void SwitchToDetectedMessageType(string messageType)
+
+
+        private (string messageType, string label) DetectDecodedMessageType(string decodedJson)
         {
-            Console.WriteLine($"[SWITCH TYPE] Requested switch to: {messageType}");
+            if (string.IsNullOrWhiteSpace(decodedJson))
+                return (string.Empty, string.Empty);
 
-            if (messageType == "RsuToControllerMessageData")
+            var lines = decodedJson.Split('\n');
+
+            // Count lines that contain a JSON object (with possible timestamp prefix)
+            int jsonLines = lines.Count(l => ExtractJsonFromLine(l) != null);
+
+            if (jsonLines <= 1)
             {
-                if (RsuToControllerRadio != null && RsuToControllerRadio.IsChecked != true)
+                // Single message — try whole string (handles pretty-printed JSON)
+                var wholeResult = TryDetectSingleJson(decodedJson.Trim());
+                if (!string.IsNullOrEmpty(wholeResult.messageType))
                 {
-                    Console.WriteLine("[SWITCH TYPE] Switching to RSU->Controller radio");
-
-                    // Temporarily suppress the Changed event to avoid regenerating default message
-                    _suppressRadioChange = true;
-                    RsuToControllerRadio.IsChecked = true;
-                    _suppressRadioChange = false;
-
-                    _currentDirection = MessageDirection.RsuToController;
-                    PopulateMessageTypeDropdown("RsuToControllerMessageData");
-
-                    StatusLabel.Content = "Auto-switched to: RSU → Controller";
-                    StatusLabel.Foreground = Brushes.Green;
-
-                    Console.WriteLine("[SWITCH TYPE] Switch complete");
-                }
-                else
-                {
-                    Console.WriteLine("[SWITCH TYPE] Already on RSU->Controller");
-                }
-            }
-            else if (messageType == "ControllerToRsuMessageData")
-            {
-                if (ControllerToRsuRadio != null && ControllerToRsuRadio.IsChecked != true)
-                {
-                    Console.WriteLine("[SWITCH TYPE] Switching to Controller->RSU radio");
-
-                    // Temporarily suppress the Changed event to avoid regenerating default message
-                    _suppressRadioChange = true;
-                    ControllerToRsuRadio.IsChecked = true;
-                    _suppressRadioChange = false;
-
-                    _currentDirection = MessageDirection.ControllerToRsu;
-                    PopulateMessageTypeDropdown("ControllerToRsuMessageData");
-
-                    StatusLabel.Content = "Auto-switched to: Controller → RSU";
-                    StatusLabel.Foreground = Brushes.Green;
-
-                    Console.WriteLine("[SWITCH TYPE] Switch complete");
-                }
-                else
-                {
-                    Console.WriteLine("[SWITCH TYPE] Already on Controller->RSU");
+                    Console.WriteLine($"[DETECT TYPE] Matched whole document: {wholeResult.label}");
+                    return wholeResult;
                 }
             }
             else
             {
-                Console.WriteLine($"[SWITCH TYPE] Unknown message type: {messageType}");
+                // Multi-message — process line by line, return first conclusive match
+                foreach (var line in lines)
+                {
+                    string? jsonPart = ExtractJsonFromLine(line);
+                    if (jsonPart == null)
+                        continue;
+
+                    var result = TryDetectSingleJson(jsonPart);
+                    if (!string.IsNullOrEmpty(result.messageType))
+                    {
+                        Console.WriteLine($"[DETECT TYPE] Multi-line match: {result.label}");
+                        return result;
+                    }
+                }
             }
+
+            Console.WriteLine("[DETECT TYPE] No conclusive match found");
+            return (string.Empty, string.Empty);
         }
 
-        
+        private (string messageType, string label) TryDetectSingleJson(string json)
+        {
+            int rsuScore = 0;
+            int ctrlScore = 0;
+            string rsuLabel = string.Empty;
+            string ctrlLabel = string.Empty;
+
+            // RSU -> Controller
+            if (json.Contains("\"nearby_vehicle_detection\"")) { rsuScore += 100; if (rsuLabel == string.Empty) rsuLabel = "RSU -> CTRL (Nearby Vehicle)"; }
+            if (json.Contains("\"intersection_request\"")) { rsuScore += 100; if (rsuLabel == string.Empty) rsuLabel = "RSU -> CTRL (Intersection Req)"; }
+            if (json.Contains("\"heartbeat\"")) { rsuScore += 100; if (rsuLabel == string.Empty) rsuLabel = "RSU -> CTRL (Heartbeat)"; }
+            if (json.Contains("\"poll_request\"")) { rsuScore += 100; if (rsuLabel == string.Empty) rsuLabel = "RSU -> CTRL (Poll Request)"; }
+
+            // Controller -> RSU
+            if (json.Contains("\"intersection_status\"")) { ctrlScore += 100; if (ctrlLabel == string.Empty) ctrlLabel = "CTRL -> RSU (Intersection Status)"; }
+            if (json.Contains("\"intersection_pass_request_status\"")) { ctrlScore += 100; if (ctrlLabel == string.Empty) ctrlLabel = "CTRL -> RSU (Pass Req Status)"; }
+            if (json.Contains("\"empty_response\"")) { ctrlScore += 100; if (ctrlLabel == string.Empty) ctrlLabel = "CTRL -> RSU (Empty Response)"; }
+
+            // has_more_data is exclusive to ControllerToRsuMessageData — weak but reliable signal
+            if (json.Contains("\"has_more_data\"")) { ctrlScore += 10; if (ctrlLabel == string.Empty) ctrlLabel = "CTRL -> RSU (Empty Response)"; }
+
+            // Metadata-only (crc/timestamp/device_id with no payload field): indeterminate from JSON alone.
+            // Raw bytes fallback in AnnotateDecodedResult will resolve these.
+
+            Console.WriteLine($"[DETECT TYPE] Scores — RSU: {rsuScore}, CTRL: {ctrlScore}");
+
+            if (rsuScore > ctrlScore) return ("RsuToControllerMessageData", rsuLabel);
+            if (ctrlScore > rsuScore) return ("ControllerToRsuMessageData", ctrlLabel);
+
+            return (string.Empty, string.Empty);
+        }
 
         private void GenerateDefaultMessage_Click(object sender, RoutedEventArgs e)
         {
@@ -821,6 +1341,9 @@ namespace V2XController
             // Generate default message for the selected direction
             GenerateAndShowDefaultMessage();
         }
+
+
+
 
         private void PopulateMessageTypeDropdown(string messageType)
         {

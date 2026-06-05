@@ -140,7 +140,8 @@ namespace V2XController
             {
                 Latitude = Latitude ?? 0.0,
                 Longitude = Longitude ?? 0.0,
-                Dt = Timestamp ?? DateTime.UtcNow
+                Dt = Timestamp ?? DateTime.UtcNow,
+                LogicalId = string.IsNullOrWhiteSpace(DeviceId) ? "RSU" : DeviceId
             };
         }
     }

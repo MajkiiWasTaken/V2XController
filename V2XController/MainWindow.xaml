@@ -77,8 +77,8 @@
                             Click="RefreshComPorts_Click" ToolTip="Refresh all COM ports"/>
                 </StackPanel>
             </GroupBox>
-            
-            
+
+
 
             <!-- RSU Settings -->
             <GroupBox Header="RSU Settings" Padding="10" Margin="0,0,0,10">
@@ -346,7 +346,7 @@
                         IsHitTestVisible="True"
                         MouseLeftButtonDown="TileCanvas_MouseLeftButtonDown"
                         MouseMove="TileCanvas_MouseMove"
-                        MouseLeftButtonUp="TileCanvas_MouseLeftButtonUp"/>  
+                        MouseLeftButtonUp="TileCanvas_MouseLeftButtonUp"/>
 
                     <StackPanel x:Name="PolylineWidthPanel" 
                     Visibility="Collapsed"
@@ -448,6 +448,9 @@
         <Button x:Name="MapControls" Content="Map controls ⌖" HorizontalAlignment="Left" VerticalAlignment="Bottom"
         Width="125" Height="20" Margin="665,0,0,271"
         Click="MapControls_Click" ToolTip="Displays map controls" Panel.ZIndex="100" RenderTransformOrigin="0.515,1.12"/>
+        <Button x:Name="Terminal" Content="Debug mode ⚙" HorizontalAlignment="Left" VerticalAlignment="Bottom"
+            Width="125" Height="20" Margin="340,0,0,237"
+            Click="DebugTerminal_Click" ToolTip="Opens debug terminal" Panel.ZIndex="100"/>
 
     </Grid>
 </Window>

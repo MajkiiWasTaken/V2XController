@@ -439,31 +439,33 @@ namespace V2XController
             // 3. NearbyVehicleDetectionInfo (field 10) vs IntersectionStatus (field 10)
             if (fieldNumbers.Contains(10) && field10InnerFieldNumbers.Count > 0)
             {
-                bool hasSpeed = field10InnerFieldNumbers.Contains(11);
-                bool hasHeading = field10InnerFieldNumbers.Contains(12);
-                bool hasVehicleInfo = field10InnerFieldNumbers.Contains(2);
+                bool hasSpeed = field10InnerFieldNumbers.Contains(11); // speed - unique to NearbyVehicleDetection
+                bool hasHeading = field10InnerFieldNumbers.Contains(12); // heading - unique to NearbyVehicleDetection
 
-                // NearbyVehicleDetectionInfo má: timestamp(1), vehicle_info(2), coordinates(10), speed(11), heading(12), distance(20)
-                if ((hasSpeed || hasHeading || hasVehicleInfo))
-                {
-                    if (_compiledMessages.TryGetValue("RsuToControllerMessageData", out var rsuMsg))
-                    {
-                        Console.WriteLine("→ RsuToControllerMessageData (field 10 = nearby_vehicle_detection)");
-                        return rsuMsg;
-                    }
-                }
-
-                // IntersectionStatus má: timestamp(1), intersection_id(2), controller_status(10), intersection_lanes(20), movement_states(30)
+                // IntersectionStatus has: controller_status(10), intersection_lanes(20), movement_states(30)
+                // These field numbers don't appear in NearbyVehicleDetectionInfo inner fields
                 bool hasControllerStatus = field10InnerFieldNumbers.Contains(10);
                 bool hasLanes = field10InnerFieldNumbers.Contains(20);
                 bool hasMovementStates = field10InnerFieldNumbers.Contains(30);
 
+                // Check intersection_status first — its markers are unambiguous
                 if (!hasSpeed && !hasHeading && (hasControllerStatus || hasLanes || hasMovementStates))
                 {
                     if (_compiledMessages.TryGetValue("ControllerToRsuMessageData", out var ctrlMsg))
                     {
                         Console.WriteLine("→ ControllerToRsuMessageData (field 10 = intersection_status)");
                         return ctrlMsg;
+                    }
+                }
+
+                // NearbyVehicleDetectionInfo requires actual movement data (speed or heading)
+                // Do NOT use hasVehicleInfo (inner field 2) as a discriminator — intersection_id is also field 2
+                if (hasSpeed || hasHeading)
+                {
+                    if (_compiledMessages.TryGetValue("RsuToControllerMessageData", out var rsuMsg))
+                    {
+                        Console.WriteLine("→ RsuToControllerMessageData (field 10 = nearby_vehicle_detection)");
+                        return rsuMsg;
                     }
                 }
             }
@@ -2643,7 +2645,10 @@ namespace V2XController
                 if (string.IsNullOrWhiteSpace(input))
                     return false;
 
-                string protoDefinition = ProtobufWindow.GetCombinedProtoDefinition();
+                // Use already-compiled definitions when available to avoid redundant disk reads
+                string protoDefinition = _compiledMessages.Count > 0
+                    ? _currentProtoDefinition
+                    : ProtobufWindow.GetCombinedProtoDefinition();
                 if (string.IsNullOrWhiteSpace(protoDefinition))
                 {
                     decoded = "No proto definition loaded";

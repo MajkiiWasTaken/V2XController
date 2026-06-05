@@ -251,6 +251,9 @@ namespace V2XController
         private double? srvLongitude = null;
 
 
+        private bool _savedRecording = false;
+
+
         //Activation zones
         private Dictionary<Rectangle, ActivationZone> activationZones = new();
         private Ellipse? radiusEllipse;
@@ -505,8 +508,11 @@ namespace V2XController
         private readonly Dictionary<Rectangle, Polygon> _zoneArrows = new Dictionary<Rectangle, Polygon>();
         private readonly Dictionary<string, HashSet<ActivationZone>> _vehicleActiveZones = new();
 
+        private bool _suppressModeSwitch;
 
         private Transform? _highlightedRectOldTransform;
+
+        private readonly Dictionary<(string vehicleId, ActivationZone zone), bool> _vehicleZoneValidEntry = new();
 
 
         private ProtobufWindow? _protobufWindow;
@@ -517,8 +523,8 @@ namespace V2XController
             public Action? RedoAction { get; set; }
         }
 
-        [DllImport("kernel32.dll")]
-        static extern bool AllocConsole();
+
+
 
         //||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
         //Main window constructor
@@ -1418,6 +1424,14 @@ namespace V2XController
             int oldZoom = zoom;
             Console.WriteLine($"[ZOOM] Timer fired: processing zoom {oldZoom} → {_pendingZoom}");
 
+            // Schovat všechny overlaye před reprojectem – zabrání bliknutí/přeskoku velikosti
+            var overlays = TileCanvas.Children
+                .OfType<UIElement>()
+                .Where(el => el is not Image)
+                .ToList();
+            foreach (var el in overlays)
+                el.Visibility = Visibility.Hidden;
+
             try
             {
                 double worldMouseX = cameraX + _lastWheelPos.X;
@@ -1479,9 +1493,7 @@ namespace V2XController
                 _ = EnsureLocalAreaAltitudeAsync(force: true);
 
                 ResetAllTramTrails();
-                ReprojectActivationZonesOnMapChange();
-                ReprojectActiveVehiclesOnMapChange();
-                ReprojectReplayOnMapChange();
+                UpdateAllOverlaysLive();
                 DrawRadiusCircle();
 
                 if (lastV2XMessage != null)
@@ -1489,7 +1501,7 @@ namespace V2XController
                     UpdateVehicleTrail(lastV2XMessage);
                 }
 
-                Console.WriteLine($"[ZOOM] ✓ Complete: {oldZoom} → {zoom}");
+                Console.WriteLine($"[ZOOM] Complete: {oldZoom} → {zoom}");
             }
             catch (Exception ex)
             {
@@ -1498,6 +1510,12 @@ namespace V2XController
                 zoom = oldZoom;
                 scale.ScaleX = 1;
                 scale.ScaleY = 1;
+            }
+            finally
+            {
+                // Zobrazit overlaye zpět až po dokončeném reprojectu
+                foreach (var el in overlays)
+                    el.Visibility = Visibility.Visible;
             }
         }
 
@@ -2864,6 +2882,11 @@ namespace V2XController
                 return;
             }
 
+            if (currentDrawingMode == DrawingMode.None && !isSelectionMode)
+            {
+                ClearZoneTableSelection();
+            }
+
             var pos = e.GetPosition(TileCanvas);
             Console.WriteLine($"[MOUSE] Left button down at ({pos.X:F1}, {pos.Y:F1})");
 
@@ -2955,29 +2978,29 @@ namespace V2XController
                     }
                 }
 
-                // Aktualizace pozice tramvaje
-                UpdateVehicleCanvasPosition(tram, pos, drawnTramColors[idx], false, tram.Label, 0);
 
-                // Manual tram body: draw only from the second point using heading from (prev -> current)
+                // Aktualizace pozice tramvaje
+                double computedHeading = 0.0;
                 if (drawnTramTrailPoints[idx].Count > 0)
                 {
-                    var prev = drawnTramTrailPoints[idx].Last();
-                    var headingDeg = CalculateAzimuth(prev, pos);
+                    var prevPt = drawnTramTrailPoints[idx].Last();
+                    computedHeading = CalculateAzimuth(prevPt, pos);
 
-                    // Flip 180°: compensate for +180 inside UpdateOrCreateBox
-                    headingDeg = (headingDeg - 180 + 360) % 360;
+                    _lastHeadingLive[drawnTramIds[idx]] = computedHeading;
 
-                    UpdateOrCreateVehicleBox(drawnTramIds[idx], new Point(pos.X, pos.Y), drawnTramColors[idx], headingDeg);
+                    var headingForBox = (computedHeading - 180 + 360) % 360;
+                    UpdateOrCreateVehicleBox(drawnTramIds[idx], new Point(pos.X, pos.Y), drawnTramColors[idx], headingForBox);
                 }
                 else
                 {
-                    // First click: ensure no leftover box is shown
                     if (_vehicleBoxes.TryGetValue(drawnTramIds[idx], out var leftover))
                     {
                         TileCanvas.Children.Remove(leftover);
                         _vehicleBoxes.Remove(drawnTramIds[idx]);
                     }
                 }
+
+                UpdateVehicleCanvasPosition(tram, pos, drawnTramColors[idx], false, tram.Label, 0);
 
                 if (isRecording)
                 {
@@ -2988,12 +3011,10 @@ namespace V2XController
                     });
                 }
 
-                // Trail polyline body
                 drawnTramTrailPoints[idx].Add(pos);
                 if (drawnTramTrailPoints[idx].Count > _maxTrailLength + 1)
                     drawnTramTrailPoints[idx].RemoveAt(0);
 
-                // Ensure trail exists (could be null after RefreshMap/ResetAllTramTrails)
                 if (drawnTramTrails[idx] == null)
                 {
                     drawnTramTrails[idx] = new Polyline
@@ -3028,7 +3049,7 @@ namespace V2XController
                 if (drawnTramTrailGeoPoints[idx].Count > _maxTrailLength + 1)
                     drawnTramTrailGeoPoints[idx].RemoveAt(0);
 
-                SendPointAsCamMessage(drawnTramIds[idx], latitudeWgs, longitudeWgs, speed: _manualCamSpeedKmh, suppressLocalRender: true);
+                SendPointAsCamMessage(drawnTramIds[idx], latitudeWgs, longitudeWgs, speed: _manualCamSpeedKmh, heading: computedHeading, suppressLocalRender: true);
 
                 try
                 {
@@ -4335,7 +4356,9 @@ namespace V2XController
                     return;
                 }
 
-                // ignore Esc if not drawing
+                // Clear table highlight when idle
+                ClearZoneTableSelection();
+
                 e.Handled = true;
                 return;
             }
@@ -6105,18 +6128,30 @@ namespace V2XController
         /// <param name="e">The event data.</param>
         private void Rectangle_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         {
-            if (!isSelectionMode)
+            var rectangle = sender as Rectangle;
+
+            if (isSelectionMode)
             {
+                if (rectangle != null)
+                {
+                    SelectElement(rectangle);
+                }
+                e.Handled = true;
                 return;
             }
 
-            var rectangle = sender as Rectangle;
-            if (rectangle != null)
+            if (currentDrawingMode == DrawingMode.None)
             {
-                SelectElement(rectangle);
-            }
+                ActivationZone? zone = null;
+                activationZones.TryGetValue(rectangle, out zone);
+                zone ??= switchZones.TryGetValue(rectangle, out var sz) ? sz : null;
 
-            e.Handled = true;
+                if (zone != null)
+                {
+                    SelectZoneInTable(zone);
+                    e.Handled = true;
+                }
+            }
         }
 
         /// <summary>
@@ -6548,14 +6583,15 @@ namespace V2XController
 
                         if (trail != null && trail.Points.Count > 1)
                         {
-                            trail.Points.RemoveAt(trail.Points.Count - 1);
+                            trail.Points.RemoveAt(0);
                             continueRemoving = true;
 
+                            // Pak smazat odpovídající tečku od začátku
                             if (vehicle.TrailDots != null && vehicle.TrailDots.Count > 0)
                             {
-                                var lastDot = vehicle.TrailDots[vehicle.TrailDots.Count - 1];
-                                TileCanvas.Children.Remove(lastDot);
-                                vehicle.TrailDots.RemoveAt(vehicle.TrailDots.Count - 1);
+                                var firstDot = vehicle.TrailDots[0];
+                                TileCanvas.Children.Remove(firstDot);
+                                vehicle.TrailDots.RemoveAt(0);
                             }
                         }
                         else if (trail != null)
@@ -6819,8 +6855,15 @@ namespace V2XController
                 double startY = zone.StartPoint.Y;
                 var latlon = CanvasPixelsToLatLon(new Point(startX, startY), latitude, longitude, zoom);
 
+                // Určit mode: Switch, RTV (P/B/V naming), nebo WLC
+                string mode = zone.IsSwitchZone ? "Switch"
+                    : (zone.Name?.StartsWith("P", StringComparison.Ordinal) == true ||
+                       zone.Name?.StartsWith("B", StringComparison.Ordinal) == true ||
+                       zone.Name?.StartsWith("V", StringComparison.Ordinal) == true) ? "RTV"
+                    : "WLC";
+
                 zonesElement.Add(new XElement("Zone",
-                    new XAttribute("Name", zone.Name),
+                    new XAttribute("Name", zone.Name ?? string.Empty),
                     new XAttribute("Latitude", latlon.Y.ToString(CultureInfo.InvariantCulture)),
                     new XAttribute("Longitude", latlon.X.ToString(CultureInfo.InvariantCulture)),
                     new XAttribute("StartX", startX.ToString(CultureInfo.InvariantCulture)),
@@ -6829,14 +6872,12 @@ namespace V2XController
                     new XAttribute("Height", zone.Height.ToString(CultureInfo.InvariantCulture)),
                     new XAttribute("Azimuth", zone.Azimuth.ToString(CultureInfo.InvariantCulture)),
                     new XAttribute("Color", zone.Color),
-                    // NEW
                     new XAttribute("MainZone", zone.MainZone.ToString(CultureInfo.InvariantCulture)),
-                    new XAttribute("SubZone", zone.SubZone.ToString(CultureInfo.InvariantCulture))
+                    new XAttribute("SubZone", zone.SubZone.ToString(CultureInfo.InvariantCulture)),
+                    new XAttribute("Mode", mode)
                 ));
             }
             root.Add(zonesElement);
-
-
 
             if (recordedCamMessages.Count > 0)
             {
@@ -6927,6 +6968,9 @@ namespace V2XController
                         int subZone = int.TryParse(zoneElem.Attribute("SubZone")?.Value, out var sParsed) ? Math.Clamp(sParsed, 0, 6) : 0;
                         double startXZone = double.TryParse(zoneElem.Attribute("StartX")?.Value, NumberStyles.Any, CultureInfo.InvariantCulture, out var sxParsed) ? sxParsed : double.NaN;
                         double startYZone = double.TryParse(zoneElem.Attribute("StartY")?.Value, NumberStyles.Any, CultureInfo.InvariantCulture, out var syParsed) ? syParsed : double.NaN;
+                        string mode = zoneElem.Attribute("Mode")?.Value ?? "WLC";
+                        bool isSwitchZone = mode == "RTV";
+
 
                         // All UI changes must run on UI thread because previous awaits may resume on threadpool.
                         Dispatcher.Invoke(() =>
@@ -6957,7 +7001,6 @@ namespace V2XController
 
                                 var activationZone = new ActivationZone
                                 {
-                                    Name = name,
                                     Latitude = double.IsNaN(latitudeZone) ? latitude : latitudeZone,
                                     Longitude = double.IsNaN(longitudeZone) ? longitude : longitudeZone,
                                     Width = Math.Round(width, 2),
@@ -6967,7 +7010,9 @@ namespace V2XController
                                     Rectangle = rect,
                                     StartPoint = double.IsNaN(startXZone) || double.IsNaN(startYZone) ? new Point(CanvasSize / 2.0, CanvasSize / 2.0) : new Point(startXZone, startYZone),
                                     MainZone = mainZone,
-                                    SubZone = subZone
+                                    SubZone = subZone,
+                                    IsSwitchZone = isSwitchZone,
+                                    Name = name
                                 };
 
                                 // register and add
@@ -7002,6 +7047,36 @@ namespace V2XController
 
                 isDirty = false;
             }
+
+            bool detectedSwitchMode = zonesElement?.Elements("Zone").Any(z =>
+            {
+                var modeAttr = z.Attribute("Mode")?.Value;
+                if (modeAttr != null)
+                    return string.Equals(modeAttr, "RTV", StringComparison.OrdinalIgnoreCase);
+
+                // Fallback pro staré soubory bez Mode atributu – Switch zóny mají P/B/V prefix
+                var zoneName = z.Attribute("Name")?.Value ?? "";
+                return zoneName.StartsWith("P1-", StringComparison.Ordinal)
+                    || zoneName.StartsWith("P2-", StringComparison.Ordinal)
+                    || zoneName.StartsWith("B", StringComparison.Ordinal)
+                    || zoneName.StartsWith("V1-", StringComparison.Ordinal)
+                    || zoneName.StartsWith("V2-", StringComparison.Ordinal);
+            }) ?? false;
+
+            _suppressModeSwitch = true;
+            try
+            {
+                if (detectedSwitchMode)
+                    SwitchRadio.IsChecked = true;
+                else
+                    ZoneRadio.IsChecked = true;
+            }
+            finally
+            {
+                _suppressModeSwitch = false;
+            }
+
+            UpdateUiEnabledState();
 
             foreach (var vehicle in activeVehicles.Values)
             {
@@ -7165,7 +7240,7 @@ namespace V2XController
                 if (recordedCamMessages.Count > 0)
                 {
                     var ask = MessageBox.Show(
-                        "No manual points were recorded.\n\nDo you want to save the live RS485 CAM buffer instead?",
+                        "Do you want to save the live RS485 CAM buffer?",
                         "Save live buffer",
                         MessageBoxButton.YesNo,
                         MessageBoxImage.Question);
@@ -7173,6 +7248,7 @@ namespace V2XController
                     if (ask == MessageBoxResult.Yes)
                     {
                         SaveLiveCamBuffer();
+                        _savedRecording = true;
                     }
                 }
                 else
@@ -7305,29 +7381,27 @@ namespace V2XController
                         // =====================================================================
                         if (IsProtobufMessage(rawLine))
                         {
+                            // Ulož raw protobuf řádek z COM portu do bufferu nahrávky
+                            if (_timeshiftEnabled)
+                                recordedCamMessages.Add(rawLine.Trim());
+
                             Dispatcher.Invoke(() =>
                             {
                                 try
                                 {
-                                    // Try to decode the Protobuf message
                                     if (ProtobufParser.TryDecodeProtobufFromHex(rawLine.Trim(), out string decoded))
                                     {
-                                        // Successfully decoded - now handle it
                                         HandleProtobufMessage(decoded);
-
-                                        // Log successful Protobuf reception
                                         Console.WriteLine($"[PROTO] Received and decoded Protobuf message ({rawLine.Length} chars)", Brushes.Cyan);
                                     }
                                     else
                                     {
-                                        // Failed to decode
                                         Console.WriteLine($"[PROTO] Failed to decode Protobuf message", Brushes.Orange);
                                         IncrementCamErrorCount();
                                     }
                                 }
                                 catch (Exception protoEx)
                                 {
-                                    // Handle any exceptions during Protobuf processing
                                     Console.WriteLine($"[PROTO] Error processing Protobuf: {protoEx.Message}", Brushes.Red);
                                     IncrementCamErrorCount();
                                 }
@@ -8219,7 +8293,6 @@ namespace V2XController
             if (suppressLocalRender) msg.IsManual = true;
             HandleV2XMessage(msg, xml);
 
-            // Manual recording only (simulated IDs of drawn trams)
             if (isRecording && (vehicleId == drawnTramIds[0] || vehicleId == drawnTramIds[1]))
             {
                 recordedManualCamMessages.Add(xml);
@@ -8233,10 +8306,14 @@ namespace V2XController
         /// </summary>
         /// <param name="pos">The position to check.</param>
         /// <param name="vehicleId">The ID of the vehicle.</param>
-        private void CheckActivationZones(Point pos, string vehicleId)
+        /// <param name="heading">The heading of the vehicle.</param>
+        private void CheckActivationZones(Point pos, string vehicleId, double heading = double.NaN)
         {
             string shortId = string.IsNullOrEmpty(vehicleId) ? "-" :
                              (vehicleId.Length > 4 ? vehicleId[^4..] : vehicleId);
+
+            if (double.IsNaN(heading) && _lastHeadingLive.TryGetValue(vehicleId, out var cachedHeading))
+                heading = cachedHeading;
 
             var nowInZones = new HashSet<ActivationZone>();
 
@@ -8268,10 +8345,31 @@ namespace V2XController
                 leftZone.IsActive = false;
                 if (leftZone.Rectangle != null)
                     leftZone.Rectangle.StrokeThickness = 2;
+
+                _vehicleZoneValidEntry.Remove((vehicleId, leftZone));
             }
 
             foreach (var zone in nowInZones)
             {
+                var key = (vehicleId, zone);
+                bool wasInZone = previousZones.Contains(zone);
+
+                if (!wasInZone)
+                {
+                    bool validDirection = IsValidEntryDirection(pos, zone, heading);
+                    _vehicleZoneValidEntry[key] = validDirection;
+
+                    Console.WriteLine($"[ZONE] {shortId} vstup do '{zone.Name}' | heading={heading:F0}° | valid={validDirection}");
+
+                    if (!validDirection)
+                        continue;
+                }
+                else
+                {
+                    if (_vehicleZoneValidEntry.TryGetValue(key, out bool hadValid) && !hadValid)
+                        continue;
+                }
+
                 zone.LastTramId = shortId;
 
                 if (!zone.IsActive)
@@ -8281,7 +8379,6 @@ namespace V2XController
                         zone.Rectangle.StrokeThickness = 6;
                 }
 
-                // Fallback timer pro případ že vozidlo zmizí z mapy bez další zprávy
                 if (_zoneDeactivateTimers.TryGetValue(zone, out var existing))
                 {
                     existing.Stop();
@@ -8300,6 +8397,8 @@ namespace V2XController
 
                         if (_vehicleActiveZones.TryGetValue(vehicleId, out var vz))
                             vz.Remove(zone);
+
+                        _vehicleZoneValidEntry.Remove((vehicleId, zone));
                     };
                     _zoneDeactivateTimers[zone] = timer;
                     timer.Start();
@@ -8307,13 +8406,31 @@ namespace V2XController
             }
 
             _vehicleActiveZones[vehicleId] = nowInZones;
-        
 
-            // Placeholder
             foreach (var poly in _polylineToSegmentZones.Values)
             {
                 continue;
             }
+        }
+
+        /// <summary>
+        /// Checks if the vehicle entered the activation zone from a valid direction (roughly towards the center of the rectangle).
+        /// </summary>
+        private bool IsValidEntryDirection(Point entryPos, ActivationZone zone, double heading)
+        {
+            if (double.IsNaN(heading))
+                return true;
+
+            double zoneAzimuth = zone.Azimuth;
+
+            double diff = Math.Abs(heading - zoneAzimuth);
+            if (diff > 180.0) diff = 360.0 - diff;
+
+            bool valid = diff <= 80.0;
+
+            Console.WriteLine($"[ZONE DIR] heading={heading:F0}° | zoneAz={zoneAzimuth:F0}° | diff={diff:F0}° | valid={valid}");
+
+            return valid;
         }
 
         /// <summary>
@@ -8472,7 +8589,6 @@ namespace V2XController
 
                                     var activationZone = new ActivationZone
                                     {
-                                        Name = name,
                                         Latitude = double.IsNaN(latitudeZone) ? latitude : latitudeZone,
                                         Longitude = double.IsNaN(longitudeZone) ? longitude : longitudeZone,
                                         Width = Math.Round(width, 2),
@@ -8482,7 +8598,8 @@ namespace V2XController
                                         Rectangle = rect,
                                         StartPoint = double.IsNaN(startXZone) || double.IsNaN(startYZone) ? new Point(CanvasSize / 2.0, CanvasSize / 2.0) : new Point(startXZone, startYZone),
                                         MainZone = mainZone,
-                                        SubZone = subZone
+                                        SubZone = subZone,
+                                        Name = name
                                     };
 
                                     // register and add
@@ -8595,6 +8712,8 @@ namespace V2XController
                     string lastRecStr = vehPt.Attribute("lastRec")?.Value;
                     string speedStr = vehPt.Attribute("speed")?.Value;
                     string headingStr = vehPt.Attribute("heading")?.Value;
+
+
 
                     if (string.IsNullOrEmpty(id) || string.IsNullOrEmpty(latStr) || string.IsNullOrEmpty(lngStr) || string.IsNullOrEmpty(lastRecStr))
                         continue;
@@ -8781,6 +8900,7 @@ namespace V2XController
 
         /// <summary>
         /// .camrec loader, a simple custom format we defined for easy recording and replay of CAM messages without the full XML structure.
+        /// Supports both full CAM-wrapped XML and standalone &lt;vehPt .../&gt; blocks (protobuf recording format).
         /// </summary>
         /// <param name="fileName">The name of the .camrec file to load.</param>
         private async Task LoadCamRecording(string fileName)
@@ -8816,147 +8936,223 @@ namespace V2XController
 
                     var (centerX, centerY) = LatLonToTileXY(latitude, longitude, zoom);
                     await LoadTilesSmoothAsync(centerX - TileCount / 2, centerY - TileCount / 2);
-
                 }
                 lines.RemoveAt(0);
             }
 
             ClearPlaybackTramsFromCanvas();
 
-            var camMessages = lines.Where(l => l.Contains("<vehPt", StringComparison.OrdinalIgnoreCase)).ToList();
+            // Join remaining lines to support multiline <vehPt .../> blocks (protobuf format)
+            var rawText = string.Join("\n", lines);
+
+            // Try to extract full CAM-wrapped blocks first; fall back to standalone <vehPt /> (protobuf)
+            var camMessages = new List<string>();
+            foreach (var line in lines)
+            {
+                // Protobuf raw hex řádky
+                if (IsProtobufMessage(line))
+                {
+                    camMessages.Add(line);
+                    continue;
+                }
+                // Standardní CAM XML (jednořádkové)
+                if (line.Contains("<vehPt", StringComparison.OrdinalIgnoreCase) ||
+                    line.TrimStart().StartsWith("<CAM", StringComparison.OrdinalIgnoreCase))
+                {
+                    camMessages.Add(line);
+                }
+            }
+
+            // Víceřádkové CAM XML bloky (fallback)
+            if (camMessages.Count == 0)
+            {
+                var camWrapped = System.Text.RegularExpressions.Regex.Matches(
+                    rawText, @"<CAM[\s\S]*?</CAM>",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                foreach (System.Text.RegularExpressions.Match m in camWrapped)
+                    camMessages.Add(m.Value);
+            }
+
             if (camMessages.Count == 0)
             {
                 MessageBox.Show("Recording is empty.");
                 return;
             }
 
-            // collect all distinct vehicle IDs present in the recording and populate TramBox
-            var allVehicleIds = camMessages
-                .Select(l =>
-                {
-                    try { var m = V2XMessageParser.ParseV2XMessage(l); return m?.VehicleID; }
-                    catch { return null; }
-                })
-                .Where(id => !string.IsNullOrWhiteSpace(id))
-                .Distinct()
-                .ToList();
-            PopulateTramBoxFromIds(allVehicleIds);
+            // Snapshot map state needed for coordinate conversion (accessed on background thread)
+            int snapZoom = zoom;
+            int snapCameraX = cameraX;
+            int snapCameraY = cameraY;
 
-            // detect up to 2 vehicles
-            var vehicleIds = camMessages
-                .Select(l =>
-                {
-                    try
-                    {
-                        var msg = V2XMessageParser.ParseV2XMessage(l);
-                        return msg?.VehicleID;
-                    }
-                    catch { return null; }
-                })
-                .Where(id => !string.IsNullOrEmpty(id))
-                .Distinct()
-                .Take(2)
-                .ToList();
-
-            _replayFrames.Clear();
-            _replayVehicles.Clear();
-
-            var tramFrames = new List<MovementFrame>[drawnTrams.Length];
-            for (int i = 0; i < tramFrames.Length; i++)
-                tramFrames[i] = new List<MovementFrame>();
-
-            _playbackSpeedByIdAndTs.Clear();
-            _replayGeoFrames.Clear();
-
-            DateTime? minUtc = null, maxUtc = null;
-            DateTime? firstTime = null;
-            foreach (var raw in camMessages)
+            // Parse all messages once on a background thread to avoid freezing the UI
+            var (
+                allVehicleIds,
+                vehicleIds,
+                replayFrames,
+                replayGeoFrames,
+                headingDict,
+                speedDict,
+                altDict,
+                accDict,
+                minUtc,
+                maxUtc
+            ) = await Task.Run(() =>
             {
-                try
+                var _allIds = new List<string>();
+                var _vehicleIds = new List<string>();
+                var _replayFrames = new Dictionary<string, List<MovementFrame>>();
+                var _replayGeoFrames = new Dictionary<string, List<(TimeSpan ts, double lat, double lon)>>();
+                var _headingDict = new Dictionary<string, double>();
+                var _speedDict = new Dictionary<string, double>();
+                var _altDict = new Dictionary<string, double>();
+                var _accDict = new Dictionary<string, double>();
+                DateTime? _minUtc = null, _maxUtc = null;
+                DateTime? _firstTime = null;
+
+                // Synthetic timestamp base for standalone vehPt blocks (protobuf format)
+                var protoBase = DateTime.UtcNow;
+                int protoIndex = 0;
+
+                foreach (var raw in camMessages)
                 {
-                    var msg = V2XMessageParser.ParseV2XMessage(raw);
-                    if (msg == null || msg.MessageType != "CAM") continue;
-
-                    var tsUtc = msg.Timestamp?.ToUniversalTime() ?? DateTime.MinValue;
-                    if (!minUtc.HasValue || tsUtc < minUtc) minUtc = tsUtc;
-                    if (!maxUtc.HasValue || tsUtc > maxUtc) maxUtc = tsUtc;
-
-                    if (!_replayFrames.TryGetValue(msg.VehicleID, out var list))
-                    {
-                        list = new List<MovementFrame>();
-                        _replayFrames[msg.VehicleID] = list;
-                    }
-
-                    if (firstTime == null) firstTime = msg.Timestamp;
-
-                    var (rx, ry) = ConvertLatLonToCanvasXY(msg.Latitude, msg.Longitude);
-                    var relTs = msg.Timestamp - firstTime.Value;
-                    list.Add(new MovementFrame { Timestamp = relTs ?? TimeSpan.Zero, Position = new Point(rx, ry) });
-
-                    if (!_replayGeoFrames.TryGetValue(msg.VehicleID, out var geoList))
-                    {
-                        geoList = new List<(TimeSpan ts, double lat, double lon)>();
-                        _replayGeoFrames[msg.VehicleID] = geoList;
-                    }
-                    geoList.Add((relTs ?? TimeSpan.Zero, msg.Latitude ?? 0.0, msg.Longitude ?? 0.0));
-
-                    // store heading/speed/alt as before
-                    string keyHead = $"{msg.VehicleID}|{relTs?.Ticks ?? TimeSpan.Zero.Ticks}";
-                    _playbackHeadingByIdAndTs[keyHead] = msg.Heading ?? 0.0;
-
-                    string keyAll = $"{msg.VehicleID}|{relTs?.Ticks ?? 0}";
-                    _playbackSpeedByIdAndTs[keyAll] = msg.Speed ?? 0.0; // m/s expected
-
-                    if (TryExtractAltitudeFromCamXml(raw, out var altVal))
-                    {
-                        string keyAlt = $"{msg.VehicleID}|{relTs?.Ticks ?? 0}";
-                        _playbackAltitudeByIdAndTs[keyAlt] = altVal;
-                    }
-
-                    // --- NEW: try parse accuracy attribute from raw XML (robust)
-                    double accVal = 0.0;
                     try
                     {
-                        int vehPtStart = raw.IndexOf("<vehPt", StringComparison.OrdinalIgnoreCase);
-                        if (vehPtStart >= 0)
+                        V2XMessage msg = null;
+                        double accuracyFromProto = 0.0;
+                        bool isStandalone = false;
+
+                        // ── Protobuf raw hex řádek z COM portu ──────────────────────────────
+                        if (IsProtobufMessage(raw))
                         {
-                            int tagEnd = raw.IndexOf('>', vehPtStart);
-                            if (tagEnd > vehPtStart)
+                            if (!ProtobufParser.TryDecodeProtobufFromHex(raw, out string decoded)) continue;
+                            var protoCam = ProtoCam.ParseFromJson(decoded);
+                            if (protoCam == null || string.IsNullOrWhiteSpace(protoCam.VehicleId)) continue;
+
+                            msg = protoCam.ToV2XMessage();
+                            accuracyFromProto = protoCam.AccuracyInMeters ?? 0.0;
+                            isStandalone = true;
+                        }
+                        else
+                        {
+                            // ── Standardní CAM XML ───────────────────────────────────────────
+                            msg = V2XMessageParser.ParseV2XMessage(raw);
+                            if (msg == null || msg.MessageType != "CAM" || string.IsNullOrEmpty(msg.VehicleID))
+                                continue;
+                        }
+
+                        if (!_allIds.Contains(msg.VehicleID))
+                            _allIds.Add(msg.VehicleID);
+
+                        if (_vehicleIds.Count < 2 && !_vehicleIds.Contains(msg.VehicleID))
+                            _vehicleIds.Add(msg.VehicleID);
+
+                        var tsUtc = msg.Timestamp?.ToUniversalTime() ?? DateTime.MinValue;
+                        if (!_minUtc.HasValue || tsUtc < _minUtc) _minUtc = tsUtc;
+                        if (!_maxUtc.HasValue || tsUtc > _maxUtc) _maxUtc = tsUtc;
+
+                        if (_firstTime == null) _firstTime = msg.Timestamp;
+
+                        var relTs = msg.Timestamp - _firstTime.Value ?? TimeSpan.Zero;
+
+                        double u = Math.Log(Math.Tan(msg.Latitude.GetValueOrDefault() * Math.PI / 180.0) + 1.0 / Math.Cos(msg.Latitude.GetValueOrDefault() * Math.PI / 180.0)) / Math.PI;
+                        double tileX = (msg.Longitude.GetValueOrDefault() + 180.0) / 360.0 * (1 << snapZoom);
+                        double tileY = (1.0 - u) / 2.0 * (1 << snapZoom);
+                        double rx = tileX * 256 - snapCameraX;
+                        double ry = tileY * 256 - snapCameraY;
+
+                        if (!_replayFrames.TryGetValue(msg.VehicleID, out var frameList))
+                        {
+                            frameList = new List<MovementFrame>();
+                            _replayFrames[msg.VehicleID] = frameList;
+                        }
+                        frameList.Add(new MovementFrame { Timestamp = relTs, Position = new System.Windows.Point(rx, ry) });
+
+                        if (!_replayGeoFrames.TryGetValue(msg.VehicleID, out var geoList))
+                        {
+                            geoList = new List<(TimeSpan, double, double)>();
+                            _replayGeoFrames[msg.VehicleID] = geoList;
+                        }
+                        geoList.Add((relTs, msg.Latitude ?? 0.0, msg.Longitude ?? 0.0));
+
+                        string keyBase = $"{msg.VehicleID}|{relTs.Ticks}";
+                        _headingDict[keyBase] = msg.Heading ?? 0.0;
+                        _speedDict[keyBase] = msg.Speed ?? 0.0;
+
+                        if (isStandalone)
+                        {
+                            if (accuracyFromProto > 0)
+                                _accDict[keyBase] = accuracyFromProto;
+                        }
+                        else
+                        {
+                            if (TryExtractAltitudeFromCamXml(raw, out var altVal))
+                                _altDict[keyBase] = altVal;
+
+                            double accVal = 0.0;
+                            try
                             {
-                                var tag = raw.Substring(vehPtStart, tagEnd - vehPtStart);
-                                var accAttrNames = new[] { "accuracy", "acc", "accuracy_m", "accuracyMeters", "hacc" };
-                                foreach (var an in accAttrNames)
+                                int vehPtStart = raw.IndexOf("<vehPt", StringComparison.OrdinalIgnoreCase);
+                                if (vehPtStart >= 0)
                                 {
-                                    var idxAttr = tag.IndexOf(an + "=\"", StringComparison.OrdinalIgnoreCase);
-                                    if (idxAttr >= 0)
+                                    int tagEnd = raw.IndexOf('>', vehPtStart);
+                                    if (tagEnd > vehPtStart)
                                     {
-                                        int vStart = idxAttr + an.Length + 2;
-                                        int vEnd = tag.IndexOf('"', vStart);
-                                        if (vEnd > vStart)
+                                        var tag = raw.Substring(vehPtStart, tagEnd - vehPtStart);
+                                        foreach (var an in new[] { "accuracy", "acc", "accuracy_m", "accuracyMeters", "hacc" })
                                         {
-                                            var accStr = tag.Substring(vStart, vEnd - vStart);
-                                            if (double.TryParse(accStr, NumberStyles.Any, CultureInfo.InvariantCulture, out var parsedAcc))
+                                            int idxAttr = tag.IndexOf(an + "=\"", StringComparison.OrdinalIgnoreCase);
+                                            if (idxAttr >= 0)
                                             {
-                                                accVal = parsedAcc;
-                                                break;
+                                                int vStart = idxAttr + an.Length + 2;
+                                                int vEnd = tag.IndexOf('"', vStart);
+                                                if (vEnd > vStart &&
+                                                    double.TryParse(tag.Substring(vStart, vEnd - vStart), NumberStyles.Any, CultureInfo.InvariantCulture, out var parsedAcc))
+                                                {
+                                                    accVal = parsedAcc;
+                                                    break;
+                                                }
                                             }
                                         }
                                     }
                                 }
                             }
+                            catch { }
+
+                            if (accVal > 0)
+                                _accDict[keyBase] = accVal;
                         }
                     }
-                    catch { /* ignore parse errors */ }
-
-                    if (accVal > 0)
-                    {
-                        string keyAcc = $"{msg.VehicleID}|{relTs?.Ticks ?? TimeSpan.Zero.Ticks}";
-                        _playbackAccuracyByIdAndTs[keyAcc] = accVal;
-                    }
+                    catch { }
                 }
-                catch { }
-            }
 
+                return (_allIds, _vehicleIds, _replayFrames, _replayGeoFrames, _headingDict, _speedDict, _altDict, _accDict, _minUtc, _maxUtc);
+            });
+
+            // Apply parsed results back on the UI thread
+            PopulateTramBoxFromIds(allVehicleIds);
+
+            _replayFrames.Clear();
+            foreach (var kv in replayFrames) _replayFrames[kv.Key] = kv.Value;
+
+            _replayVehicles.Clear();
+            _replayGeoFrames.Clear();
+            foreach (var kv in replayGeoFrames) _replayGeoFrames[kv.Key] = kv.Value;
+
+            _playbackSpeedByIdAndTs.Clear();
+            foreach (var kv in speedDict) _playbackSpeedByIdAndTs[kv.Key] = kv.Value;
+
+            foreach (var kv in headingDict) _playbackHeadingByIdAndTs[kv.Key] = kv.Value;
+            foreach (var kv in altDict) _playbackAltitudeByIdAndTs[kv.Key] = kv.Value;
+            foreach (var kv in accDict) _playbackAccuracyByIdAndTs[kv.Key] = kv.Value;
+
+            var tramFrames = new List<MovementFrame>[drawnTrams.Length];
+            for (int i = 0; i < tramFrames.Length; i++)
+            {
+                if (i < vehicleIds.Count && replayFrames.TryGetValue(vehicleIds[i], out var vf))
+                    tramFrames[i] = vf;
+                else
+                    tramFrames[i] = new List<MovementFrame>();
+            }
 
             for (int i = 0; i < drawnTrams.Length && i < vehicleIds.Count; i++)
             {
@@ -8964,7 +9160,6 @@ namespace V2XController
                 {
                     var first = tramFrames[i][0];
 
-                    // Create visuals but DO NOT add to canvas now (prevents the "hanging" dot before play)
                     var ellipse = new Ellipse
                     {
                         Width = 12,
@@ -9019,6 +9214,34 @@ namespace V2XController
             UpdateReplayTimerLabel();
             MessageBox.Show("CAM recording loaded. Use Play to start playback.", "Playback ready", MessageBoxButton.OK, MessageBoxImage.Information);
         }
+
+        /// <summary>
+        /// Parses a standalone &lt;vehPt .../&gt; block (protobuf recording format).
+        /// Handles both comma and dot as decimal separator.
+        /// </summary>
+        private static (double lat, double lon, double speed, double heading, double accuracy, double altitude)? ParseStandaloneVehPtBlock(string block)
+        {
+            static double ReadAttr(string text, string name)
+            {
+                int idx = text.IndexOf(name + "=\"", StringComparison.OrdinalIgnoreCase);
+                if (idx < 0) return 0.0;
+                int start = idx + name.Length + 2;
+                int end = text.IndexOf('"', start);
+                if (end <= start) return 0.0;
+                var raw = text.Substring(start, end - start).Replace(',', '.');
+                return double.TryParse(raw, NumberStyles.Any, CultureInfo.InvariantCulture, out var v) ? v : 0.0;
+            }
+
+            try
+            {
+                double lat = ReadAttr(block, "lat");
+                double lon = ReadAttr(block, "lon");
+                if (lat == 0.0 && lon == 0.0) return null;
+                return (lat, lon, ReadAttr(block, "speed"), ReadAttr(block, "heading"), ReadAttr(block, "accuracy"), ReadAttr(block, "altitude"));
+            }
+            catch { return null; }
+        }
+
 
         /// <summary>
         /// Updates vehicle canvas position, with speed in m/s
@@ -10561,66 +10784,69 @@ namespace V2XController
                     return;
                 }
 
-                // There are unsaved items or active recording — ask the user
-                var messageBuilder = new StringBuilder("Recording or buffered data present. Do you want to stop and save before disconnecting?\n\n");
-                if (isRecording) messageBuilder.AppendLine("- Manual recording is active");
-                if (hasManualRecording) messageBuilder.AppendLine($"- {recordedManualCamMessages?.Count ?? 0} manual CAM message(s) to save");
-                if (hasLiveBuffer) messageBuilder.AppendLine($"- {recordedCamMessages?.Count ?? 0} live CAM message(s) in RS485 buffer");
-                var result = MessageBox.Show(messageBuilder.ToString(), "Recording active", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
-
-                if (result == MessageBoxResult.Cancel)
+                if (!_savedRecording)
                 {
-                    // User aborted disconnect
-                    return;
-                }
+                    // There are unsaved items or active recording — ask the user
+                    var messageBuilder = new StringBuilder("Recording or buffered data present. Do you want to stop and save before disconnecting?\n\n");
+                    if (isRecording) messageBuilder.AppendLine("- Manual recording is active");
+                    if (hasManualRecording) messageBuilder.AppendLine($"- {recordedManualCamMessages?.Count ?? 0} manual CAM message(s) to save");
+                    if (hasLiveBuffer) messageBuilder.AppendLine($"- {recordedCamMessages?.Count ?? 0} live CAM message(s) in RS485 buffer");
+                    var result = MessageBox.Show(messageBuilder.ToString(), "Recording active", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
 
-                if (result == MessageBoxResult.Yes)
-                {
-                    // Stop & save manual recording (StopRecording shows save dialog)
-                    if (isRecording)
-                        StopRecording();
-
-                    // Save manual buffer if present and not recorded via StopRecording
-                    if (hasManualRecording && !isRecording)
+                    if (result == MessageBoxResult.Cancel)
                     {
-                        var dlgManual = new Microsoft.Win32.SaveFileDialog
+                        // User aborted disconnect
+                        return;
+                    }
+
+                    if (result == MessageBoxResult.Yes)
+                    {
+                        // Stop & save manual recording (StopRecording shows save dialog)
+                        if (isRecording)
+                            StopRecording();
+
+                        // Save manual buffer if present and not recorded via StopRecording
+                        if (hasManualRecording && !isRecording)
                         {
-                            FileName = DateTime.Now.ToString("yyyy-MM-dd_HH_mm", CultureInfo.InvariantCulture) + ".camrec",
-                            DefaultExt = ".camrec",
-                            Filter = "CAM Recording (*.camrec)|*.camrec|All files (*.*)|*.*",
-                            Title = "Save manual CAM recording"
-                        };
-                        if (dlgManual.ShowDialog() == true)
+                            var dlgManual = new Microsoft.Win32.SaveFileDialog
+                            {
+                                FileName = DateTime.Now.ToString("yyyy-MM-dd_HH_mm", CultureInfo.InvariantCulture) + ".camrec",
+                                DefaultExt = ".camrec",
+                                Filter = "CAM Recording (*.camrec)|*.camrec|All files (*.*)|*.*",
+                                Title = "Save manual CAM recording"
+                            };
+                            if (dlgManual.ShowDialog() == true)
+                            {
+                                WriteCamrecWithCenter(dlgManual.FileName, recordedManualCamMessages ?? new List<string>());
+                                MessageBox.Show("Manual CAM recording saved to:\n" + dlgManual.FileName, "Saved", MessageBoxButton.OK, MessageBoxImage.Information);
+                                recordedManualCamMessages?.Clear();
+                            }
+                        }
+
+                        // Save live RS485 buffer if present
+                        if (hasLiveBuffer)
                         {
-                            WriteCamrecWithCenter(dlgManual.FileName, recordedManualCamMessages ?? new List<string>());
-                            MessageBox.Show("Manual CAM recording saved to:\n" + dlgManual.FileName, "Saved", MessageBoxButton.OK, MessageBoxImage.Information);
+                            SaveLiveCamBuffer();
+                        }
+
+                        // Stop timeshift after saving
+                        if (_timeshiftEnabled) StopTimeshiftSession();
+                    }
+                    else // No -> stop and discard recordings/buffers
+                    {
+                        if (isRecording)
+                        {
+                            isRecording = false;
                             recordedManualCamMessages?.Clear();
                         }
+
+                        if (hasManualRecording)
+                            recordedManualCamMessages?.Clear();
+                        if (hasLiveBuffer)
+                            recordedCamMessages?.Clear();
+
+                        if (_timeshiftEnabled) StopTimeshiftSession();
                     }
-
-                    // Save live RS485 buffer if present
-                    if (hasLiveBuffer)
-                    {
-                        SaveLiveCamBuffer();
-                    }
-
-                    // Stop timeshift after saving
-                    if (_timeshiftEnabled) StopTimeshiftSession();
-                }
-                else // No -> stop and discard recordings/buffers
-                {
-                    if (isRecording)
-                    {
-                        isRecording = false;
-                        recordedManualCamMessages?.Clear();
-                    }
-
-                    if (hasManualRecording)
-                        recordedManualCamMessages?.Clear();
-                    if (hasLiveBuffer)
-                        recordedCamMessages?.Clear();
-
-                    if (_timeshiftEnabled) StopTimeshiftSession();
                 }
 
                 // proceed with disconnect
@@ -12187,6 +12413,21 @@ namespace V2XController
             var zone = _pendingNewZone;
             if (zone == null) return false;
 
+            // Auto-fill name from MainZone/SubZone if left empty
+            if (string.IsNullOrWhiteSpace(zone.Name) && zone.MainZone >= 0 && zone.SubZone >= 0)
+            {
+                bool isSwitch = _switchRows.Contains(zone);
+                zone.IsSwitchZone = isSwitch;
+                zone.UpdateName();
+            }
+
+            // Auto-fill color based on MainZone if still at default red or empty
+            if (string.IsNullOrWhiteSpace(zone.Color) || zone.Color == "#FF0000")
+            {
+                bool isSwitch = _switchRows.Contains(zone);
+                zone.Color = GetColorForMainZone(zone.MainZone, isSwitch);
+            }
+
             bool missing =
                 string.IsNullOrWhiteSpace(zone.Name) ||
                 double.IsNaN(zone.Latitude) ||
@@ -12232,7 +12473,6 @@ namespace V2XController
                 Stroke = (SolidColorBrush)(new BrushConverter().ConvertFromString(zone.Color ?? "#FF0000")),
                 StrokeThickness = 2,
                 Fill = Brushes.Transparent,
-                // tag by intended type (hashset) or by name-prefix fallback
                 Tag = (_switchRows.Contains(zone) || (!string.IsNullOrWhiteSpace(zone.Name) && zone.Name.StartsWith("Switch", StringComparison.OrdinalIgnoreCase)))
                       ? "SwitchZone" : "DrawnRectangle",
                 Uid = zone.Name,
@@ -14141,24 +14381,24 @@ namespace V2XController
 
         private void ZoneRadio_Checked(object sender, RoutedEventArgs e)
         {
-            // If user switches mode mid-draw, route new rectangles to zones
             if (currentDrawingMode == DrawingMode.Rectangle && rectPhase != RectangleDrawPhase.None)
                 _drawToSwitchZones = false;
 
-            // Clear current UI zones (map + table), do not touch MPC
-            _ = ClearMapAndTable();
+            if (!_suppressModeSwitch)
+                _ = ClearMapAndTable();
+
             ClearPolylineDirectionArrows();
             UpdateUiEnabledState();
         }
 
         private void SwitchRadio_Checked(object sender, RoutedEventArgs e)
         {
-            // If user switches mode mid-draw, route new rectangles to switches
             if (currentDrawingMode == DrawingMode.Rectangle && rectPhase != RectangleDrawPhase.None)
                 _drawToSwitchZones = true;
 
-            // Clear current UI zones (map + table), do not touch MPC
-            _ = ClearMapAndTable();
+            if (!_suppressModeSwitch)
+                _ = ClearMapAndTable();
+
             ClearPolylineDirectionArrows();
             UpdateUiEnabledState();
         }
@@ -15354,21 +15594,18 @@ namespace V2XController
             {
                 _protobufWindow = new ProtobufWindow { Owner = this };
 
-                // Hide MainWindow
+                _protobufWindow.Closed += (s, args) =>
+                {
+                    _protobufWindow = null;
+                    this.Show();
+                    this.Activate();
+                };
+
                 this.Hide();
-
-                // Show ProtobufWindow as dialog (blocks until closed)
-                _protobufWindow.ShowDialog();
-
-                // When ProtobufWindow closes, show MainWindow again
-                this.Show();
-
-                // Clear reference
-                _protobufWindow = null;
+                _protobufWindow.Show();
             }
             else
             {
-                // If still open, just activate it
                 if (_protobufWindow.WindowState == WindowState.Minimized)
                     _protobufWindow.WindowState = WindowState.Normal;
                 _protobufWindow.Activate();
@@ -15717,25 +15954,36 @@ namespace V2XController
         /// <summary>
         /// Handles decoded Protobuf messages and displays them on the map
         /// </summary>
-        /// <param name="decodedJson">Decoded JSON from ProtobufParser</param>
         public void HandleProtobufMessage(string decodedJson)
         {
             try
             {
                 bool isCamMessage = decodedJson.Contains("nearby_vehicle_detection");
                 bool isSrvMessage = decodedJson.Contains("heartbeat");
+                bool isIntersection = decodedJson.Contains("intersection_status")
+                                   || decodedJson.Contains("intersection_pass_request_status")
+                                   || decodedJson.Contains("intersection_request")
+                                   || decodedJson.Contains("empty_response");
 
                 if (isCamMessage)
                 {
+                    Console.WriteLine($"[PROTO] Detected: CAM (nearby_vehicle_detection)\n{decodedJson}");
                     HandleProtobufCamMessage(decodedJson);
                 }
                 else if (isSrvMessage)
                 {
+                    Console.WriteLine($"[PROTO] Detected: SRV (heartbeat)\n{decodedJson}");
                     HandleProtobufSrvMessage(decodedJson);
+                }
+                else if (isIntersection)
+                {
+                    // Intersection-status / pass-request messages are valid infrastructure messages
+                    // but carry no vehicle position data — log and ignore silently
+                    Console.WriteLine($"[PROTO] Intersection message (no vehicle data, ignored)\n{decodedJson}");
                 }
                 else
                 {
-                    Console.WriteLine("[PROTO] Unknown Protobuf message type");
+                    Console.WriteLine($"[PROTO] Unknown Protobuf message type\n{decodedJson}");
                     IncrementCamErrorCount();
                 }
             }
@@ -15761,47 +16009,31 @@ namespace V2XController
                     return;
                 }
 
-                // Convert to V2XMessage for display
-                var v2xMsg = protoCam.ToV2XMessage();
+                if (string.IsNullOrWhiteSpace(protoCam.VehicleId))
+                {
+                    Console.WriteLine($"[PROTO CAM] Skipping message with missing/invalid vehicle_id");
+                    return;
+                }
 
-                // Validate accuracy - if available, include it
+                var v2xMsg = protoCam.ToV2XMessage();
                 double accuracy = protoCam.AccuracyInMeters ?? 0.0;
 
-                // Create fake raw XML for compatibility with existing HandleV2XMessage
-                var fakeXml = $@"
-            <vehPt 
-                lat=""{v2xMsg.Latitude}"" 
-                lon=""{v2xMsg.Longitude}"" 
-                speed=""{v2xMsg.Speed}"" 
-                heading=""{v2xMsg.Heading}"" 
-                accuracy=""{accuracy}"" 
-            />";
+                var fakeXml = $"<vehPt lat=\"{v2xMsg.Latitude}\" lon=\"{v2xMsg.Longitude}\" speed=\"{v2xMsg.Speed}\" heading=\"{v2xMsg.Heading}\" accuracy=\"{accuracy}\" altitude=\"0\" />";
 
-                // Log to terminal
                 var shortId = v2xMsg.VehicleID.Length > 4 ? v2xMsg.VehicleID[^4..] : v2xMsg.VehicleID;
+                Console.WriteLine($"[PROTO] Detected: CAM (nearby_vehicle_detection)\n{decodedJson}");
                 Console.WriteLine($"PROTO CAM {shortId} lat={v2xMsg.Latitude:F6} lon={v2xMsg.Longitude:F6} spd={v2xMsg.Speed:F1} hdg={v2xMsg.Heading:F0}");
 
                 if (protoCam.AccuracyInMeters.HasValue && protoCam.AccuracyInMeters.Value > 0)
                     Console.WriteLine($"  acc={protoCam.AccuracyInMeters.Value:F1} m");
 
-                // Record for timeshift if enabled
-                if (_timeshiftEnabled && !(v2xMsg.VehicleID?.StartsWith("000000") ?? false))
-                {
-                    recordedCamMessages.Add(fakeXml);
-                }
-
-                // Skip live rendering if timeshift is paused
                 if (_timeshiftEnabled && _timeshiftPaused)
                     return;
 
-                // Skip if in playback or timeshift catchup mode
                 if (_isPlaybackSessionActive || _isTimeshiftPlaybackActive)
                     return;
 
-                // Use existing rendering logic
                 HandleV2XMessage(v2xMsg, fakeXml);
-
-                // Increment CAM OK counter
                 IncrementCamOkCount();
             }
             catch (Exception ex)
@@ -15826,10 +16058,8 @@ namespace V2XController
                     return;
                 }
 
-                // Convert to SRVMessage for display
                 var srvMsg = protoSrv.ToSrvMessage();
 
-                // Log to terminal
                 Console.WriteLine($"PROTO SRV dev={protoSrv.DeviceId ?? "?"} lat={srvMsg.Latitude:F6} lon={srvMsg.Longitude:F6}");
 
                 if (protoSrv.AccuracyInMeters.HasValue && protoSrv.AccuracyInMeters.Value > 0)
@@ -15838,34 +16068,102 @@ namespace V2XController
                 if (protoSrv.Altitude.HasValue)
                     Console.WriteLine($"  alt={protoSrv.Altitude.Value:F1} m");
 
-                // Record for timeshift if enabled
+                if (_timeshiftEnabled && _timeshiftPaused)
+                    return;
+
+                if (_isPlaybackSessionActive || _isTimeshiftPlaybackActive)
+                    return;
+
+                if (srvMsg.Latitude != 0 && srvMsg.Longitude != 0)
+                {
+                    bool positionChanged = !srvLatitude.HasValue ||
+                                           Math.Abs(srvLatitude.Value - srvMsg.Latitude) > 1e-6 ||
+                                           !srvLongitude.HasValue ||
+                                           Math.Abs(srvLongitude.Value - srvMsg.Longitude) > 1e-6;
+
+                    srvLatitude = srvMsg.Latitude;
+                    srvLongitude = srvMsg.Longitude;
+
+                    if (positionChanged)
+                        _ = EnsureLocalAreaAltitudeAsync(force: true);
+
+                    string logicalId = srvMsg.LogicalId;
+                    _lastLatLon[logicalId] = (srvMsg.Latitude, srvMsg.Longitude);
+
+                    // Build RSU tag: "RSU" + numeric part of logicalId, max 10 chars
+                    string numPart = new string(logicalId.Where(char.IsDigit).ToArray());
+                    if (string.IsNullOrEmpty(numPart)) numPart = logicalId;
+                    string rsuTag = "RSU" + numPart;
+                    if (rsuTag.Length > 6) rsuTag = rsuTag[..6];
+
+                    var (canvasX, canvasY) = ConvertLatLonToCanvasXY(srvMsg.Latitude, srvMsg.Longitude);
+
+                    var existingEllipse = TileCanvas.Children.OfType<Ellipse>()
+                        .FirstOrDefault(e => e.Tag is string t && t == rsuTag);
+
+                    if (existingEllipse != null)
+                    {
+                        Canvas.SetLeft(existingEllipse, canvasX - existingEllipse.Width / 2);
+                        Canvas.SetTop(existingEllipse, canvasY - existingEllipse.Height / 2);
+                    }
+                    else
+                    {
+                        var point = new Ellipse
+                        {
+                            Width = 10,
+                            Height = 10,
+                            Fill = Brushes.Red,
+                            Stroke = Brushes.Black,
+                            StrokeThickness = 1,
+                            Tag = rsuTag
+                        };
+                        Canvas.SetLeft(point, canvasX - point.Width / 2);
+                        Canvas.SetTop(point, canvasY - point.Height / 2);
+                        TileCanvas.Children.Add(point);
+                    }
+
+                    var existingLabel = TileCanvas.Children.OfType<TextBlock>()
+                        .FirstOrDefault(tb => tb.Tag is string t && t == rsuTag);
+
+                    if (existingLabel != null)
+                    {
+                        Canvas.SetLeft(existingLabel, canvasX + 7);
+                        Canvas.SetTop(existingLabel, canvasY - 8);
+                    }
+                    else
+                    {
+                        var label = new TextBlock
+                        {
+                            Text = logicalId,
+                            Foreground = Brushes.Red,
+                            FontSize = 10,
+                            FontWeight = FontWeights.Bold,
+                            Tag = rsuTag
+                        };
+                        Canvas.SetLeft(label, canvasX + 7);
+                        Canvas.SetTop(label, canvasY - 8);
+                        TileCanvas.Children.Add(label);
+                    }
+
+                    if (CircleCheckBox?.IsChecked == true)
+                        DrawRadiusCircle();
+                }
+
                 if (_timeshiftEnabled)
                 {
-                    // Create fake XML for recording
                     var fakeXml = $@"<SRV lat=""{srvMsg.Latitude}"" lon=""{srvMsg.Longitude}"" />";
                     recordedSrvMessages.Add(fakeXml);
                 }
 
-                // Skip live rendering if timeshift is paused
-                if (_timeshiftEnabled && _timeshiftPaused)
-                    return;
-
-                // Skip if in playback or timeshift catchup mode
-                if (_isPlaybackSessionActive || _isTimeshiftPlaybackActive)
-                    return;
-
-                // Draw SRV point on map
-                DrawSrvPoint(srvMsg);
-
-                // Increment SRV OK counter
                 IncrementSrvOkCount();
             }
             catch (Exception ex)
             {
                 IncrementSrvErrorCount();
-                Console.WriteLine($"[PROTO SRV] Error: {ex.Message}", Brushes.Red);
+                Console.WriteLine($"[PROTO SRV] Error: {ex.Message}");
             }
         }
+
 
         private void TestProtobuf_Click(object sender, RoutedEventArgs e)
         {
@@ -15946,6 +16244,127 @@ namespace V2XController
             _protobufTestLatOffset = 0.0;
             _protobufTestDirection = true;
         }
+
+        private void SelectZoneInTable(ActivationZone zone)
+        {
+            var switchGrid = this.FindName("SwitchZonesDataGrid") as DataGrid;
+
+            if (IsSwitchZone(zone))
+            {
+                ActivationZonesDataGrid.SelectedItem = null;
+                if (switchGrid != null)
+                {
+                    switchGrid.SelectedItem = zone;
+                    switchGrid.ScrollIntoView(zone);
+                }
+            }
+            else
+            {
+                if (switchGrid != null)
+                    switchGrid.SelectedItem = null;
+                ActivationZonesDataGrid.SelectedItem = zone;
+                ActivationZonesDataGrid.ScrollIntoView(zone);
+            }
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool AllocConsole();
+
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr GetConsoleWindow();
+
+        [DllImport("user32.dll")]
+        private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetSystemMenu(IntPtr hWnd, bool bRevert);
+
+        [DllImport("user32.dll")]
+        private static extern bool DeleteMenu(IntPtr hMenu, uint uPosition, uint uFlags);
+
+        [DllImport("user32.dll")]
+        private static extern bool DrawMenuBar(IntPtr hWnd);
+
+        private const int SW_HIDE = 0;
+        private const int SW_SHOW = 5;
+
+        private const uint SC_CLOSE = 0xF060;
+        private const uint MF_BYCOMMAND = 0x00000000;
+
+        private bool _consoleAllocated = false;
+        private IntPtr _consoleHwnd = IntPtr.Zero;
+
+        private void DebugTerminal_Click(object sender, RoutedEventArgs e)
+        {
+            if (!_consoleAllocated)
+            {
+                if (!AllocConsole())
+                    return;
+
+                _consoleAllocated = true;
+                _consoleHwnd = GetConsoleWindow();
+
+                DisableConsoleCloseButton();
+
+                var stdOut = new StreamWriter(Console.OpenStandardOutput())
+                {
+                    AutoFlush = true
+                };
+
+                var stdErr = new StreamWriter(Console.OpenStandardError())
+                {
+                    AutoFlush = true
+                };
+
+                Console.SetOut(stdOut);
+                Console.SetError(stdErr);
+
+                Console.Title = "V2X Controller – Debug mode";
+
+                Console.WriteLine("=== V2X Controller Debug Mode ===");
+                Console.WriteLine("Close button is disabled for simplicity.");
+            }
+            else
+            {
+                ToggleConsole();
+            }
+        }
+
+
+
+        private void DisableConsoleCloseButton()
+        {
+            if (_consoleHwnd == IntPtr.Zero)
+                return;
+
+            IntPtr hMenu = GetSystemMenu(_consoleHwnd, false);
+
+            if (hMenu != IntPtr.Zero)
+            {
+                DeleteMenu(hMenu, SC_CLOSE, MF_BYCOMMAND);
+                DrawMenuBar(_consoleHwnd);
+            }
+        }
+
+        private void ToggleConsole()
+        {
+            if (_consoleHwnd == IntPtr.Zero)
+                _consoleHwnd = GetConsoleWindow();
+
+            if (_consoleHwnd == IntPtr.Zero)
+                return;
+
+            ShowWindow(_consoleHwnd, SW_HIDE);
+        }
+
+        private void ClearZoneTableSelection()
+        {
+            ActivationZonesDataGrid.SelectedItem = null;
+            if (this.FindName("SwitchZonesDataGrid") is DataGrid switchGrid)
+                switchGrid.SelectedItem = null;
+        }
+
+
     }
     
 }

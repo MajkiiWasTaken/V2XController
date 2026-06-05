@@ -485,6 +485,7 @@ namespace V2XController
                 byte unitId = (byte)Math.Clamp(Settings.ModemDec ?? 1, 1, 247);
 
                 // === MODBUS TCP ===
+                // === MODBUS TCP / SERIAL TUNNEL ===
                 if (isTcp)
                 {
                     var host = Settings.TcpHost?.Trim();
@@ -497,52 +498,76 @@ namespace V2XController
 
                     string hostOnly = host.Split(new[] { ':', ';', ',' }, 2, StringSplitOptions.RemoveEmptyEntries)[0].Trim();
                     string displayEndpoint = $"{hostOnly}:{port}";
-                    var cfg = ResolveProtocolCfg();
 
-                    // Probes
-                    UpdateProgress(0, totalRegisters, "Connecting...");
-                    if (!TryModbusTcpPing(hostOnly, port, unitId, cfg.ConnectionTimeout, Math.Max(cfg.ReceiveTimeout, 3000), out var pingDiag))
+                    // === SERIAL TUNNEL: RTU-over-TCP (raw RTU frames, no MBAP) ===
+                    if (usingTunnel)
                     {
-                        if (TryProbeRtuOverTcp(hostOnly, port, unitId, Math.Max(cfg.ConnectionTimeout, 3000), out var rtuDiag) && string.IsNullOrWhiteSpace(rtuDiag) == false)
+                        UpdateProgress(0, totalRegisters, "Connecting via tunnel...");
+
+                        var progress = new Progress<(int current, int total, string message)>(p =>
+                            UpdateProgress(p.current, p.total, p.message));
+
+                        var (actRes, actSt, actErr) = await WriteMpcZonesBatchedRtuOverTcpWithProgress(
+                            hostOnly, port, unitId, zonesToExport, writeOffset, 5000, progress);
+
+                        if (!actRes)
                         {
                             await ShowMessageAfterBusyAsync(
-                                $"Remote {displayEndpoint} responds as raw serial (no MBAP). This is a serial tunnel.\n\n" +
-                                "Current code expects Modbus/TCP (MBAP). Either run a Modbus/TCP gateway, or enable Tunnel fallback in the app (not enabled by default).",
-                                "Tunnel", MessageBoxButton.OK, MessageBoxImage.Warning);
+                                $"Tunnel export ({zoneTypeName}) failed: {actErr}\nTarget={displayEndpoint}, UnitId={unitId}",
+                                "Export", MessageBoxButton.OK, MessageBoxImage.Error);
                             return;
                         }
 
-                        await ShowMessageAfterBusyAsync($"No Modbus reply from {displayEndpoint} (UnitId {unitId}).\nDiag: {pingDiag}", "Export", MessageBoxButton.OK, MessageBoxImage.Warning);
-                        return;
+                        await ShowMessageAfterBusyAsync(
+                            $"Exported {zonesToExport.Count} {zoneTypeName} via tunnel to {displayEndpoint} (UnitId {unitId}).",
+                            "Export", MessageBoxButton.OK, MessageBoxImage.Information);
                     }
-
-                    // === ZÁPIS ZÓN (TCP) ===
-                    UpdateProgress(0, totalRegisters, "Writing zones...");
-
-                    var progress = new Progress<(int current, int total, string message)>(p =>
+                    else
                     {
-                        UpdateProgress(p.current, p.total, p.message);
-                    });
+                        // === STANDARD MODBUS TCP (MBAP) ===
+                        var cfg = ResolveProtocolCfg();
 
-                    var actRes = await Task.Run(() =>
-                        WriteMpcZonesBatchedWithProgress(
-                            hostOnly, port, unitId, zonesToExport, writeOffset, isTcp: true, null,
-                            connectTimeoutMs: Math.Max(cfg.ConnectionTimeout, 3000),
-                            sendTimeoutMs: Math.Max(cfg.SendTimeout, 2000),
-                            receiveTimeoutMs: Math.Max(cfg.ReceiveTimeout, 6000),
-                            progress,
-                            out ModbusStateCode st, out string? err));
+                        UpdateProgress(0, totalRegisters, "Connecting...");
+                        if (!TryModbusTcpPing(hostOnly, port, unitId, cfg.ConnectionTimeout, Math.Max(cfg.ReceiveTimeout, 3000), out var pingDiag))
+                        {
+                            if (TryProbeRtuOverTcp(hostOnly, port, unitId, Math.Max(cfg.ConnectionTimeout, 3000), out var rtuDiag) && string.IsNullOrWhiteSpace(rtuDiag) == false)
+                            {
+                                await ShowMessageAfterBusyAsync(
+                                    $"Remote {displayEndpoint} responds as raw serial (no MBAP). This is a serial tunnel.\n\n" +
+                                    "Select 'Serial tunnel' in the connection dropdown and try again.",
+                                    "Tunnel", MessageBoxButton.OK, MessageBoxImage.Warning);
+                                return;
+                            }
 
-                    if (!actRes)
-                    {
-                        await ShowMessageAfterBusyAsync($"Export ({zoneTypeName}) failed.\nTarget={displayEndpoint}, UnitId={unitId}",
-                            "Export", MessageBoxButton.OK, MessageBoxImage.Error);
-                        return;
+                            await ShowMessageAfterBusyAsync($"No Modbus reply from {displayEndpoint} (UnitId {unitId}).\nDiag: {pingDiag}", "Export", MessageBoxButton.OK, MessageBoxImage.Warning);
+                            return;
+                        }
+
+                        UpdateProgress(0, totalRegisters, "Writing zones...");
+
+                        var progress = new Progress<(int current, int total, string message)>(p =>
+                            UpdateProgress(p.current, p.total, p.message));
+
+                        var actRes = await Task.Run(() =>
+                            WriteMpcZonesBatchedWithProgress(
+                                hostOnly, port, unitId, zonesToExport, writeOffset, isTcp: true, null,
+                                connectTimeoutMs: Math.Max(cfg.ConnectionTimeout, 3000),
+                                sendTimeoutMs: Math.Max(cfg.SendTimeout, 2000),
+                                receiveTimeoutMs: Math.Max(cfg.ReceiveTimeout, 6000),
+                                progress,
+                                out ModbusStateCode st, out string? err));
+
+                        if (!actRes)
+                        {
+                            await ShowMessageAfterBusyAsync($"Export ({zoneTypeName}) failed.\nTarget={displayEndpoint}, UnitId={unitId}",
+                                "Export", MessageBoxButton.OK, MessageBoxImage.Error);
+                            return;
+                        }
+
+                        await ShowMessageAfterBusyAsync(
+                            $"Exported {zonesToExport.Count} {zoneTypeName} to {displayEndpoint} (UnitId {unitId}).",
+                            "Export", MessageBoxButton.OK, MessageBoxImage.Information);
                     }
-
-                    await ShowMessageAfterBusyAsync(
-                        $"Exported {zonesToExport.Count} {zoneTypeName} to {displayEndpoint} (UnitId {unitId}).",
-                        "Export", MessageBoxButton.OK, MessageBoxImage.Information);
                 }
                 // === SERIAL PORT (RS485) ===
                 else
@@ -3592,14 +3617,30 @@ namespace V2XController
                         return;
                     }
 
-                    var result = await Task.Run(() => ReadZonesFromModbusTcpWorker(host, port, unitId, usingTunnel));
-                    if (!result.ok)
-                    {
-                        await ShowMessageAfterBusyAsync($"Failed to read zones via TCP: {result.error}", "Read", MessageBoxButton.OK, MessageBoxImage.Error);
-                        return;
-                    }
+                    string hostOnly = host.Split(new[] { ':', ';', ',' }, 2, StringSplitOptions.RemoveEmptyEntries)[0].Trim();
 
-                    zones = result.zones;
+                    if (usingTunnel)
+                    {
+                        // RTU-over-TCP: raw RTU frames over a plain TCP socket
+                        var result = await ReadZonesRtuOverTcpWithProgressAsync(hostOnly, port, unitId, 5000, progress);
+                        if (!result.ok)
+                        {
+                            await ShowMessageAfterBusyAsync($"Failed to read zones via tunnel: {result.error}", "Read", MessageBoxButton.OK, MessageBoxImage.Error);
+                            return;
+                        }
+                        zones = result.zones;
+                    }
+                    else
+                    {
+                        // Standard Modbus/TCP (MBAP)
+                        var result = await Task.Run(() => ReadZonesFromModbusTcpWorker(hostOnly, port, unitId, asSerialTcp: false));
+                        if (!result.ok)
+                        {
+                            await ShowMessageAfterBusyAsync($"Failed to read zones via TCP: {result.error}", "Read", MessageBoxButton.OK, MessageBoxImage.Error);
+                            return;
+                        }
+                        zones = result.zones;
+                    }
                 }
                 else
                 {
@@ -3725,6 +3766,277 @@ namespace V2XController
                 return (false, "", $"Exception: {ex.Message}");
             }
         }
+
+        private static async Task<bool> RtuOverTcpWriteMultipleAsync(
+    NetworkStream stream, byte slave, ushort startAddr, ushort[] values, int timeoutMs)
+        {
+            try
+            {
+                var req = BuildRtuWriteMultipleRegistersRequest(slave, startAddr, values);
+                await stream.WriteAsync(req, 0, req.Length).ConfigureAwait(false);
+
+                var resp = new byte[8];
+                int read = 0;
+                var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+                while (read < 8 && DateTime.UtcNow < deadline)
+                {
+                    if (stream.DataAvailable)
+                    {
+                        int n = await stream.ReadAsync(resp, read, 8 - read).ConfigureAwait(false);
+                        if (n <= 0) break;
+                        read += n;
+                    }
+                    else
+                        await Task.Delay(10).ConfigureAwait(false);
+                }
+                if (read < 8) return false;
+                if (!ValidateCrc(resp)) return false;
+                if (resp[0] != slave || resp[1] != 0x10) return false;
+
+                ushort echoAddr = (ushort)((resp[2] << 8) | resp[3]);
+                ushort echoQty = (ushort)((resp[4] << 8) | resp[5]);
+                return echoAddr == startAddr && echoQty == (ushort)values.Length;
+            }
+            catch { return false; }
+        }
+
+        private static async Task<(bool ok, ModbusStateCode state, string? error)> WriteMpcZonesBatchedRtuOverTcpWithProgress(
+            string host, int port, byte unitId,
+            IReadOnlyList<ActivationZone> zones,
+            ushort writeOffset,
+            int timeoutMs,
+            IProgress<(int current, int total, string message)>? progress)
+        {
+            const ushort UNLOCK_REGISTER = 0x103F;
+            const ushort UNLOCK_VALUE = 4562;
+            const int MAX_CHUNK = 50;
+
+            try
+            {
+                Console.WriteLine($"=== Writing MPC zones via RTU-over-TCP tunnel ===");
+                Console.WriteLine($"[WRITE] Host={host}:{port}, WriteOffset=0x{writeOffset:X4}");
+
+                using var client = new TcpClient();
+                await client.ConnectAsync(host, port).ConfigureAwait(false);
+                client.NoDelay = true;
+                client.SendTimeout = Math.Max(timeoutMs, 3000);
+                client.ReceiveTimeout = Math.Max(timeoutMs, 3000);
+                using var stream = client.GetStream();
+
+                int totalRegs = zones.Count * 10;
+                progress?.Report((0, totalRegs, "Unlocking device..."));
+
+                if (!await RtuOverTcpWriteSingleAsync(stream, unitId, UNLOCK_REGISTER, UNLOCK_VALUE, timeoutMs))
+                    return (false, ModbusStateCode.UndefinedError, "Unlock failed");
+                await Task.Delay(800).ConfigureAwait(false);
+
+                ushort FIRST_ZONE_BASE = (ushort)(MPC_BASE_ADDR + writeOffset);
+                int subsPerMain = (writeOffset == MPCv3WLC_WRITE_OFFSET) ? 5 : 7;
+
+                var allRegisters = new List<(ushort addr, ushort value)>(totalRegs);
+
+                foreach (var z in zones)
+                {
+                    int mainZone = z.MainZone + 1;
+                    int subZone = z.SubZone + 1;
+                    int zoneIndex = ((mainZone - 1) * subsPerMain) + (subZone - 1);
+                    ushort zoneBase = (ushort)(FIRST_ZONE_BASE + zoneIndex * MPC_ZONE_STRIDE);
+
+                    var (lonLo, lonHi) = FloatToWordsWS((float)z.Longitude);
+                    var (latLo, latHi) = FloatToWordsWS((float)z.Latitude);
+                    var (heightLo, heightHi) = FloatToWordsWS((float)z.Height);
+                    var (widthLo, widthHi) = FloatToWordsWS((float)z.Width);
+                    var (azLo, azHi) = FloatToWordsWS((float)z.Azimuth);
+
+                    allRegisters.Add((zoneBase, lonLo));
+                    allRegisters.Add(((ushort)(zoneBase + 1), lonHi));
+                    allRegisters.Add(((ushort)(zoneBase + 2), latLo));
+                    allRegisters.Add(((ushort)(zoneBase + 3), latHi));
+                    allRegisters.Add(((ushort)(zoneBase + 4), heightLo));
+                    allRegisters.Add(((ushort)(zoneBase + 5), heightHi));
+                    allRegisters.Add(((ushort)(zoneBase + 6), widthLo));
+                    allRegisters.Add(((ushort)(zoneBase + 7), widthHi));
+                    allRegisters.Add(((ushort)(zoneBase + 8), azLo));
+                    allRegisters.Add(((ushort)(zoneBase + 9), azHi));
+
+                    Console.WriteLine($"[ZONE] {mainZone}-{subZone}: base=0x{zoneBase:X4}");
+                }
+
+                Console.WriteLine($"[WRITE] Total registers: {allRegisters.Count}");
+
+                int offset = 0;
+                while (offset < allRegisters.Count)
+                {
+                    // Re-unlock before each chunk
+                    if (!await RtuOverTcpWriteSingleAsync(stream, unitId, UNLOCK_REGISTER, UNLOCK_VALUE, timeoutMs))
+                        return (false, ModbusStateCode.UndefinedError, "Re-unlock failed");
+                    await Task.Delay(250).ConfigureAwait(false);
+
+                    // Find contiguous block
+                    int chunkSize = Math.Min(MAX_CHUNK, allRegisters.Count - offset);
+                    ushort startAddr = allRegisters[offset].addr;
+                    int actualChunk = 1;
+                    for (int i = 1; i < chunkSize; i++)
+                    {
+                        if (allRegisters[offset + i].addr != startAddr + i) break;
+                        actualChunk++;
+                    }
+
+                    var chunkData = new ushort[actualChunk];
+                    for (int i = 0; i < actualChunk; i++)
+                        chunkData[i] = allRegisters[offset + i].value;
+
+                    Console.WriteLine($"[WRITE] Chunk {actualChunk} regs from 0x{startAddr:X4}");
+                    progress?.Report((offset, allRegisters.Count, $"Writing {offset}/{allRegisters.Count} registers..."));
+
+                    bool writeOk = actualChunk == 1
+                        ? await RtuOverTcpWriteSingleAsync(stream, unitId, startAddr, chunkData[0], timeoutMs)
+                        : await RtuOverTcpWriteMultipleAsync(stream, unitId, startAddr, chunkData, timeoutMs);
+
+                    if (!writeOk)
+                        return (false, ModbusStateCode.UndefinedError, $"Write failed at 0x{startAddr:X4}");
+
+                    Console.WriteLine("[WRITE] OK");
+                    offset += actualChunk;
+                    await Task.Delay(150).ConfigureAwait(false);
+                }
+
+                progress?.Report((allRegisters.Count, allRegisters.Count, "Locking device..."));
+                await RtuOverTcpWriteSingleAsync(stream, unitId, UNLOCK_REGISTER, 0, timeoutMs);
+
+                Console.WriteLine("=== RTU-over-TCP tunnel write complete ===");
+                return (true, ModbusStateCode.Success, null);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[EXC] {ex}");
+                return (false, ModbusStateCode.UndefinedError, ex.Message);
+            }
+        }
+
+        private static async Task<(bool ok, List<ActivationZone> zones, bool isRtv, string? error)>
+            ReadZonesRtuOverTcpWithProgressAsync(
+                string host, int port, byte unitId, int timeoutMs,
+                IProgress<(int, int, string)>? progress)
+        {
+            const ushort UNLOCK_REGISTER = 0x103F;
+            const ushort UNLOCK_VALUE = 4562;
+            const ushort FIRST_REGISTER = 176;
+            const ushort LAST_REGISTER = 524;
+            const int TOTAL_REGISTERS = LAST_REGISTER - FIRST_REGISTER + 1;
+            const int CHUNK_SIZE = 50;
+
+            try
+            {
+                Console.WriteLine("=== Reading MPC zones via RTU-over-TCP tunnel ===");
+
+                using var client = new TcpClient();
+                await client.ConnectAsync(host, port).ConfigureAwait(false);
+                client.NoDelay = true;
+                client.SendTimeout = Math.Max(timeoutMs, 3000);
+                client.ReceiveTimeout = Math.Max(timeoutMs, 3000);
+                using var stream = client.GetStream();
+
+                progress?.Report((0, 100, "Unlocking device..."));
+
+                if (!await RtuOverTcpWriteSingleAsync(stream, unitId, UNLOCK_REGISTER, UNLOCK_VALUE, timeoutMs))
+                    return (false, new List<ActivationZone>(), false, "Unlock failed");
+                await Task.Delay(800).ConfigureAwait(false);
+
+                // Detect WLC vs RTV from firmware string at 0x0000
+                bool isRtv = false;
+                var (okFw, fwRegs, _) = await RtuOverTcpReadHoldingAsync(stream, unitId, 0x0000, 0x0020, timeoutMs);
+                if (okFw && fwRegs != null)
+                {
+                    string fw = DecodeAsciiFromRegs(fwRegs);
+                    isRtv = IsRtvFirmware(fw);
+                    Console.WriteLine($"[FW] '{fw}', isRtv={isRtv}");
+                }
+
+                var allData = new ushort[TOTAL_REGISTERS];
+                int registersRead = 0;
+
+                for (int chunk = 0; chunk < TOTAL_REGISTERS; chunk += CHUNK_SIZE)
+                {
+                    int toRead = Math.Min(CHUNK_SIZE, TOTAL_REGISTERS - chunk);
+                    ushort addr = (ushort)(MPC_BASE_ADDR + FIRST_REGISTER + chunk);
+                    int pct = (int)((chunk * 95.0) / TOTAL_REGISTERS);
+
+                    progress?.Report((pct, 100, $"Reading {chunk}/{TOTAL_REGISTERS} registers..."));
+
+                    var (okChunk, chunkRegs, errChunk) = await RtuOverTcpReadHoldingAsync(stream, unitId, addr, (ushort)toRead, timeoutMs);
+                    if (!okChunk || chunkRegs == null)
+                        return (false, new List<ActivationZone>(), false, $"Read failed at offset {chunk}: {errChunk}");
+
+                    Array.Copy(chunkRegs, 0, allData, chunk, chunkRegs.Length);
+                    registersRead += chunkRegs.Length;
+
+                    Console.WriteLine($"[READ] OK {chunkRegs.Length} regs (total {registersRead}/{TOTAL_REGISTERS})");
+                    await Task.Delay(50).ConfigureAwait(false);
+                }
+
+                progress?.Report((95, 100, "Processing zones..."));
+
+                var zones = new List<ActivationZone>();
+                const int ZONE_STRIDE = 10;
+                int maxZones = TOTAL_REGISTERS / ZONE_STRIDE;
+                int subsPerMain = isRtv ? 7 : 5;
+
+                for (int zoneIdx = 0; zoneIdx < maxZones; zoneIdx++)
+                {
+                    int baseIdx = zoneIdx * ZONE_STRIDE;
+                    if (baseIdx + 9 >= allData.Length) break;
+
+                    ushort lonLo = allData[baseIdx], lonHi = allData[baseIdx + 1];
+                    ushort latLo = allData[baseIdx + 2], latHi = allData[baseIdx + 3];
+                    ushort hLo = allData[baseIdx + 4], hHi = allData[baseIdx + 5];
+                    ushort wLo = allData[baseIdx + 6], wHi = allData[baseIdx + 7];
+                    ushort azLo = allData[baseIdx + 8], azHi = allData[baseIdx + 9];
+
+                    if (lonLo == 0 && lonHi == 0 && latLo == 0 && latHi == 0) continue;
+
+                    float lonF = WordsToFloatWS(lonLo, lonHi);
+                    float latF = WordsToFloatWS(latLo, latHi);
+                    float hF = WordsToFloatWS(hLo, hHi);
+                    float wF = WordsToFloatWS(wLo, wHi);
+                    float azF = WordsToFloatWS(azLo, azHi);
+
+                    if (!IsValidZoneData(lonF, latF, hF, wF, azF)) continue;
+
+                    int mainZone = zoneIdx / subsPerMain;
+                    int subZone = zoneIdx % subsPerMain;
+
+                    var zone = new ActivationZone
+                    {
+                        MainZone = mainZone,
+                        SubZone = subZone,
+                        Latitude = latF,
+                        Longitude = lonF,
+                        Height = hF,
+                        Width = wF,
+                        Azimuth = (int)Math.Round(azF),
+                        Name = $"Zone {mainZone + 1}",
+                        IsSwitchZone = isRtv
+                    };
+                    zone.UpdateName();
+                    zones.Add(zone);
+                }
+
+                progress?.Report((99, 100, "Locking device..."));
+                await RtuOverTcpWriteSingleAsync(stream, unitId, UNLOCK_REGISTER, 0, timeoutMs);
+                progress?.Report((100, 100, "Complete"));
+                await Task.Delay(200).ConfigureAwait(false);
+
+                Console.WriteLine($"=== RTU-over-TCP tunnel read complete: {zones.Count} zones ===");
+                return (true, zones, isRtv, null);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[EXC] {ex}");
+                return (false, new List<ActivationZone>(), false, ex.Message);
+            }
+        }
+
 
         private static string DecodeRegistersToString(ushort[] registers)
         {

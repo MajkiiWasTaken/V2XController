@@ -52,7 +52,7 @@ namespace V2XController
     {
         public DateTime? Timestamp { get; set; }
 
-        public int? VehicleId { get; set; }
+        public string? VehicleId { get; set; }
         public int? VehicleNumber { get; set; }
         public int? LineNumber { get; set; }
         public int? PassengerCount { get; set; }
@@ -64,7 +64,6 @@ namespace V2XController
         public double? Heading { get; set; } 
         public double? AccuracyInMeters { get; set; }
         public double? DistanceFromRsu { get; set; }
-
         public bool? IsManual { get; set; } = false;
 
         public VehicleTypeEnum VehicleType { get; set; }
@@ -110,8 +109,9 @@ namespace V2XController
                     {
                         if (vehInfo.TryGetProperty("vehicle_id", out var vidProp))
                         {
-                            if (int.TryParse(vidProp.GetString(), out int vid))
-                                protoCam.VehicleId = vid;
+                            var vidStr = vidProp.GetString();
+                            if (!string.IsNullOrWhiteSpace(vidStr) && vidStr != "-1")
+                                protoCam.VehicleId = vidStr;
                         }
 
                         if (vehInfo.TryGetProperty("vehicle_type", out var vtProp))
@@ -172,13 +172,13 @@ namespace V2XController
                     {
                         if (ptData.TryGetProperty("vehicle_number", out var vnProp))
                         {
-                            if (int.TryParse(vnProp.GetString(), out int vn))
+                            if (int.TryParse(vnProp.GetString(), out int vn) && vn >= 0)
                                 protoCam.VehicleNumber = vn;
                         }
 
                         if (ptData.TryGetProperty("line_number", out var lnProp))
                         {
-                            if (int.TryParse(lnProp.GetString(), out int ln))
+                            if (int.TryParse(lnProp.GetString(), out int ln) && ln >= 0)
                                 protoCam.LineNumber = ln;
                         }
 
@@ -205,13 +205,13 @@ namespace V2XController
         {
             return new V2XMessage
             {
-                VehicleID = VehicleId?.ToString() ?? VehicleNumber?.ToString() ?? "Unknown",
+                VehicleID = VehicleId ?? VehicleNumber?.ToString() ?? "Unknown",
                 Timestamp = Timestamp ?? DateTime.UtcNow,
                 Latitude = Latitude ?? 0.0,
                 Longitude = Longitude ?? 0.0,
                 Speed = Speed ?? 0.0,
                 Heading = Heading ?? 0.0,
-                MessageType = "PROTO_CAM",
+                MessageType = "CAM",
                 IsManual = IsManual ?? false
             };
         }
