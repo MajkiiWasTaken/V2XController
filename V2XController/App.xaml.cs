@@ -1,6 +1,7 @@
 ﻿using System.Configuration;
 using System.Data;
 using System.Windows;
+using Wpf.Ui.Appearance;
 
 namespace V2XController
 {
@@ -9,6 +10,7 @@ namespace V2XController
     /// </summary>
     public partial class App : Application
     {
+
     }
 
 }

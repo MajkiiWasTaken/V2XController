@@ -65,11 +65,11 @@
                         </Grid.ColumnDefinitions>
 
                         <Label Content="Port" FontWeight="Bold" Grid.Row="0" Grid.Column="0" Padding="0,0,0,5"/>
-                        <ComboBox x:Name="ComPortsComboBox" Grid.Row="1" Grid.Column="0" 
+                        <ComboBox x:Name="ComPortsComboBox" Grid.Row="1" Grid.Column="0" HorizontalContentAlignment="Center"
                                   SelectionChanged="ComPortsComboBox_SelectionChanged"/>
 
                         <Label Content="Baudrate" FontWeight="Bold" Grid.Row="0" Grid.Column="2" Padding="0,0,0,5"/>
-                        <TextBox x:Name="BaudrateTB" Text="57600" Grid.Row="1" Grid.Column="2" 
+                        <TextBox x:Name="BaudrateTB" Text="57600" Grid.Row="1" Grid.Column="2" TextAlignment="Center"
                                  TextChanged="BaudrateTB_TextChanged"/>
                     </Grid>
 
@@ -83,11 +83,11 @@
             <!-- RSU Settings -->
             <GroupBox Header="RSU Settings" Padding="10" Margin="0,0,0,10">
                 <StackPanel>
-                    <CheckBox x:Name="CircleCheckBox" FontWeight="Bold" Content="Circle around RSU" 
+                    <CheckBox x:Name="CircleCheckBox" FontWeight="Bold" Content="Circle around RSU (in meters)" 
                               Checked="CheckBox_Checked" Unchecked="CheckBox_Unchecked" Margin="0,0,0,5"/>
-                    <ComboBox x:Name="RadiusComboBox" IsEnabled="False" 
+                    <ComboBox x:Name="RadiusComboBox" IsEnabled="False" HorizontalContentAlignment="Center"
                               SelectionChanged="RadiusComboBox_SelectionChanged">
-                        <ComboBoxItem Content="250" />
+                        <ComboBoxItem Content="250"/>
                         <ComboBoxItem Content="300" />
                     </ComboBox>
                 </StackPanel>
@@ -97,11 +97,11 @@
             <GroupBox Header="GPS Coordinates" Padding="10" Margin="0,0,0,10">
                 <StackPanel>
                     <Label Content="Latitude" FontWeight="Bold" Padding="0,0,0,5"/>
-                    <TextBox x:Name="LatitudeBox" TextWrapping="Wrap" Text="TextBox" 
+                    <TextBox x:Name="LatitudeBox" TextWrapping="Wrap" Text="TextBox" TextAlignment="Center" 
                              TextChanged="LatitudeBox_TextChanged" Margin="0,0,0,10"/>
 
                     <Label Content="Longitude" FontWeight="Bold" Padding="0,0,0,5"/>
-                    <TextBox x:Name="LongitudeBox" TextWrapping="Wrap" Text="TextBox" 
+                    <TextBox x:Name="LongitudeBox" TextWrapping="Wrap" Text="TextBox" TextAlignment="Center" 
                              TextChanged="LongitudeBox_TextChanged" Margin="0,0,0,10"/>
 
                     <Label x:Name="AltitudeLabel" Content="Current elevation: 0 m" Padding="0"/>
@@ -127,7 +127,7 @@
 
                         <Button x:Name="rectButton" Content="Activation Zone  ▭" Grid.Row="0" Grid.Column="0"
                                 ToolTip="Draw zones" Click="rectButton_Click"/>
-                        <Button x:Name="Polyline" Content="Polyline  /" Grid.Row="0" Grid.Column="2"
+                        <Button x:Name="Polyline" Content="Polyline  √" Grid.Row="0" Grid.Column="2"
                                 ToolTip="Draw polyline" Click="PolylineButton_Click"/>
 
                         <Button x:Name="StopDrawing" Content="Stop Drawing  ✕" Grid.Row="2" Grid.Column="0"
@@ -256,7 +256,7 @@
 
                         <Button x:Name="PlayMovement" Content="Play movement  ▶" Grid.Row="0" Grid.Column="0"
                                 ToolTip="Plays selected recording from the start" Click="PlayMovement_Click"/>
-                        <Button x:Name="btnPause" Content="Pause  ||" Grid.Row="0" Grid.Column="2"
+                        <Button x:Name="btnPause" Content="Pause  ❚❚" Grid.Row="0" Grid.Column="2"
                                 ToolTip="Pause active replay" Click="btnPause_Click"/>
 
                         <Button x:Name="btnPlay" Content="Resume  ⏵" Grid.Row="2" Grid.Column="0"
@@ -448,9 +448,25 @@
         <Button x:Name="MapControls" Content="Map controls ⌖" HorizontalAlignment="Left" VerticalAlignment="Bottom"
         Width="125" Height="20" Margin="665,0,0,271"
         Click="MapControls_Click" ToolTip="Displays map controls" Panel.ZIndex="100" RenderTransformOrigin="0.515,1.12"/>
-        <Button x:Name="Terminal" Content="Debug mode ⚙" HorizontalAlignment="Left" VerticalAlignment="Bottom"
+        <Button x:Name="Terminal" Content="Debug mode ⚑" HorizontalAlignment="Left" VerticalAlignment="Bottom"
             Width="125" Height="20" Margin="340,0,0,237"
-            Click="DebugTerminal_Click" ToolTip="Opens debug terminal" Panel.ZIndex="100"/>
+            Click="DebugTerminal_Click" ToolTip="Opens debug terminal" Background="DarkRed" Panel.ZIndex="100">
+            <Button.Style>
+                <Style TargetType="Button">
+                    <!-- výchozí barva -->
+                    <Setter Property="Foreground" Value="White"/>
+
+                    <Style.Triggers>
+
+                        <!-- po najetí myší -->
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter Property="Foreground" Value="Black"/>
+                        </Trigger>
+                    </Style.Triggers>
+
+                </Style>
+            </Button.Style>
+        </Button>
 
     </Grid>
 </Window>

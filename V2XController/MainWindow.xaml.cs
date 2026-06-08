@@ -42,7 +42,7 @@ using System.Xml.Linq;
 
 //TODO: Polyline
 
-/* Budoucí rozšíření: stav návěstidla / SPATEM + MAPEM
+/* Budoucí rozšíření: stav návěstidla / SPATEM + MAPEM // Navestidlo +- 49.844802, 18.280692
  * 
  * V současné implementaci jsou zprávy SPATEM/MAPEM zpracovávány na straně RSU, takže aplikace zatím nepracuje přímo se stavem návěstidel ani s geometrií křižovatky.
  * 
@@ -85,7 +85,7 @@ namespace V2XController
         //HEARTBEAT
         private DispatcherTimer? _heartbeatTimer;
 
-        //Everything for the map 
+        // Map
         private int zoom = 18;
         private double latitude = 49.842432;
         private double longitude = 18.276736;
@@ -167,6 +167,9 @@ namespace V2XController
             Polyline,
             Point           //drawing selection
         }
+
+
+
 
         private DrawingMode currentDrawingMode = DrawingMode.None;
         private bool isDrawing = false;
@@ -315,11 +318,11 @@ namespace V2XController
 
 
         private List<TimeSpan> _keyframes = new();
-        
+
         private int _playbackIndex = 0;
 
 
-        
+
         private readonly Dictionary<ActivationZone, DispatcherTimer> _zoneDeactivateTimers = new();
 
         // debounce zoom preview
@@ -338,7 +341,7 @@ namespace V2XController
 
         // near other fields controlling playback state
         private bool _isPlaybackSessionActive = false;
-
+        private readonly List<(TimeSpan ts, int intersectionId, TramSignalDirection direction)> _replaySignalFrames = new();
 
         // near other fields (playback/recording)
         private bool _timeshiftEnabled = false;       // recording continuously after connect
@@ -525,6 +528,54 @@ namespace V2XController
             public Action? RedoAction { get; set; }
         }
 
+        private enum TramSignalSide
+        {
+            Left,
+            Right
+        }
+
+        private class TramSignalInstance
+        {
+            public int IntersectionId { get; set; }
+            public string Name { get; set; } = "";
+            public double Latitude { get; set; }
+            public double Longitude { get; set; }
+            public double RotationDeg { get; set; }
+            public TramSignalSide Side { get; set; }
+            public UserControl? Control { get; set; }
+        }
+
+        private readonly List<TramSignalInstance> _tramSignals = new()
+        {
+            new TramSignalInstance
+            {
+                IntersectionId = 640,
+                Name = "640-left",
+                Latitude = 49.844671,
+                Longitude = 18.280884,
+                RotationDeg = 346.0,
+                Side = TramSignalSide.Left
+            },
+            new TramSignalInstance
+            {
+                IntersectionId = 677,
+                Name = "667-left",
+                Latitude = 49.844863, 
+                Longitude = 18.280103,
+                RotationDeg = 75.0,
+                Side = TramSignalSide.Left
+            },
+
+            new TramSignalInstance
+            {
+                IntersectionId = 663,
+                Name = "663-right",
+                Latitude = 49.845336, 
+                Longitude = 18.280349,
+                RotationDeg = 175.0,
+                Side = TramSignalSide.Right
+            }
+        };
 
 
 
@@ -732,6 +783,8 @@ namespace V2XController
                 await LoadTilesInitialAsync();
                 Console.WriteLine("[TILES] Tiles loaded.");
                 _ = EnsureLocalAreaAltitudeAsync(force: true);
+                EnsureTramSignals();
+
 
                 Keyboard.Focus(this);
                 EnsureDefaultRadiusSelection();
@@ -1577,33 +1630,18 @@ namespace V2XController
         /// </summary>
         private void UpdateAllOverlaysLive()
         {
-            // 1. Update stops
             UpdateStopsPositions();
-
-            // 2. Update activation zones (rectangles)
             UpdateActivationZonesPositions();
-
-            // 3. Update switch zones
             UpdateSwitchZonesPositions();
-
-            // 4. Update drawn trams
             UpdateDrawnTramsPositions();
-
-            // 5. Update active vehicles (live CAMs)
             UpdateActiveVehiclesPositions();
-
-            // 6. Update replay vehicles
             UpdateReplayVehiclesPositions();
-
-            //ReprojectRailwaysOnMapChange();
-            // Update polyline live
             UpdatePolylinePositions();
 
-            // 7. Update radius circle if visible
             if (CircleCheckBox?.IsChecked == true)
-            {
                 DrawRadiusCircle();
-            }
+
+            UpdateTramSignalPositions();
         }
 
         /// <summary>
@@ -2252,6 +2290,8 @@ namespace V2XController
                 TileCanvas.Children.Remove(tile);
             }
 
+
+
             TrimTileCache(currentTiles);
 
         }
@@ -2542,7 +2582,7 @@ namespace V2XController
             }
         }
 
-            
+
         /// <summary>
         /// Handles the mouse up event on the tile canvas, committing any pan operations.
         /// </summary>
@@ -5276,7 +5316,7 @@ namespace V2XController
                     _polylineToSegmentZones[polylineToAdd].Clear();
                     if (wasContinuation && oldTableSegments != null)
                         _polylineToSegmentZones[polylineToAdd].AddRange(oldTableSegments);
-                    _polylineToSegmentZones[polylineToAdd].AddRange(tableSegmentsToAdd);
+
 
                     // Restore geo points
                     _polylineGeoPoints[polylineToAdd] = new List<(double lat, double lon)>(allGeoPointsToAdd);
@@ -8798,7 +8838,6 @@ namespace V2XController
                         _playbackAltitudeByIdAndTs[keyAlt] = altVal;
                     }
 
-                    // --- NEW: parse accuracy (try several attribute names) ---
                     double accVal = 0.0;
                     var accAttrNames = new[] { "accuracy", "acc", "accuracy_m", "accuracyMeters", "hacc" };
                     foreach (var an in accAttrNames)
@@ -8813,9 +8852,8 @@ namespace V2XController
                     if (accVal > 0)
                     {
                         string keyAcc = $"{id}|{relTs.Ticks}";
-                        _playbackAccuracyByIdAndTs[keyAcc] = accVal; // meters
+                        _playbackAccuracyByIdAndTs[keyAcc] = accVal;
                     }
-                    // --- end NEW ---
 
                     int idx = vehicleIds.IndexOf(id);
                     if (idx >= 0 && idx < tramFrames.Length)
@@ -8920,18 +8958,27 @@ namespace V2XController
             foreach (var kv in _replaySrvFramesById)
                 kv.Value.Sort((a, b) => a.ts.CompareTo(b.ts));
 
-            // Update replay UTC span from both CAM and SRV
             _replayStartUtc = minUtc;
             _replayEndUtc = maxUtc;
             _playbackLoaded = true;
             _lastReplayFile = fileName;
+
             BuildPlaybackKeyframes();
+
+            playbackElapsedTime = TimeSpan.Zero;
+            _playbackIndex = 0;
+            ReplaySlider.Value = 0;
+
+            RedrawPlaybackToTime(TimeSpan.Zero);
+            UpdateReplayTimerLabel();
+            UpdateTimerLabel();
+
             UpdateUiEnabledState();
             UpdateReplayTimerLabel();
             HideLoadingOverlay();
             MessageBox.Show("CAM recording loaded. Use Play to start playback.", "Playback ready", MessageBoxButton.OK, MessageBoxImage.Information);
         }
-        
+
 
         /// <summary>
         /// .camrec loader, a simple custom format we defined for easy recording and replay of CAM messages without the full XML structure.
@@ -9025,6 +9072,10 @@ namespace V2XController
                 if (_loadingProgressBar != null)
                     _loadingProgressBar.Value = Math.Clamp(pct, 0, 100);
             });
+            var _signalFrames = new List<(TimeSpan ts, int intersectionId, TramSignalDirection direction)>();
+            TimeSpan _lastProtoTs = TimeSpan.Zero;
+
+
 
 
             // Parse all messages once on a background thread to avoid freezing the UI
@@ -9038,7 +9089,9 @@ namespace V2XController
                 altDict,
                 accDict,
                 minUtc,
-                maxUtc
+                maxUtc,
+                signalFrames
+
             ) = await Task.Run(() =>
             {
                 var _allIds = new List<string>();
@@ -9068,17 +9121,59 @@ namespace V2XController
                         V2XMessage msg = null;
                         double accuracyFromProto = 0.0;
                         bool isStandalone = false;
+                        TimeSpan? standaloneRelTs = null;
 
                         processed++;
                         if (processed % 20 == 0 || processed == total)
                             prog.Report(20.0 + 80.0 * processed / total);
 
-                        // ── Protobuf raw hex řádek z COM portu ──────────────────────────────
+
+
                         if (IsProtobufMessage(raw))
                         {
+                            // .camrec protobuf lines usually do not contain a reliable replay timestamp.
+                            // Give EVERY protobuf message its own timeline point by preserving file order.
+                            // This is important for replay stepping: CAM and intersection status must both be keyframes.
+                            var protoRelTs = TimeSpan.FromMilliseconds(protoIndex * 100);
+                            protoIndex++;
+                            standaloneRelTs = protoRelTs;
+
                             if (!ProtobufParser.TryDecodeProtobufFromHex(raw, out string decoded)) continue;
+
+                            bool isIntersection = decoded.Contains("intersection_status", StringComparison.OrdinalIgnoreCase) ||
+                                                  decoded.Contains("intersectionStatus", StringComparison.OrdinalIgnoreCase) ||
+                                                  decoded.Contains("intersection_pass_request_status", StringComparison.OrdinalIgnoreCase) ||
+                                                  decoded.Contains("intersectionPassRequestStatus", StringComparison.OrdinalIgnoreCase);
+
                             var protoCam = ProtoCam.ParseFromJson(decoded);
-                            if (protoCam == null || string.IsNullOrWhiteSpace(protoCam.VehicleId)) continue;
+                            if (protoCam == null || string.IsNullOrWhiteSpace(protoCam.VehicleId))
+                            {
+                                if (isIntersection)
+                                {
+                                    int intersectionId;
+
+                                    if (!TryExtractIntersectionId(decoded, out intersectionId))
+                                    {
+                                        intersectionId = 640; // fallback pro tvoje správné návěstidlo
+                                        Console.WriteLine("[SIGNAL CAPTURE] intersection_id not found, using fallback 640");
+                                    }
+
+                                    var dir = ParseIntersectionDirection(decoded);
+
+                                    if (dir != TramSignalDirection.None)
+                                    {
+                                        _signalFrames.Add((protoRelTs, intersectionId, dir));
+
+                                        Console.WriteLine(
+                                            $"[SIGNAL CAPTURE] Captured frame: ts={protoRelTs:hh\\:mm\\:ss\\.fff}, intersection={intersectionId}, dir={dir}");
+                                    }
+                                    else
+                                    {
+                                        Console.WriteLine("[SIGNAL CAPTURE] Intersection found but direction=None");
+                                    }
+                                }
+                                continue;
+                            }
 
                             msg = protoCam.ToV2XMessage();
                             accuracyFromProto = protoCam.AccuracyInMeters ?? 0.0;
@@ -9086,7 +9181,6 @@ namespace V2XController
                         }
                         else
                         {
-                            // ── Standardní CAM XML ───────────────────────────────────────────
                             msg = V2XMessageParser.ParseV2XMessage(raw);
                             if (msg == null || msg.MessageType != "CAM" || string.IsNullOrEmpty(msg.VehicleID))
                                 continue;
@@ -9098,13 +9192,27 @@ namespace V2XController
                         if (_vehicleIds.Count < 2 && !_vehicleIds.Contains(msg.VehicleID))
                             _vehicleIds.Add(msg.VehicleID);
 
-                        var tsUtc = msg.Timestamp?.ToUniversalTime() ?? DateTime.MinValue;
+                        TimeSpan relTs;
+                        DateTime tsUtc;
+
+                        if (standaloneRelTs.HasValue)
+                        {
+                            // Protobuf .camrec replay uses synthetic timeline based on line order.
+                            relTs = standaloneRelTs.Value;
+                            tsUtc = protoBase.Add(relTs);
+                        }
+                        else
+                        {
+                            tsUtc = msg.Timestamp?.ToUniversalTime() ?? DateTime.MinValue;
+
+                            if (_firstTime == null)
+                                _firstTime = msg.Timestamp;
+
+                            relTs = msg.Timestamp - _firstTime.Value ?? TimeSpan.Zero;
+                        }
+
                         if (!_minUtc.HasValue || tsUtc < _minUtc) _minUtc = tsUtc;
                         if (!_maxUtc.HasValue || tsUtc > _maxUtc) _maxUtc = tsUtc;
-
-                        if (_firstTime == null) _firstTime = msg.Timestamp;
-
-                        var relTs = msg.Timestamp - _firstTime.Value ?? TimeSpan.Zero;
 
                         double u = Math.Log(Math.Tan(msg.Latitude.GetValueOrDefault() * Math.PI / 180.0) + 1.0 / Math.Cos(msg.Latitude.GetValueOrDefault() * Math.PI / 180.0)) / Math.PI;
                         double tileX = (msg.Longitude.GetValueOrDefault() + 180.0) / 360.0 * (1 << snapZoom);
@@ -9125,10 +9233,15 @@ namespace V2XController
                             _replayGeoFrames[msg.VehicleID] = geoList;
                         }
                         geoList.Add((relTs, msg.Latitude ?? 0.0, msg.Longitude ?? 0.0));
-
                         string keyBase = $"{msg.VehicleID}|{relTs.Ticks}";
                         _headingDict[keyBase] = msg.Heading ?? 0.0;
                         _speedDict[keyBase] = msg.Speed ?? 0.0;
+
+
+
+                        // Update for ALL CAM messages — protobuf AND XML
+                        // so that subsequent intersection frames get the correct timestamp
+                        _lastProtoTs = relTs;
 
                         if (isStandalone)
                         {
@@ -9173,11 +9286,12 @@ namespace V2XController
                             if (accVal > 0)
                                 _accDict[keyBase] = accVal;
                         }
+
                     }
                     catch { }
                 }
 
-                return (_allIds, _vehicleIds, _replayFrames, _replayGeoFrames, _headingDict, _speedDict, _altDict, _accDict, _minUtc, _maxUtc);
+                return (_allIds, _vehicleIds, _replayFrames, _replayGeoFrames, _headingDict, _speedDict, _altDict, _accDict, _minUtc, _maxUtc, _signalFrames);
             });
 
             // Apply parsed results back on the UI thread
@@ -9196,6 +9310,23 @@ namespace V2XController
             foreach (var kv in headingDict) _playbackHeadingByIdAndTs[kv.Key] = kv.Value;
             foreach (var kv in altDict) _playbackAltitudeByIdAndTs[kv.Key] = kv.Value;
             foreach (var kv in accDict) _playbackAccuracyByIdAndTs[kv.Key] = kv.Value;
+
+            _replaySignalFrames.Clear();
+            foreach (var f in signalFrames)
+                _replaySignalFrames.Add(f);
+
+
+
+            Console.WriteLine($"[SIGNAL REPLAY] Total signal frames loaded: {_replaySignalFrames.Count}");
+            if (_replaySignalFrames.Count > 0)
+            {
+                Console.WriteLine($"[SIGNAL REPLAY] First: ts={_replaySignalFrames[0].ts:hh\\:mm\\:ss}, dir={_replaySignalFrames[0].direction}");
+                Console.WriteLine($"[SIGNAL REPLAY] Last:  ts={_replaySignalFrames[^1].ts:hh\\:mm\\:ss}, dir={_replaySignalFrames[^1].direction}");
+            }
+            else
+            {
+                Console.WriteLine("[SIGNAL REPLAY] WARNING: No signal frames found — check that intersection messages exist in the recording");
+            }
 
             var tramFrames = new List<MovementFrame>[drawnTrams.Length];
             for (int i = 0; i < tramFrames.Length; i++)
@@ -9272,12 +9403,26 @@ namespace V2XController
             _replayEndUtc = maxUtc;
             _playbackLoaded = true;
             _lastReplayFile = fileName;
+
             BuildPlaybackKeyframes();
+
+            playbackElapsedTime = TimeSpan.Zero;
+            _playbackIndex = 0;
+            ReplaySlider.Value = 0;
+
+            RedrawPlaybackToTime(TimeSpan.Zero);
+            UpdateReplayTimerLabel();
+            UpdateTimerLabel();
+            UpdateReplayStatsForTime(TimeSpan.Zero);
+            SyncTramTableForReplay(TimeSpan.Zero);
+
+            Console.WriteLine($"[PLAYBACK] Keyframes loaded: {_keyframes.Count} (CAM/SRV/signal timeline)");
+
             UpdateUiEnabledState();
             HideLoadingOverlay();
             MessageBox.Show("Playback data loaded. Use Play button to start playback.", "Playback ready", MessageBoxButton.OK, MessageBoxImage.Information);
         }
-        
+
 
         /// <summary>
         /// Parses a standalone &lt;vehPt .../&gt; block (protobuf recording format).
@@ -9578,7 +9723,7 @@ namespace V2XController
                 {
                     ApplyZoneRotation(zone);
                     UpdateActivationZoneBounds(zone);
-                    RevalidateZoneActiveState(zone); 
+                    RevalidateZoneActiveState(zone);
 
                     try { EnsureZoneArrow(zone); } catch { }
                 }
@@ -10683,6 +10828,9 @@ namespace V2XController
                     _isPlaybackSessionActive = false;
                 }
             }
+
+            UpdateTramSignalsForReplay(time);
+            UpdateTramSignalPositions();
 
             // Update table according to filter
             SyncTramTableForReplay(time);
@@ -12214,7 +12362,7 @@ namespace V2XController
         /// <summary>
         /// Reprojects all zones if the map changes (panning, zooming, etc.)
         /// </summary>
-        public async Task  ReprojectAllZonesOnMapChange()
+        public async Task ReprojectAllZonesOnMapChange()
         {
             ReprojectActivationZonesOnMapChange();
             ReprojectSwitchZonesOnMapChange();
@@ -12224,6 +12372,7 @@ namespace V2XController
             ReprojectPolylines();
             UpdatePolylinePositions();
             DrawStopsOnCanvasSafe();
+            UpdateTramSignalPositions();
             await BringAllOverlaysToFrontSafeAsync();
         }
 
@@ -12375,9 +12524,6 @@ namespace V2XController
         }
 
 
-        /// <summary>
-        /// Builds key playback frames for replay.
-        /// </summary>
         private void BuildPlaybackKeyframes()
         {
             var set = new SortedSet<TimeSpan>();
@@ -12391,10 +12537,12 @@ namespace V2XController
                 foreach (var f in frames)
                     set.Add(f.Timestamp);
 
-            // BuildPlaybackKeyframes() – include SRV timestamps as keyframes
             foreach (var srv in _replaySrvFramesById.Values)
                 foreach (var f in srv)
                     set.Add(f.ts);
+
+            foreach (var frame in _replaySignalFrames)
+                set.Add(frame.ts);
 
             for (int i = 0; i < drawnTrams.Length; i++)
             {
@@ -12420,6 +12568,50 @@ namespace V2XController
             ReplaySlider.IsSnapToTickEnabled = true;
 
             UpdateReplayTimerLabel();
+        }
+
+        private void NextCam_Click(object sender, RoutedEventArgs e)
+        {
+            if (_keyframes.Count == 0) return;
+
+            int nextIdx = _playbackIndex + 1;
+            if (nextIdx >= _keyframes.Count) return;
+
+            _playbackIndex = nextIdx;
+            var t = _keyframes[_playbackIndex];
+            playbackElapsedTime = t;
+            playbackStartTime = DateTime.Now - playbackElapsedTime;
+
+            RedrawPlaybackToTime(t);
+            UpdateReplayTimerLabel();
+            UpdateTimerLabel();
+            UpdateReplayStatsForTime(t);
+            SyncTramTableForReplay(t);
+
+            if (isPlaying && playbackTimer != null && !playbackTimer.IsEnabled)
+                playbackTimer.Start();
+        }
+
+        private void PrevCam_Click(object sender, RoutedEventArgs e)
+        {
+            if (_keyframes.Count == 0) return;
+
+            int prevIdx = _playbackIndex - 1;
+            if (prevIdx < 0) return;
+
+            _playbackIndex = prevIdx;
+            var t = _keyframes[_playbackIndex];
+            playbackElapsedTime = t;
+            playbackStartTime = DateTime.Now - playbackElapsedTime;
+
+            RedrawPlaybackToTime(t);
+            UpdateReplayTimerLabel();
+            UpdateTimerLabel();
+            UpdateReplayStatsForTime(t);
+            SyncTramTableForReplay(t);
+
+            if (isPlaying && playbackTimer != null && !playbackTimer.IsEnabled)
+                playbackTimer.Start();
         }
 
         /// <summary>
@@ -12783,6 +12975,8 @@ namespace V2XController
             _replayBoxes.Clear();
 
             try { UpdateTimerLabel(); UpdateReplayTimerLabel(); } catch { }
+
+            _replaySignalFrames.Clear();
         }
 
 
@@ -13470,54 +13664,6 @@ namespace V2XController
             return true;
         }
 
-        private void NextCam_Click(object sender, RoutedEventArgs e)
-        {
-            if (_replayFrames == null || _replayFrames.Count == 0) return;
-
-            var current = playbackElapsedTime;
-            if (!TryFindNextCamTime(current, out var t))
-                return; // already at last CAM
-
-            playbackElapsedTime = t;
-            _playbackIndex = GetIndexForTime(t);
-            playbackStartTime = DateTime.Now - playbackElapsedTime;
-
-            RedrawPlaybackToTime(t);
-            UpdateReplayTimerLabel();
-            UpdateTimerLabel();
-
-            UpdateReplayStatsForTime(t);
-            SyncTramTableForReplay(t);
-
-            // If we were playing, keep timer running; otherwise stay paused
-            if (isPlaying && playbackTimer != null && !playbackTimer.IsEnabled)
-                playbackTimer.Start();
-        }
-
-        private void PrevCam_Click(object sender, RoutedEventArgs e)
-        {
-            if (_replayFrames == null || _replayFrames.Count == 0) return;
-
-            var current = playbackElapsedTime;
-            if (!TryFindPrevCamTime(current, out var t))
-                return; // already at first CAM
-
-            playbackElapsedTime = t;
-            _playbackIndex = GetIndexForTime(t);
-            playbackStartTime = DateTime.Now - playbackElapsedTime;
-
-            RedrawPlaybackToTime(t);
-            UpdateReplayTimerLabel();
-            UpdateTimerLabel();
-
-            UpdateReplayStatsForTime(t);
-            SyncTramTableForReplay(t);
-
-            if (isPlaying && playbackTimer != null && !playbackTimer.IsEnabled)
-                playbackTimer.Start();
-        }
-
-        // Add near other small helpers (e.g., under Lerp)
         private static bool AlmostEqual(double a, double b, double eps = 1e-6) => Math.Abs(a - b) <= eps;
 
         private bool ZoneAlreadyExists(string name, double lat, double lon, double widthMeters, double heightMeters, int azimuth, string color)
@@ -13678,7 +13824,6 @@ namespace V2XController
             }
         }
 
-        // place near GetIndexForTime or other small helpers
         private bool TryFindNextCamTime(TimeSpan current, out TimeSpan next)
         {
             next = default;
@@ -13697,6 +13842,17 @@ namespace V2XController
                     }
                 }
             }
+
+            // Also include signal state change timestamps
+            foreach (var sf in _replaySignalFrames)
+            {
+                if (sf.ts > current && (!found || sf.ts < next))
+                {
+                    next = sf.ts;
+                    found = true;
+                }
+            }
+
             return found;
         }
 
@@ -13718,6 +13874,17 @@ namespace V2XController
                     }
                 }
             }
+
+            // Also include signal state change timestamps
+            foreach (var sf in _replaySignalFrames)
+            {
+                if (sf.ts < current && (!found || sf.ts > prev))
+                {
+                    prev = sf.ts;
+                    found = true;
+                }
+            }
+
             return found;
         }
 
@@ -15251,7 +15418,7 @@ namespace V2XController
             return p;
         }
 
-                private void EnsureZoneArrow(ActivationZone zone)
+        private void EnsureZoneArrow(ActivationZone zone)
         {
             if (zone?.Rectangle == null) return;
             var rect = zone.Rectangle;
@@ -15366,7 +15533,6 @@ namespace V2XController
                 {
                     if (!ActivationZonesCollection.Contains(kvp.Value))
                     {
-                        // ✅ Remove arrow before removing rectangle
                         RemoveZoneArrow(kvp.Key);
 
                         if (TileCanvas.Children.Contains(kvp.Key))
@@ -16199,9 +16365,8 @@ namespace V2XController
                 }
                 else if (isIntersection)
                 {
-                    // Intersection-status / pass-request messages are valid infrastructure messages
-                    // but carry no vehicle position data — log and ignore silently
-                    Console.WriteLine($"[PROTO] Intersection message (no vehicle data, ignored)\n{decodedJson}");
+                    Console.WriteLine($"[PROTO] Intersection message\n{decodedJson}");
+                    HandleIntersectionStatus(decodedJson);
                 }
                 else
                 {
@@ -16419,7 +16584,7 @@ namespace V2XController
                 _protobufTestDirection = !_protobufTestDirection;
 
                 double jumpMeters = 50.0;
-                double latDelta = jumpMeters / 111000.0; 
+                double latDelta = jumpMeters / 111000.0;
 
                 if (_protobufTestDirection)
                 {
@@ -16586,9 +16751,426 @@ namespace V2XController
                 switchGrid.SelectedItem = null;
         }
 
+        private void EnsureTramSignals()
+        {
+            foreach (var signal in _tramSignals)
+            {
+                if (signal.Control != null)
+                    continue;
+
+                UserControl control;
+
+                if (signal.Side == TramSignalSide.Left)
+                {
+                    control = new TramSignalControlLeft();
+                }
+                else
+                {
+                    control = new TramSignalControlRight();
+                }
+
+                signal.Control = control;
+
+                control.Loaded += (s, e) => UpdateTramSignalPosition(signal);
+
+                TileCanvas.Children.Add(control);
+                Panel.SetZIndex(control, 1500);
+
+                Dispatcher.BeginInvoke(
+                    () => UpdateTramSignalPosition(signal),
+                    DispatcherPriority.Background);
+            }
+        }
+
+        private void UpdateTramSignalPositions()
+        {
+            foreach (var signal in _tramSignals)
+            {
+                UpdateTramSignalPosition(signal);
+            }
+        }
+
+        private void UpdateTramSignalPosition(TramSignalInstance signal)
+        {
+            if (signal.Control == null)
+                return;
+
+            var (x, y) = ConvertLatLonToCanvasXY(signal.Latitude, signal.Longitude);
+
+            double w = signal.Control.ActualWidth;
+            double h = signal.Control.ActualHeight;
+
+            if (w <= 0)
+                w = signal.Control.Width;
+
+            if (h <= 0)
+                h = signal.Control.Height;
+
+            Canvas.SetLeft(signal.Control, x - w / 2.0);
+            Canvas.SetTop(signal.Control, y - h / 2.0);
+
+            signal.Control.RenderTransformOrigin = new Point(0.5, 0.5);
+            signal.Control.RenderTransform = new RotateTransform(signal.RotationDeg);
+        }
+
+        private void HandleIntersectionStatus(string decodedJson)
+        {
+            int intersectionId;
+            TramSignalDirection direction;
+
+            if (!TryParseIntersectionDirection(decodedJson, out intersectionId, out direction))
+            {
+                direction = ParseIntersectionDirection(decodedJson);
+
+                if (direction == TramSignalDirection.None)
+                {
+                    Console.WriteLine("[SIGNAL LIVE] Intersection message found but direction=None");
+                    return;
+                }
+
+                intersectionId = 640; // stejné správné návěstidlo jako v replay fallbacku
+                Console.WriteLine("[SIGNAL LIVE] intersection_id not found, using fallback 640");
+            }
+
+            Console.WriteLine($"[SIGNAL LIVE] Intersection {intersectionId} → {direction}");
+
+            Dispatcher.Invoke(() =>
+            {
+                EnsureTramSignals();
+
+                var signal = _tramSignals.FirstOrDefault(s => s.IntersectionId == intersectionId);
+
+                if (signal == null)
+                {
+                    Console.WriteLine($"[SIGNAL LIVE] No tram signal registered for intersection_id={intersectionId}");
+                    return;
+                }
+
+                if (signal.Control is TramSignalControlLeft left)
+                {
+                    left.Left = direction;
+                }
+
+                if (signal.Control is TramSignalControlRight right)
+                {
+                    right.Right = direction;
+                }
+            });
+        }
+
+        private static bool TryParseIntersectionDirection(
+            string decodedJson,
+            out int intersectionId,
+            out TramSignalDirection direction)
+        {
+            intersectionId = -1;
+            direction = TramSignalDirection.None;
+
+            try
+            {
+                using var doc = JsonDocument.Parse(decodedJson);
+                var root = doc.RootElement;
+
+                JsonElement? statusEl = null;
+                foreach (var k in new[] { "intersection_status", "intersectionStatus" })
+                {
+                    if (root.TryGetProperty(k, out var el))
+                    {
+                        statusEl = el;
+                        break;
+                    }
+                }
+
+                if (!statusEl.HasValue)
+                {
+                    Console.WriteLine("[SIGNAL PARSE] No intersection_status key found");
+                    return false;
+                }
+
+                var status = statusEl.Value;
+
+                if (!TryReadInt(status, out intersectionId, "intersection_id", "intersectionId"))
+                {
+                    if (!TryReadInt(root, out intersectionId, "intersection_id", "intersectionId"))
+                    {
+                        Console.WriteLine("[SIGNAL PARSE] No intersection_id found");
+                        return false;
+                    }
+                }
+
+                direction = ParseIntersectionDirection(decodedJson);
+
+                if (direction == TramSignalDirection.None)
+                {
+                    return false;
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[SIGNAL PARSE] Failed: {ex.Message}");
+                return false;
+            }
+        }
+
+        private static bool TryReadInt(JsonElement element, out int value, params string[] keys)
+        {
+            value = -1;
+
+            foreach (var key in keys)
+            {
+                if (!element.TryGetProperty(key, out var el))
+                {
+                    continue;
+                }
+
+                if (el.ValueKind == JsonValueKind.Number && el.TryGetInt32(out value))
+                {
+                    return true;
+                }
+
+                if (el.ValueKind == JsonValueKind.String)
+                {
+                    var s = el.GetString();
+                    if (int.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out value))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+
+        /// <summary>
+        /// Parses <c>intersection_status.movement_states[].signal_state</c> and maps it
+        /// to <see cref="TramSignalDirection"/> using the authoritative
+        /// <c>TrafficLightSignalStateEnum</c> values.
+        /// Lane 21 = straight, lane 23 = left. Green direction is lane-aware;
+        /// non-directional states (amber, stop) apply to any lane.
+        /// </summary>
+        private static TramSignalDirection ParseIntersectionDirection(string decodedJson)
+        {
+            const int LaneIdStraight = 21;
+            const int LaneIdLeft = 23;
+
+            try
+            {
+                using var doc = JsonDocument.Parse(decodedJson);
+                var root = doc.RootElement;
+
+                Console.WriteLine($"[SIGNAL PARSE] Top-level keys: {string.Join(", ", root.EnumerateObject().Select(p => p.Name))}");
+
+                // Try both snake_case and camelCase wrappers
+                JsonElement? statusEl = null;
+                foreach (var k in new[] { "intersection_status", "intersectionStatus" })
+                {
+                    if (root.TryGetProperty(k, out var el)) { statusEl = el; break; }
+                }
+
+                if (!statusEl.HasValue)
+                {
+                    Console.WriteLine("[SIGNAL PARSE] No intersection_status key found — skipping");
+                    return TramSignalDirection.None;
+                }
+
+                var status = statusEl.Value;
+                Console.WriteLine($"[SIGNAL PARSE] intersection_status keys: {string.Join(", ", status.EnumerateObject().Select(p => p.Name))}");
+
+                JsonElement? array = null;
+                foreach (var k in new[] { "signal_group_states", "signalGroupStates", "movement_states", "movementStates" })
+                {
+                    if (status.TryGetProperty(k, out var el) && el.ValueKind == JsonValueKind.Array)
+                    {
+                        array = el;
+                        Console.WriteLine($"[SIGNAL PARSE] Found array under key '{k}', length={el.GetArrayLength()}");
+                        break;
+                    }
+                }
+
+                if (!array.HasValue || array.Value.GetArrayLength() == 0)
+                {
+                    Console.WriteLine("[SIGNAL PARSE] No signal_group_states / movement_states array found or empty");
+                    return TramSignalDirection.None;
+                }
+
+                // Collect per-lane states keyed by signal_group_id
+                string straightState = string.Empty;
+                string leftState = string.Empty;
+                string rightState = string.Empty;
+                var allStates = new List<string>(array.Value.GetArrayLength());
+
+                foreach (var ms in array.Value.EnumerateArray())
+                {
+                    // Resolve signal_group_id
+                    int groupId = -1;
+                    foreach (var gk in new[] { "signal_group_id", "signalGroupId" })
+                    {
+                        if (ms.TryGetProperty(gk, out var gidEl) && gidEl.TryGetInt32(out var gid))
+                        {
+                            groupId = gid;
+                            break;
+                        }
+                    }
+
+                    // Resolve state string
+                    string stateVal = string.Empty;
+                    foreach (var stateKey in new[] { "current_state", "currentState", "signal_state", "signalState" })
+                    {
+                        if (ms.TryGetProperty(stateKey, out var sigState))
+                        {
+                            var s = sigState.GetString();
+                            if (!string.IsNullOrEmpty(s)) { stateVal = s; break; }
+                        }
+                    }
+
+                    if (string.IsNullOrEmpty(stateVal)) continue;
+                    allStates.Add(stateVal);
+
+                    if (groupId == LaneIdStraight) straightState = stateVal;
+                    else if (groupId == LaneIdLeft) leftState = stateVal;
+                }
+
+                Console.WriteLine($"[SIGNAL PARSE] lane {LaneIdStraight} (straight)={straightState}, lane {LaneIdLeft} (left)={leftState}");
+                Console.WriteLine($"[SIGNAL PARSE] All states ({allStates.Count}): {string.Join(", ", allStates)}");
+
+                if (allStates.Count == 0) return TramSignalDirection.None;
+
+                // Green is lane-aware: which specific lane is green determines direction
+                bool straightGreen = !string.IsNullOrEmpty(straightState) && IsSignalGreen(straightState);
+                bool leftGreen = !string.IsNullOrEmpty(leftState) && IsSignalGreen(leftState);
+                bool rightGreen = !string.IsNullOrEmpty(rightState) && IsSignalGreen(rightState);
+
+                if (straightGreen) return TramSignalDirection.Straight;
+                if (leftGreen) return TramSignalDirection.Left;
+                if (rightGreen) return TramSignalDirection.Right;
+
+                // Non-directional states: apply to whichever lane matches
+                if (allStates.Any(IsSignalPreMovement)) return TramSignalDirection.PreMovement;
+                if (allStates.Any(IsSignalStop)) return TramSignalDirection.Stop;
+
+                Console.WriteLine("[SIGNAL PARSE] No matching state → None");
+                return TramSignalDirection.None;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[SIGNAL PARSE] Failed: {ex.Message}");
+                return TramSignalDirection.None;
+            }
+        }
+
+        // PERMISSIVE_MOVEMENT_ALLOWED (60) or PROTECTED_MOVEMENT_ALLOWED (70)
+        private static bool IsSignalGreen(string s) =>
+            s == "TRAFFIC_LIGHT_SIGNAL_STATE_ENUM_PERMISSIVE_MOVEMENT_ALLOWED" ||
+            s == "TRAFFIC_LIGHT_SIGNAL_STATE_ENUM_PROTECTED_MOVEMENT_ALLOWED";
+
+        // PRE_MOVEMENT (50) — red + amber phase
+        private static bool IsSignalPreMovement(string s) =>
+            s == "TRAFFIC_LIGHT_SIGNAL_STATE_ENUM_PRE_MOVEMENT";
+
+        // STOP_AND_REMAIN (40), STOP_THEN_PROCEED (30)
+        private static bool IsSignalStop(string s) =>
+            s == "TRAFFIC_LIGHT_SIGNAL_STATE_ENUM_STOP_AND_REMAIN" ||
+            s == "TRAFFIC_LIGHT_SIGNAL_STATE_ENUM_STOP_THEN_PROCEED";
+
+        private void UpdateTramSignalsForReplay(TimeSpan time)
+        {
+            if (_replaySignalFrames.Count == 0)
+                return;
+
+            int idx = -1;
+
+            for (int i = 0; i < _replaySignalFrames.Count; i++)
+            {
+                if (_replaySignalFrames[i].ts <= time)
+                    idx = i;
+                else
+                    break;
+            }
+
+            if (idx < 0)
+                return;
+
+            var frame = _replaySignalFrames[idx];
+
+            EnsureTramSignals();
+
+            var signal = _tramSignals.FirstOrDefault(s => s.IntersectionId == frame.intersectionId);
+
+            if (signal == null)
+            {
+                Console.WriteLine($"[SIGNAL REPLAY] No tram signal registered for intersection_id={frame.intersectionId}");
+                return;
+            }
+
+            if (signal.Control is TramSignalControlLeft left)
+                left.Left = frame.direction;
+
+            if (signal.Control is TramSignalControlRight right)
+                right.Right = frame.direction;
+        }
+
+        private static bool TryExtractIntersectionId(string decodedJson, out int intersectionId)
+        {
+            intersectionId = -1;
+
+            try
+            {
+                using var doc = JsonDocument.Parse(decodedJson);
+
+                return TryFindIntRecursive(
+                    doc.RootElement,
+                    out intersectionId,
+                    "intersection_id",
+                    "intersectionId",
+                    "id");
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool TryFindIntRecursive(JsonElement element, out int value, params string[] names)
+        {
+            value = -1;
+
+            if (element.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var prop in element.EnumerateObject())
+                {
+                    if (names.Contains(prop.Name, StringComparer.OrdinalIgnoreCase))
+                    {
+                        if (prop.Value.ValueKind == JsonValueKind.Number &&
+                            prop.Value.TryGetInt32(out value))
+                            return true;
+
+                        if (prop.Value.ValueKind == JsonValueKind.String &&
+                            int.TryParse(prop.Value.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out value))
+                            return true;
+                    }
+
+                    if (TryFindIntRecursive(prop.Value, out value, names))
+                        return true;
+                }
+            }
+
+            if (element.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var item in element.EnumerateArray())
+                {
+                    if (TryFindIntRecursive(item, out value, names))
+                        return true;
+                }
+            }
+
+            return false;
+        }
 
     }
-    
+
 }
 
 public class PolylinePointData
@@ -16597,7 +17179,7 @@ public class PolylinePointData
     public Point CanvasPosition { get; set; }
     public double Latitude { get; set; }
     public double Longitude { get; set; }
-    public DateTime Timestamp { get; set; }
+    public DateTime Timestamp { get; set; } 
 }
 
 public class PolylineData
