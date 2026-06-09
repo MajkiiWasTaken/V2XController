@@ -17,11 +17,13 @@ using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
+using System.Windows.Media.Effects;
 using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
 using System.Windows.Threading;
 using System.Xml;
 using System.Xml.Linq;
+using Windows.UI.Composition;
 
 
 /**********************************************************************************************************
@@ -538,11 +540,13 @@ namespace V2XController
         {
             public int IntersectionId { get; set; }
             public string Name { get; set; } = "";
+            public string Title { get; set; } = "";
             public double Latitude { get; set; }
             public double Longitude { get; set; }
             public double RotationDeg { get; set; }
             public TramSignalSide Side { get; set; }
             public UserControl? Control { get; set; }
+            public TextBlock? SignalLabel { get; set; }
         }
 
         private readonly List<TramSignalInstance> _tramSignals = new()
@@ -551,6 +555,7 @@ namespace V2XController
             {
                 IntersectionId = 640,
                 Name = "640-left",
+                Title = "V640",
                 Latitude = 49.844671,
                 Longitude = 18.280884,
                 RotationDeg = 346.0,
@@ -560,7 +565,8 @@ namespace V2XController
             {
                 IntersectionId = 677,
                 Name = "667-left",
-                Latitude = 49.844863, 
+                Title = "V667",
+                Latitude = 49.844863,
                 Longitude = 18.280103,
                 RotationDeg = 75.0,
                 Side = TramSignalSide.Left
@@ -570,12 +576,15 @@ namespace V2XController
             {
                 IntersectionId = 663,
                 Name = "663-right",
+                Title = "V633",
                 Latitude = 49.845336, 
                 Longitude = 18.280349,
                 RotationDeg = 175.0,
                 Side = TramSignalSide.Right
             }
         };
+
+
 
 
 
@@ -1859,7 +1868,7 @@ namespace V2XController
                         var (plat, plon) = drawnTramTrailGeoPoints[idx][^2];
                         var (px, py) = ConvertLatLonToCanvasXY(plat, plon);
                         var headingDeg = CalculateAzimuth(new Point(px, py), new Point(x, y));
-                        headingDeg = (headingDeg - 180 + 360) % 360; // Manual flip rule
+                        //headingDeg = (headingDeg - 180 + 360) % 360; // Manual flip rule
 
                         if (_vehicleBoxes.TryGetValue(drawnTramIds[idx], out var box))
                         {
@@ -1941,15 +1950,15 @@ namespace V2XController
                     // Update text
                     if (pt.Text != null)
                     {
-                        Canvas.SetLeft(pt.Text, x + 8);
-                        Canvas.SetTop(pt.Text, y - 6);
+                        StyleVehicleLabel(pt.Text, pt.Text.Foreground);
+                        PositionVehicleLabelsTogether(pt.Text, pt.Speed, new Point(x, y));
                     }
 
                     // Update speed text
                     if (pt.Speed != null)
                     {
-                        Canvas.SetLeft(pt.Speed, x + 8);
-                        Canvas.SetTop(pt.Speed, y + 6);
+                        StyleVehicleLabel(pt.Speed, pt.Speed.Foreground);
+                        PositionVehicleLabelsTogether(pt.Text, pt.Speed, new Point(x, y));
                     }
 
                     // Update accuracy text (the "no acc" label)
@@ -2047,10 +2056,22 @@ namespace V2XController
                 if (_replayGeoFrames.TryGetValue(id, out var frames) && frames.Count > 0)
                 {
                     // Find current frame based on replay time
-                    var currentFrame = frames.LastOrDefault();
+                    var currentFrame = frames.LastOrDefault(f => f.ts <= playbackElapsedTime);
                     if (currentFrame != default)
                     {
                         var (x, y) = ConvertLatLonToCanvasXY(currentFrame.lat, currentFrame.lon);
+                        var pos = new Point(x, y);
+
+                        // přidat toto:
+                        double headingAct = double.NaN;
+                        var headingKey = $"{id}|{currentFrame.ts.Ticks}";
+
+                        if (_playbackHeadingByIdAndTs.TryGetValue(headingKey, out var replayHeading))
+                        {
+                            headingAct = replayHeading;
+                        }
+
+                        CheckActivationZones(pos, id, headingAct);
 
                         // Update ellipse
                         if (vehicle.Ellipse != null)
@@ -2059,12 +2080,32 @@ namespace V2XController
                             Canvas.SetTop(vehicle.Ellipse, y - 6);
                         }
 
+
                         // Update text
                         if (vehicle.Text != null)
                         {
-                            Canvas.SetLeft(vehicle.Text, x + 8);
-                            Canvas.SetTop(vehicle.Text, y - 6);
+                            StyleVehicleLabel(vehicle.Text, vehicle.Text.Foreground);
+                            PositionVehicleLabel(vehicle.Text, new Point(x, y), -22);
+                            Panel.SetZIndex(vehicle.Text, 1199);
                         }
+                        if (vehicle.Speed != null)
+                        {
+                            string speedKey = $"{id}|{currentFrame.ts.Ticks}";
+
+                            if (_playbackSpeedByIdAndTs.TryGetValue(speedKey, out double speed))
+                            {
+                                vehicle.Speed.Text = $"{speed:F1} m/s";
+                            }
+
+                            StyleVehicleLabel(vehicle.Speed, vehicle.Speed.Foreground);
+                            PositionVehicleLabelsTogether(vehicle.Text, vehicle.Speed, new Point(x, y));
+
+                            if (!TileCanvas.Children.Contains(vehicle.Speed))
+                                TileCanvas.Children.Add(vehicle.Speed);
+                            Panel.SetZIndex(vehicle.Speed, 1200);
+                        }
+
+                        PositionVehicleLabelsTogether(vehicle.Text, vehicle.Speed, new Point(x, y));
 
                         // Update replay box
                         if (_replayBoxes.TryGetValue(id, out var box))
@@ -2078,32 +2119,56 @@ namespace V2XController
                     }
                 }
 
-                // Update trail
-                if (vehicle.TrailGeoPoints != null && vehicle.TrailGeoPoints.Count > 0)
+
+
+                // Update replay trail podle aktuálního času
+                var trailFrames = frames
+                    .Where(f => f.ts <= playbackElapsedTime)
+                    .TakeLast(_maxTrailLength + 1)
+                    .ToList();
+
+                var trailLine = TileCanvas.Children.OfType<Polyline>()
+                    .FirstOrDefault(pl => pl.Tag is string tag && tag == $"replay_trail_{id}");
+
+                if (trailLine != null)
                 {
-                    var trailLine = TileCanvas.Children.OfType<Polyline>()
-                        .FirstOrDefault(pl => pl.Tag is string tag && tag == $"replay_trail_{id}");
+                    trailLine.Points.Clear();
 
-                    if (trailLine != null)
+                    foreach (var f in trailFrames)
                     {
-                        trailLine.Points.Clear();
-                        foreach (var (lat, lon) in vehicle.TrailGeoPoints)
-                        {
-                            var (tx, ty) = ConvertLatLonToCanvasXY(lat, lon);
-                            trailLine.Points.Add(new Point(tx, ty));
-                        }
+                        var (tx, ty) = ConvertLatLonToCanvasXY(f.lat, f.lon);
+                        trailLine.Points.Add(new Point(tx, ty));
                     }
+                }
 
-                    // Update trail dots
-                    if (vehicle.TrailDots != null)
+                // Update trail dots
+                if (vehicle.TrailDots != null)
+                {
+                    foreach (var dot in vehicle.TrailDots)
+                        TileCanvas.Children.Remove(dot);
+
+                    vehicle.TrailDots.Clear();
+
+                    for (int i = 0; i < trailFrames.Count - 1; i++)
                     {
-                        for (int i = 0; i < vehicle.TrailDots.Count && i < vehicle.TrailGeoPoints.Count; i++)
+                        var f = trailFrames[i];
+                        var (tx, ty) = ConvertLatLonToCanvasXY(f.lat, f.lon);
+
+                        var dot = new Ellipse
                         {
-                            var (lat, lon) = vehicle.TrailGeoPoints[i];
-                            var (tx, ty) = ConvertLatLonToCanvasXY(lat, lon);
-                            Canvas.SetLeft(vehicle.TrailDots[i], tx - 2.5);
-                            Canvas.SetTop(vehicle.TrailDots[i], ty - 2.5);
-                        }
+                            Width = 5,
+                            Height = 5,
+                            Fill = Brushes.Black,
+                            IsHitTestVisible = false,
+                            Tag = $"replay_trail_dot_{id}_{i}"
+                        };
+
+                        Canvas.SetLeft(dot, tx - 2.5);
+                        Canvas.SetTop(dot, ty - 2.5);
+
+                        vehicle.TrailDots.Add(dot);
+                        TileCanvas.Children.Add(dot);
+                        Panel.SetZIndex(dot, 1001);
                     }
                 }
             }
@@ -2119,15 +2184,16 @@ namespace V2XController
         {
             if (box == null) return;
 
-            const double boxWidth = 15.0;  // Match UpdateOrCreateBox
+            const double boxWidth = 15.0;
 
-            // Position: top center of the rectangle exactly at the vehicle point
             Canvas.SetLeft(box, topCenter.X - boxWidth / 2.0);
-            Canvas.SetTop(box, topCenter.Y); // NOT minus half height - top is at the point!
+            Canvas.SetTop(box, topCenter.Y);
 
-            // Rotation around top center (CenterY=0), with +180° offset so "point is at top"
-            double angle = (headingDeg + 180.0) % 360.0;
-            box.RenderTransform = new RotateTransform(angle, boxWidth / 2.0, 0.0);
+            box.RenderTransform = new RotateTransform(
+                headingDeg,
+                boxWidth / 2.0,
+                0.0
+            );
         }
 
         /// <summary>
@@ -8043,6 +8109,9 @@ namespace V2XController
                     TrailDots = new List<Ellipse>(),
                     TrailGeoPoints = new List<(double lat, double lon)>() // Initialize geo trail
                 };
+                ApplyTextHalo(text);
+                ApplyTextHalo(speedtext);
+
                 activeVehicles[msg.VehicleID] = vehicle;
                 vehicle.LastUpdate = DateTime.Now;
             }
@@ -8133,8 +8202,8 @@ namespace V2XController
                 }
             }
 
-            Panel.SetZIndex(vehicle.Ellipse, 1000);
-            Panel.SetZIndex(vehicle.Text, 1000);
+            Panel.SetZIndex(vehicle.Ellipse, 2000);
+            Panel.SetZIndex(vehicle.Text, 2001);
         }
 
 
@@ -8399,7 +8468,7 @@ namespace V2XController
                     bool validDirection = IsValidEntryDirection(pos, zone, heading);
                     _vehicleZoneValidEntry[key] = validDirection;
 
-                    Console.WriteLine($"[ZONE] {shortId} vstup do '{zone.Name}' | heading={heading:F0}° | valid={validDirection}");
+                    Console.WriteLine($"[ZONE] {shortId} entered zone '{zone.Name}' | heading={heading:F0}° | valid={validDirection}");
 
                     if (!validDirection)
                         continue;
@@ -9362,6 +9431,14 @@ namespace V2XController
                         IsHitTestVisible = false
                     };
 
+                    text.Effect = new DropShadowEffect
+                    {
+                        Color = Colors.Black,
+                        BlurRadius = 3,
+                        ShadowDepth = 0,
+                        Opacity = 1
+                    };
+
                     var speedText = new TextBlock
                     {
                         Text = "",
@@ -9369,6 +9446,14 @@ namespace V2XController
                         FontWeight = FontWeights.Bold,
                         FontSize = 12,
                         IsHitTestVisible = false
+                    };
+
+                    speedText.Effect = new DropShadowEffect
+                    {
+                        Color = Colors.Black,
+                        BlurRadius = 3,
+                        ShadowDepth = 0,
+                        Opacity = 1
                     };
 
                     drawnTrams[i] = new MapPoint
@@ -9490,8 +9575,10 @@ namespace V2XController
 
             vehicle.Text.Text = displayText;
             vehicle.Text.Foreground = isSrv ? Brushes.Black : (color ?? vehicle.Text.Foreground);
-            Canvas.SetLeft(vehicle.Text, newPos.X + 5);
-            Canvas.SetTop(vehicle.Text, newPos.Y - 10);
+
+            StyleVehicleLabel(vehicle.Text, vehicle.Text.Foreground);
+            PositionVehicleLabel(vehicle.Text, newPos, -22);
+
             if (!TileCanvas.Children.Contains(vehicle.Text))
                 TileCanvas.Children.Add(vehicle.Text);
 
@@ -9519,8 +9606,10 @@ namespace V2XController
                     vehicle.Speed.Text = $"{speed.Value:F1} m/s";
 
                 vehicle.Speed.Foreground = color ?? vehicle.Speed.Foreground;
-                Canvas.SetLeft(vehicle.Speed, newPos.X + 5);
-                Canvas.SetTop(vehicle.Speed, newPos.Y + 5);
+
+                StyleVehicleLabel(vehicle.Speed, vehicle.Speed.Foreground);
+                PositionVehicleLabel(vehicle.Speed, newPos, -5);
+
                 Panel.SetZIndex(vehicle.Speed, 1100);
                 if (!TileCanvas.Children.Contains(vehicle.Speed))
                     TileCanvas.Children.Add(vehicle.Speed);
@@ -9536,8 +9625,8 @@ namespace V2XController
 
             if (_liveAccuracyTextById.TryGetValue(vehicle.Label, out var accText))
             {
-                Canvas.SetLeft(accText, newPos.X + 5);
-                Canvas.SetTop(accText, newPos.Y + 20);
+                StyleVehicleLabel(accText, Brushes.Gray);
+                PositionVehicleLabel(accText, newPos, 12);
                 Panel.SetZIndex(accText, 1100);
 
                 if (!TileCanvas.Children.Contains(accText))
@@ -10648,8 +10737,8 @@ namespace V2XController
                     FontSize = 12,
                     IsHitTestVisible = false
                 };
-                Canvas.SetLeft(text, pos.X + 5);
-                Canvas.SetTop(text, pos.Y - 10);
+                StyleVehicleLabel(text, color);
+                PositionVehicleLabel(text, pos, -22);
                 TileCanvas.Children.Add(text);
                 var played = frames.Where(f => f.Timestamp <= time).ToList();
                 int maxPts = Math.Max(2, _maxTrailLength + 1); // at least two points to form one segment
@@ -10693,8 +10782,8 @@ namespace V2XController
                 string keySpeed = $"{id}|{curFrame.Timestamp.Ticks}";
                 if (_playbackSpeedByIdAndTs.TryGetValue(keySpeed, out var spd))
                     speedTb.Text = $"{spd:F1} m/s";
-                Canvas.SetLeft(speedTb, pos.X + 5);
-                Canvas.SetTop(speedTb, pos.Y + 5);
+                StyleVehicleLabel(speedTb, color);
+                PositionVehicleLabel(speedTb, pos, -5);
                 TileCanvas.Children.Add(speedTb);
                 Panel.SetZIndex(speedTb, 1100);
 
@@ -10711,9 +10800,12 @@ namespace V2XController
                     LastUpdate = DateTime.Now
                 };
 
+                //ApplyTextHalo(text);
+                //ApplyTextHalo(speedTb);
+
                 CheckActivationZones(pos, id);
-                Panel.SetZIndex(ellipse, 1000);
-                Panel.SetZIndex(text, 1000);
+                Panel.SetZIndex(ellipse, 5000);
+                Panel.SetZIndex(text, 5001);
             }
 
             // Keep existing behavior for 'points' (unrelated to CAM replay). Remove if you also want them snapped.
@@ -10790,9 +10882,11 @@ namespace V2XController
                     Foreground = Brushes.Black,
                     IsHitTestVisible = false
                 };
-                Canvas.SetLeft(text, sx + 8);
-                Canvas.SetTop(text, sy - 6);
+                StyleVehicleLabel(text, Brushes.Black);
+                PositionVehicleLabel(text, new Point(sx, sy), -22);
                 TileCanvas.Children.Add(text);
+
+                ApplyTextHalo(text);
 
                 Panel.SetZIndex(ellipse, 1000);
                 Panel.SetZIndex(text, 1000);
@@ -11723,7 +11817,8 @@ namespace V2XController
                     if (textBlock.Tag == null ||
                         (textBlock.Tag.ToString() != "Tram" &&
                          textBlock.Tag.ToString() != "Srv" &&
-                         textBlock.Tag.ToString() != "Stop"))
+                         textBlock.Tag.ToString() != "Stop" && 
+                         textBlock.Tag.ToString() != "Signal"))
                     {
                         elementsToRemove.Add(child);
                     }
@@ -12458,7 +12553,7 @@ namespace V2XController
                         var (plat, plon) = drawnTramTrailGeoPoints[idx][^2];
                         var (px, py) = ConvertLatLonToCanvasXY(plat, plon);
                         var headingDeg = CalculateAzimuth(new Point(px, py), new Point(x, y));
-                        headingDeg = (headingDeg - 180 + 360) % 360; // keep manual flip rule
+                        //headingDeg = (headingDeg - 180 + 360) % 360; // keep manual flip rule
                         UpdateOrCreateVehicleBox(drawnTramIds[idx], new Point(x, y), drawnTramColors[idx], headingDeg);
                     }
                     else
@@ -15777,7 +15872,7 @@ namespace V2XController
                     }
                     else if (child is TextBlock textBlock)
                     {
-                        if (textBlock.Tag == null || (textBlock.Tag.ToString() != "Tram" && textBlock.Tag.ToString() != "Srv"))
+                        if (textBlock.Tag == null || (textBlock.Tag.ToString() != "Tram" && textBlock.Tag.ToString() != "Srv" && textBlock.Tag.ToString() != "Signal"))
                             elementsToRemove.Add(child);
                     }
                 }
@@ -16551,7 +16646,11 @@ namespace V2XController
             }
         }
 
-
+        /// <summary>
+        /// DEPRECATED
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void TestProtobuf_Click(object sender, RoutedEventArgs e)
         {
             try
@@ -16769,12 +16868,25 @@ namespace V2XController
                     control = new TramSignalControlRight();
                 }
 
+                var tb = new TextBlock
+                {
+                    Tag = "Signal",
+                    Text = signal.Title,
+                    Foreground = Brushes.Black,
+                    FontWeight = FontWeights.Bold,
+                    FontSize = 12,
+                };
+
+                signal.SignalLabel = tb;
+
                 signal.Control = control;
 
                 control.Loaded += (s, e) => UpdateTramSignalPosition(signal);
 
                 TileCanvas.Children.Add(control);
-                Panel.SetZIndex(control, 1500);
+                Panel.SetZIndex(control, 1055);
+                TileCanvas.Children.Add(signal.SignalLabel);
+                Panel.SetZIndex(signal.SignalLabel, 1056);
 
                 Dispatcher.BeginInvoke(
                     () => UpdateTramSignalPosition(signal),
@@ -16806,11 +16918,54 @@ namespace V2XController
             if (h <= 0)
                 h = signal.Control.Height;
 
-            Canvas.SetLeft(signal.Control, x - w / 2.0);
-            Canvas.SetTop(signal.Control, y - h / 2.0);
+            double signalScale = Math.Pow(2, zoom - 18);
+            signalScale = Math.Clamp(signalScale, 0.35, 1.0);
+
+            double scaledW = w * signalScale;
+            double scaledH = h * signalScale;
+
+            Canvas.SetLeft(signal.Control, x - scaledW / 2.0);
+            Canvas.SetTop(signal.Control, y - scaledH / 2.0);
 
             signal.Control.RenderTransformOrigin = new Point(0.5, 0.5);
-            signal.Control.RenderTransform = new RotateTransform(signal.RotationDeg);
+
+            var controlTransform = new TransformGroup();
+            controlTransform.Children.Add(new ScaleTransform(signalScale, signalScale));
+            controlTransform.Children.Add(new RotateTransform(signal.RotationDeg));
+            signal.Control.RenderTransform = controlTransform;
+
+
+            if (signal.SignalLabel != null)
+            {
+                signal.SignalLabel.Text = signal.Title;
+                signal.SignalLabel.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+
+                double textWidth = signal.SignalLabel.DesiredSize.Width;
+                double textHeight = signal.SignalLabel.DesiredSize.Height;
+
+                double labelScale = signalScale;
+
+                double scaledTextWidth = textWidth * labelScale;
+                double scaledTextHeight = textHeight * labelScale;
+
+                double angleRad = signal.RotationDeg * Math.PI / 180.0;
+
+                double offset = scaledH / 2.0 + scaledTextHeight / 2.0 + 4;
+
+                double dx = -Math.Sin(angleRad) * offset;
+                double dy = Math.Cos(angleRad) * offset;
+
+                Canvas.SetLeft(signal.SignalLabel, x + dx - scaledTextWidth / 2.0);
+                Canvas.SetTop(signal.SignalLabel, y + dy - scaledTextHeight / 2.0);
+
+                var labelTransform = new TransformGroup();
+                labelTransform.Children.Add(new ScaleTransform(labelScale, labelScale));
+                labelTransform.Children.Add(new RotateTransform(signal.RotationDeg));
+
+                signal.SignalLabel.RenderTransformOrigin = new Point(0.5, 0.5);
+                signal.SignalLabel.RenderTransform = labelTransform;
+            }
+
         }
 
         private void HandleIntersectionStatus(string decodedJson)
@@ -17112,6 +17267,12 @@ namespace V2XController
                 right.Right = frame.direction;
         }
 
+        /// <summary>
+        /// Extracts intersection id from json
+        /// </summary>
+        /// <param name="decodedJson">Json we want to extract id from</param>
+        /// <param name="intersectionId">Out int ID of an intersection</param>
+        /// <returns>Intersection ID</returns>
         private static bool TryExtractIntersectionId(string decodedJson, out int intersectionId)
         {
             intersectionId = -1;
@@ -17133,6 +17294,13 @@ namespace V2XController
             }
         }
 
+        /// <summary>
+        /// Recursively finds Int from message
+        /// </summary>
+        /// <param name="element">Element from json that from where we are finding Int</param>
+        /// <param name="value">Out value</param>
+        /// <param name="names">Array of names (Ints) that that are returned</param>
+        /// <returns>True: if there is Int present inside JSON; False: otherwise</returns>
         private static bool TryFindIntRecursive(JsonElement element, out int value, params string[] names)
         {
             value = -1;
@@ -17167,6 +17335,100 @@ namespace V2XController
             }
 
             return false;
+        }
+
+        /// <summary>
+        /// Applies halo to desired text
+        /// </summary>
+        /// <param name="tb">Desired textblock for highlighting</param>
+        private static void ApplyTextHalo(TextBlock tb)
+        {
+            tb.Effect = new DropShadowEffect
+            {
+                
+                Color = Colors.White,
+                BlurRadius = 12,
+                ShadowDepth = 0,
+                Opacity = 1
+            };
+        }
+
+        /// <summary>
+        /// Vehicle lable styling (default bg color RGBA (220, 255, 255, 255))
+        /// </summary>
+        /// <param name="text">Text you want to style</param>
+        /// <param name="color">Desired color</param>
+        private void StyleVehicleLabel(TextBlock text, Brush color)
+        {
+            text.Foreground = color;
+            text.Background = new SolidColorBrush(Color.FromArgb(220, 255, 255, 255));
+            text.Padding = new Thickness(4, 1, 4, 1);
+            text.FontWeight = FontWeights.SemiBold;
+            text.FontSize = 12;
+            text.IsHitTestVisible = false;
+
+            text.Effect = new DropShadowEffect
+            {
+                Color = Colors.Black,
+                BlurRadius = 3,
+                ShadowDepth = 0,
+                Opacity = 0.45
+            };
+
+            Panel.SetZIndex(text, int.MaxValue);
+        }
+
+        /// <summary>
+        /// Positions vehicle label on canvas
+        /// </summary>
+        /// <param name="text">Text you want to position</param>
+        /// <param name="tramCenter">Tram center point</param>
+        /// <param name="yOffset">Y offset from tram center</param>
+        private void PositionVehicleLabel(TextBlock text, Point tramCenter, double yOffset)
+        {
+            text.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+
+            Canvas.SetLeft(text, tramCenter.X + 22);
+            Canvas.SetTop(text, tramCenter.Y + yOffset);
+        }
+
+        /// <summary>
+        /// Positions all vehicle labels together (speed, VehID)
+        /// </summary>
+        /// <param name="idText"></param>
+        /// <param name="speedText"></param>
+        /// <param name="tramCenter"></param>
+        private void PositionVehicleLabelsTogether(
+            TextBlock? idText,
+            TextBlock? speedText,
+            Point tramCenter)
+        {
+            double left = tramCenter.X + 24;
+            double top = tramCenter.Y - 22;
+
+            if (idText != null)
+            {
+                idText.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+
+                Canvas.SetLeft(idText, left);
+                Canvas.SetTop(idText, top);
+                Panel.SetZIndex(idText, 1200);
+
+                if (speedText != null)
+                {
+                    speedText.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+
+                    Canvas.SetLeft(speedText, left);
+                    Canvas.SetTop(speedText, top + idText.DesiredSize.Height + 2);
+                    Panel.SetZIndex(speedText, 1200);
+                }
+            }
+            else if (speedText != null)
+            {
+                Canvas.SetLeft(speedText, left);
+                Canvas.SetTop(speedText, top + 16);
+                Panel.SetZIndex(speedText, 1200);
+            }
         }
 
     }

@@ -9,7 +9,7 @@ namespace V2XController // prvni cislo v seznamu je vpravo druhe vlevo
             DependencyProperty.Register(
                 nameof(Right),
                 typeof(TramSignalDirection),
-                typeof(TramSignalControlLeft),
+                typeof(TramSignalControlRight),
                 new PropertyMetadata(TramSignalDirection.None, OnDirectionChangedRight));
 
         public TramSignalDirection Right

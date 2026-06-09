@@ -7,7 +7,7 @@
     <Border BorderBrush="#FF1A1A1A"
             BorderThickness="0.5"
             Background="Black"
-            CornerRadius="0.5">
+            CornerRadius="0.5" IsHitTestVisible="False">
 
         <Canvas Margin="0.5">
             <!-- Levý indikátor -->
@@ -16,7 +16,7 @@
                        Canvas.Top="2"
                        Width="26"
                        Height="6"
-                       Fill="#FF1E90FF" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                       Fill="#FF1E90FF" HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False" />
 
             <!-- Rovně indikátor -->
             <Rectangle x:Name="LStraightIndicator"
@@ -24,7 +24,7 @@
                        Canvas.Top="2"
                        Width="6"
                        Height="21"
-                       Fill="#FF1E90FF" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                       Fill="#FF1E90FF" HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False"/>
 
             <!-- Oranžový indikátor -->
             <Rectangle x:Name="LOrangeRect"
@@ -32,7 +32,7 @@
                        Canvas.Top="11"
                        Width="26"
                        Height="12"
-                       Fill="#FFFF8C00" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                       Fill="#FFFF8C00" HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False"/>
         </Canvas>
 
     </Border>
