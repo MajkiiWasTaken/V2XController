@@ -159,6 +159,9 @@ namespace V2XController
         public ObservableCollection<ActivationZone> PolylineZonesCollection { get; set; }
         private readonly HashSet<ActivationZone> _polylineRows = new HashSet<ActivationZone>();
         private bool _suspendPolylineZoneLiveSort;
+        private readonly Dictionary<Polyline, List<System.Windows.Shapes.Path>> _polylineVisualGroups = new();
+        private readonly Dictionary<ActivationZone, System.Windows.Shapes.Path> _segmentToVisualPath = new();
+        private readonly Dictionary<ActivationZone, List<Ellipse>> _segmentToCircles = new();
 
         private List<string> recordedCamMessages = new();
 
@@ -1736,10 +1739,13 @@ namespace V2XController
                             poly.Points.Add(pt);
                     }
 
-                    if (isActiveDrawing && hasContinuation && hasTableSegments)
+                    if (isActiveDrawing)
                     {
-                        // Pokračování v existující polyline - použít variable widths
-                        Console.WriteLine($"[UPDATE POS] Rebuilding with VARIABLE widths (continuation, committed={_polylineCommittedPointsCount})");
+                        RebuildPolylineZone(poly, rebuildPoints, halfWidthPx);
+                        UpdatePolylineDirectionArrows(poly, rebuildPoints);
+                    }
+                    else if (hasTableSegments)
+                    {
                         RebuildPolylineZoneWithVariableWidths(poly, rebuildPoints);
                         UpdatePolylineDirectionArrows(poly, rebuildPoints);
                     }
@@ -3686,16 +3692,13 @@ namespace V2XController
 
                 if (polylinePoints.Count >= 2)
                 {
-                    // Detekce zda pokračujeme v existující polyline
                     if (_polylineCommittedPointsCount > 0 && _polylineToSegmentZones.ContainsKey(currentPolyline))
                     {
-                        // Pokračování - použít variable widths
                         Console.WriteLine($"[POLYLINE] Rebuilding with VARIABLE widths (committed: {_polylineCommittedPointsCount})");
                         RebuildPolylineZoneWithVariableWidths(currentPolyline, polylinePoints);
                     }
                     else
                     {
-                        // Nová polyline - uniform width
                         Console.WriteLine($"[POLYLINE] Rebuilding with UNIFORM width");
                         double mppx = MetersPerPixel(latitude, zoom);
                         double halfWidthPxx = (_polylineZoneWidthMeters / 2.0) / mppx;
@@ -3724,6 +3727,26 @@ namespace V2XController
         /// <param name="halfWidthPx">The half width of the polyline zone in pixels.</param>
         private void RebuildPolylineZone(Polyline polyline, List<Point> points, double halfWidthPx)
         {
+            if (_polylineVisualGroups.TryGetValue(polyline, out var oldGroups))
+            {
+                foreach (var group in oldGroups.ToList())
+                {
+                    if (TileCanvas.Children.Contains(group))
+                        TileCanvas.Children.Remove(group);
+                }
+
+                oldGroups.Clear();
+            }
+
+            if (_polylineToSegmentZones.TryGetValue(polyline, out var zones))
+            {
+                foreach (var zone in zones)
+                {
+                    _segmentToVisualPath.Remove(zone);
+                    _segmentToCircles.Remove(zone);
+                }
+            }
+
             // Remove old zone shapes AND center lines
             if (_polylineToSegments.ContainsKey(polyline))
             {
@@ -3889,7 +3912,10 @@ namespace V2XController
 
                 TileCanvas.Children.Add(groupPath);
                 Panel.SetZIndex(groupPath, 500);
-                _polylineToSegments[polyline].Add(groupPath);
+                if (!_polylineVisualGroups.ContainsKey(polyline))
+                    _polylineVisualGroups[polyline] = new List<System.Windows.Shapes.Path>();
+
+                _polylineVisualGroups[polyline].Add(groupPath);
             }
 
             // Draw center lines with matching colors
@@ -5599,22 +5625,44 @@ namespace V2XController
         /// <param name="points">The list of points defining the polyline.</param>
         private void RebuildPolylineZoneWithVariableWidths(Polyline polyline, List<Point> points)
         {
-            // Remove old shapes
-            if (_polylineToSegments.ContainsKey(polyline))
+            // Remove old HIT segments
+            if (_polylineToSegments.TryGetValue(polyline, out var oldHitSegments))
             {
-                foreach (var shape in _polylineToSegments[polyline])
-                {
-                    if (TileCanvas.Children.Contains(shape))
-                        TileCanvas.Children.Remove(shape);
-                }
-                _polylineToSegments[polyline].Clear();
+                foreach (var shape in oldHitSegments.ToList())
+                    TileCanvas.Children.Remove(shape);
+
+                oldHitSegments.Clear();
             }
             else
             {
                 _polylineToSegments[polyline] = new List<System.Windows.Shapes.Path>();
             }
 
-            if (points.Count < 2) return;
+            // Remove old VISUAL groups
+            if (_polylineVisualGroups.TryGetValue(polyline, out var oldVisualGroups))
+            {
+                foreach (var shape in oldVisualGroups.ToList())
+                    TileCanvas.Children.Remove(shape);
+
+                oldVisualGroups.Clear();
+            }
+            else
+            {
+                _polylineVisualGroups[polyline] = new List<System.Windows.Shapes.Path>();
+            }
+
+            // Remove old mappings for this polyline
+            if (_polylineToSegmentZones.TryGetValue(polyline, out var oldZones))
+            {
+                foreach (var zone in oldZones)
+                {
+                    _segmentToVisualPath.Remove(zone);
+                    _segmentToCircles.Remove(zone);
+                }
+            }
+
+            if (points.Count < 2)
+                return;
 
             double mpp = MetersPerPixel(latitude, zoom);
             SolidColorBrush defaultBrush = _strokeBrush as SolidColorBrush ?? new SolidColorBrush(Colors.Red);
@@ -5783,44 +5831,117 @@ namespace V2XController
 
                 TileCanvas.Children.Add(groupPath);
                 Panel.SetZIndex(groupPath, 500);
-                _polylineToSegments[polyline].Add(groupPath);
+
+                _polylineVisualGroups[polyline].Add(groupPath);
             }
 
-            // Center lines
-            foreach (var group in groups)
+            for (int i = 0; i < points.Count - 1; i++)
             {
-                var groupBrush = new SolidColorBrush(group.color);
+                var p1 = points[i];
+                var p2 = points[i + 1];
 
-                var lineGeometry = new PathGeometry();
-                var lineFigure = new PathFigure
-                {
-                    StartPoint = points[group.startIndex],
-                    IsClosed = false
-                };
+                var dir = p2 - p1;
+                double len = dir.Length;
+                if (len < 0.01)
+                    continue;
 
-                for (int i = group.startIndex + 1; i <= group.endIndex + 1 && i < points.Count; i++)
+                ActivationZone? zone = segmentZones?.FirstOrDefault(s => s.SegmentIndex == i);
+
+                if (zone != null)
                 {
-                    lineFigure.Segments.Add(new LineSegment(points[i], true));
+                    var startDot = _polylineVertexMap
+                        .FirstOrDefault(kvp => kvp.Value.polyline == polyline &&
+                                               kvp.Value.pointIndex == i)
+                        .Key;
+
+                    if (startDot != null &&
+                        _polylineVertexToCircle.TryGetValue(startDot, out var startCircle))
+                    {
+                        AddCircleForSegment(zone, startCircle);
+                    }
+
+                    var endDot = _polylineVertexMap
+                        .FirstOrDefault(kvp => kvp.Value.polyline == polyline &&
+                                               kvp.Value.pointIndex == i + 1)
+                        .Key;
+
+                    if (endDot != null &&
+                        _polylineVertexToCircle.TryGetValue(endDot, out var endCircle))
+                    {
+                        AddCircleForSegment(zone, endCircle);
+                    }
                 }
 
-                lineGeometry.Figures.Add(lineFigure);
+                double widthMeters = zone?.Width ?? _polylineZoneWidthMeters;
+                Color color = zone != null
+                    ? ParseColor(zone.Color)
+                    : defaultBrush.Color;
 
-                var centerLinePath = new System.Windows.Shapes.Path
+                double halfWidthPx = (widthMeters / 2.0) / mpp;
+
+                dir.Normalize();
+                var perp = new Vector(-dir.Y, dir.X);
+
+                var topLeft = p1 + perp * halfWidthPx;
+                var topRight = p2 + perp * halfWidthPx;
+                var bottomRight = p2 - perp * halfWidthPx;
+                var bottomLeft = p1 - perp * halfWidthPx;
+
+                var geometry = new PathGeometry { FillRule = FillRule.Nonzero };
+
+                var figure = new PathFigure
                 {
-                    Data = lineGeometry,
-                    Stroke = groupBrush,
-                    StrokeThickness = 2,
-                    Fill = null,
-                    IsHitTestVisible = false,
-                    Tag = $"PolylineCenterLine_{group.startIndex}_{group.endIndex}"
+                    StartPoint = topLeft,
+                    IsClosed = true
                 };
 
-                TileCanvas.Children.Add(centerLinePath);
-                Panel.SetZIndex(centerLinePath, 100000);
-                _polylineToSegments[polyline].Add(centerLinePath);
+                figure.Segments.Add(new LineSegment(topRight, true));
+                figure.Segments.Add(new LineSegment(bottomRight, true));
+                figure.Segments.Add(new LineSegment(bottomLeft, true));
+                geometry.Figures.Add(figure);
+
+                // přidá kruhy na začátek a konec segmentu
+                var startCap = new EllipseGeometry(p1, halfWidthPx, halfWidthPx);
+                var endCap = new EllipseGeometry(p2, halfWidthPx, halfWidthPx);
+
+                Geometry capsule = Geometry.Combine(geometry, startCap, GeometryCombineMode.Union, null);
+                capsule = Geometry.Combine(capsule, endCap, GeometryCombineMode.Union, null);
+
+                var brush = new SolidColorBrush(color);
+
+                var segmentPath = new System.Windows.Shapes.Path
+                {
+                    Data = capsule,
+                    Fill = Brushes.Transparent,
+                    Stroke = null,
+                    IsHitTestVisible = false,
+                    Tag = $"PolylineActiveSegment_{i}"
+                };
+
+                TileCanvas.Children.Add(segmentPath);
+                Panel.SetZIndex(segmentPath, 501);
+
+                _polylineToSegments[polyline].Add(segmentPath);
+
+                if (zone != null)
+                {
+                    _segmentToVisualPath[zone] = segmentPath;
+                }
             }
 
             Console.WriteLine($"[REBUILD VAR] ✓ Created {_polylineToSegments[polyline].Count} Path elements");
+        }
+
+        private void AddCircleForSegment(ActivationZone zone, Ellipse circle)
+        {
+            if (!_segmentToCircles.TryGetValue(zone, out var list))
+            {
+                list = new List<Ellipse>();
+                _segmentToCircles[zone] = list;
+            }
+
+            if (!list.Contains(circle))
+                list.Add(circle);
         }
 
         /// <summary>
@@ -8426,6 +8547,7 @@ namespace V2XController
 
             var nowInZones = new HashSet<ActivationZone>();
 
+            // 1) klasické obdélníkové zóny
             foreach (var zone in activationZones.Values)
             {
                 if (!zone.Bounds.Contains(pos))
@@ -8435,6 +8557,19 @@ namespace V2XController
                     continue;
 
                 nowInZones.Add(zone);
+            }
+
+            foreach (var kvp in _polylineToSegmentZones)
+            {
+                Polyline polyline = kvp.Key;
+                List<ActivationZone> segments = kvp.Value;
+
+                ActivationZone? bestZone = FindBestPolylineSegmentZone(pos, polyline, segments);
+
+                if (bestZone != null)
+                {
+                    nowInZones.Add(bestZone);
+                }
             }
 
             if (!_vehicleActiveZones.TryGetValue(vehicleId, out var previousZones))
@@ -8452,8 +8587,7 @@ namespace V2XController
                 }
 
                 leftZone.IsActive = false;
-                if (leftZone.Rectangle != null)
-                    leftZone.Rectangle.StrokeThickness = 2;
+                SetActivationZoneVisual(leftZone, false);
 
                 _vehicleZoneValidEntry.Remove((vehicleId, leftZone));
             }
@@ -8484,8 +8618,7 @@ namespace V2XController
                 if (!zone.IsActive)
                 {
                     zone.IsActive = true;
-                    if (zone.Rectangle != null)
-                        zone.Rectangle.StrokeThickness = 6;
+                    SetActivationZoneVisual(zone, true);
                 }
 
                 if (_zoneDeactivateTimers.TryGetValue(zone, out var existing))
@@ -8496,30 +8629,22 @@ namespace V2XController
                 else
                 {
                     var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
+
                     timer.Tick += (s, e) =>
                     {
-                        zone.IsActive = false;
-                        if (zone.Rectangle != null)
-                            zone.Rectangle.StrokeThickness = 2;
-                        ((DispatcherTimer)s).Stop();
+                        timer.Stop();
                         _zoneDeactivateTimers.Remove(zone);
 
-                        if (_vehicleActiveZones.TryGetValue(vehicleId, out var vz))
-                            vz.Remove(zone);
-
-                        _vehicleZoneValidEntry.Remove((vehicleId, zone));
+                        zone.IsActive = false;
+                        SetActivationZoneVisual(zone, false);
                     };
+
                     _zoneDeactivateTimers[zone] = timer;
                     timer.Start();
                 }
             }
 
             _vehicleActiveZones[vehicleId] = nowInZones;
-
-            foreach (var poly in _polylineToSegmentZones.Values)
-            {
-                continue;
-            }
         }
 
         /// <summary>
@@ -8540,6 +8665,221 @@ namespace V2XController
             Console.WriteLine($"[ZONE DIR] heading={heading:F0}° | zoneAz={zoneAzimuth:F0}° | diff={diff:F0}° | valid={valid}");
 
             return valid;
+        }
+
+        private ActivationZone? FindBestPolylineSegmentZone(
+            Point pos,
+            Polyline polyline,
+            List<ActivationZone> zones)
+        {
+            ActivationZone? bestZone = null;
+            double bestDistance = double.MaxValue;
+
+            foreach (var zone in zones)
+            {
+                if (!TryGetPolylineSegmentDistance(pos, polyline, zone, out double distance))
+                    continue;
+
+                if (distance < bestDistance)
+                {
+                    bestDistance = distance;
+                    bestZone = zone;
+                }
+            }
+
+            return bestZone;
+        }
+
+        private bool TryGetPolylineSegmentDistance(
+    Point pos,
+    Polyline polyline,
+    ActivationZone zone,
+    out double distance)
+        {
+            distance = double.MaxValue;
+
+            int i = zone.SegmentIndex;
+
+            if (i < 0 || i + 1 >= polyline.Points.Count)
+                return false;
+
+            Point a = polyline.Points[i];
+            Point b = polyline.Points[i + 1];
+
+            double dx = b.X - a.X;
+            double dy = b.Y - a.Y;
+
+            double lenSq = dx * dx + dy * dy;
+
+            if (lenSq <= 0.0001)
+                return false;
+
+            double t = ((pos.X - a.X) * dx + (pos.Y - a.Y) * dy) / lenSq;
+
+            // důležité: žádné clampnutí sem
+            // když je bod před začátkem / za koncem segmentu, segment se neaktivuje
+            if (t < 0.0 || t > 1.0)
+                return false;
+
+            double closestX = a.X + t * dx;
+            double closestY = a.Y + t * dy;
+
+            double diffX = pos.X - closestX;
+            double diffY = pos.Y - closestY;
+
+            distance = Math.Sqrt(diffX * diffX + diffY * diffY);
+
+            double mpp = MetersPerPixel(latitude, zoom);
+
+            // zóna bude reagovat užší než její vykreslená šířka
+            double halfWidthPx = (zone.Width / 2.0) / mpp;
+            halfWidthPx *= 0.55;
+
+            return distance <= halfWidthPx;
+        }
+
+        private bool IsPointInPolylineSegmentZone(Point pos, Polyline polyline, ActivationZone zone)
+        {
+            if (polyline == null)
+                return false;
+
+            int i = zone.SegmentIndex;
+
+            if (i < 0 || i + 1 >= polyline.Points.Count)
+                return false;
+
+            Point a = polyline.Points[i];
+            Point b = polyline.Points[i + 1];
+
+            double dx = b.X - a.X;
+            double dy = b.Y - a.Y;
+
+            double lenSq = dx * dx + dy * dy;
+            if (lenSq <= 0.0001)
+                return false;
+
+            double t = ((pos.X - a.X) * dx + (pos.Y - a.Y) * dy) / lenSq;
+
+            double mpp = MetersPerPixel(latitude, zoom);
+
+            double insetMeters = 5.0;
+            double insetPx = insetMeters / mpp;
+
+            double segmentLenPx = Math.Sqrt(lenSq);
+
+            double minT = insetPx / segmentLenPx;
+            double maxT = 1.0 - minT;
+
+            if (minT > 0.45)
+            {
+                minT = 0.0;
+                maxT = 1.0;
+            }
+
+            if (t < minT || t > maxT)
+                return false;
+
+            double closestX = a.X + t * dx;
+            double closestY = a.Y + t * dy;
+
+            double dist = Math.Sqrt(
+                Math.Pow(pos.X - closestX, 2) +
+                Math.Pow(pos.Y - closestY, 2)
+            );
+
+            double halfWidthPx = (zone.Width / 2.0) / mpp;
+            halfWidthPx *= 0.75;
+
+            return dist <= halfWidthPx;
+        }
+
+        private System.Windows.Shapes.Path? GetVisualPathForPolylineSegment(ActivationZone zone)
+        {
+            foreach (var kvp in _polylineToSegmentZones)
+            {
+                Polyline polyline = kvp.Key;
+                List<ActivationZone> zones = kvp.Value;
+
+                int index = zones.FindIndex(z => z == zone);
+                if (index < 0)
+                    continue;
+
+                if (_polylineToSegments.TryGetValue(polyline, out var paths) &&
+                    index >= 0 &&
+                    index < paths.Count)
+                {
+                    return paths[index];
+                }
+            }
+
+            return null;
+        }
+
+        private void SetPolylineSegmentVisual(ActivationZone zone, bool active)
+        {
+            if (!_segmentToVisualPath.TryGetValue(zone, out var path))
+                return;
+
+            var brush = TryBrushFromColor(zone.Color) ?? Brushes.Red;
+
+            path.Fill = active
+                ? MakeAlphaBrush(brush, 40)
+                : Brushes.Transparent;
+
+            path.Stroke = active ? MakeAlphaBrush(brush, 85) : null;
+            path.StrokeThickness = active ? 1.5 : 0;
+
+            Panel.SetZIndex(path, active ? 901 : 499);
+
+            SetPolylineSegmentCircleVisual(zone, active);
+        }
+
+        private void SetPolylineSegmentCircleVisual(ActivationZone zone, bool active)
+        {
+            if (!_segmentToCircles.TryGetValue(zone, out var circles))
+                return;
+
+            var brush = TryBrushFromColor(zone.Color) ?? Brushes.Red;
+
+            foreach (var circle in circles)
+            {
+                circle.Fill = active
+                    ? MakeAlphaBrush(brush, 50)
+                    : MakeAlphaBrush(brush, 20);
+
+                circle.Stroke = active ? MakeAlphaBrush(brush, 85) : null;
+                circle.StrokeThickness = active ? 1.5 : 0;
+
+                Panel.SetZIndex(circle, active ? 902 : 500);
+            }
+        }
+
+        private double DistancePointToSegment(Point p, Point a, Point b)
+        {
+            double dx = b.X - a.X;
+            double dy = b.Y - a.Y;
+
+            if (dx == 0 && dy == 0)
+                return Math.Sqrt(Math.Pow(p.X - a.X, 2) + Math.Pow(p.Y - a.Y, 2));
+
+            double t = ((p.X - a.X) * dx + (p.Y - a.Y) * dy) / (dx * dx + dy * dy);
+            t = Math.Clamp(t, 0, 1);
+
+            double closestX = a.X + t * dx;
+            double closestY = a.Y + t * dy;
+
+            return Math.Sqrt(Math.Pow(p.X - closestX, 2) + Math.Pow(p.Y - closestY, 2));
+        }
+
+        private void SetActivationZoneVisual(ActivationZone zone, bool active)
+        {
+            if (zone.Rectangle != null)
+            {
+                zone.Rectangle.StrokeThickness = active ? 6 : 2;
+                return;
+            }
+
+            SetPolylineSegmentVisual(zone, active);
         }
 
         /// <summary>
