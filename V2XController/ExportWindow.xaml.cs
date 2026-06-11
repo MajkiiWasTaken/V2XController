@@ -712,18 +712,15 @@ namespace V2XController
 
                 try
                 {
-                    // Rozdělit do dávek po 50
                     int offset = 0;
                     while (offset < allRegisters.Count)
                     {
-                        // Re-unlock před každou dávkou
                         if (isTcp)
                         {
-                            modbusTcp!.WriteToHoldingRegister(unitId, UNLOCK_REGISTER - 1, UNLOCK_VALUE, out _, "Re-unlock");
+                            modbusTcp!.WriteToHoldingRegister(unitId, UNLOCK_REGISTER, UNLOCK_VALUE, out _, "Re-unlock");
                             System.Threading.Thread.Sleep(250);
                         }
 
-                        // Zjistit velikost dávky
                         int chunkSize = Math.Min(MAX_REGS_PER_CHUNK, allRegisters.Count - offset);
                         ushort startAddr = allRegisters[offset].addr;
                         int actualChunkSize = 1;
@@ -749,7 +746,13 @@ namespace V2XController
                         // Zápis
                         if (isTcp)
                         {
-                            if (!modbusTcp!.WriteDataToHoldingRegisters(unitId, Off1(startAddr), (ushort)actualChunkSize, chunkData, out state, $"Batch {offset}"))
+                            if (!modbusTcp!.WriteDataToHoldingRegisters(
+                                unitId,
+                                startAddr,
+                                (ushort)actualChunkSize,
+                                chunkData,
+                                out state,
+                                $"Batch {offset}"))
                             {
                                 error = $"[ERR] TCP write failed at 0x{startAddr:X4}";
                                 return false;
@@ -765,7 +768,7 @@ namespace V2XController
                     progress?.Report((allRegisters.Count, allRegisters.Count, "Locking device..."));
                     if (isTcp)
                     {
-                        modbusTcp!.WriteToHoldingRegister(unitId, UNLOCK_REGISTER - 1, 0, out _, "Lock");
+                        modbusTcp!.WriteToHoldingRegister(unitId, UNLOCK_REGISTER, 0, out _, "Lock");
                     }
 
                     Console.WriteLine("\n=== ALL ZONES WRITTEN (BATCHED) ===");
@@ -3921,8 +3924,8 @@ namespace V2XController
         {
             const ushort UNLOCK_REGISTER = 0x103F;
             const ushort UNLOCK_VALUE = 4562;
-            const ushort FIRST_REGISTER = 176;
-            const ushort LAST_REGISTER = 524;
+            const ushort FIRST_REGISTER = (ushort)(MPC_BASE_ADDR + MPCv3RTV_WRITE_OFFSET); // 0x03B0
+            const ushort LAST_REGISTER = (ushort)(FIRST_REGISTER + 35 * MPC_ZONE_STRIDE - 1); // 0x050D
             const int TOTAL_REGISTERS = LAST_REGISTER - FIRST_REGISTER + 1;
             const int CHUNK_SIZE = 50;
 
@@ -4134,44 +4137,45 @@ namespace V2XController
 
                 var zones = new List<ActivationZone>();
 
-                const ushort FIRST_REGISTER = 176;
-                const ushort LAST_REGISTER = 524;
-                const int TOTAL_REGISTERS = LAST_REGISTER - FIRST_REGISTER + 1;
+                ushort firstRegister = isRtv
+                 ? (ushort)(MPC_BASE_ADDR + MPCv3RTV_WRITE_OFFSET) // 0x03B0
+                 : (ushort)(MPC_BASE_ADDR + MPCv3WLC_WRITE_OFFSET); // 0x032C
+
+                int maxZones = isRtv ? 35 : 20;
+                int totalRegisters = maxZones * MPC_ZONE_STRIDE;
+
                 const int CHUNK_SIZE = 50;
 
-                Console.WriteLine($"[REG] Registers: {FIRST_REGISTER}-{LAST_REGISTER} (total {TOTAL_REGISTERS})");
+                Console.WriteLine($"[REG] Registers: 0x{firstRegister:X4}-0x{firstRegister + totalRegisters - 1:X4} (total {totalRegisters})");
 
-                var allData = new ushort[TOTAL_REGISTERS];
+                var allData = new ushort[totalRegisters];
                 int registersRead = 0;
 
                 // Čtení registrů - 0% až 95%
-                for (int offset = 0; offset < TOTAL_REGISTERS; offset += CHUNK_SIZE)
+                for (int offset = 0; offset < totalRegisters; offset += CHUNK_SIZE)
                 {
-                    int toRead = Math.Min(CHUNK_SIZE, TOTAL_REGISTERS - offset);
-                    ushort readAddr = (ushort)(MPC_BASE_ADDR + FIRST_REGISTER + offset);
+                    int toRead = Math.Min(CHUNK_SIZE, totalRegisters - offset);
+                    ushort readAddr = (ushort)(firstRegister + offset);
 
-                    Console.WriteLine($"[READ] Reading TCP chunk: {toRead} regs from 0x{readAddr:X4} (offset {offset})...");
-
-                    // Progress: 0-95% pro čtení registrů
-                    int progressPercent = (int)((offset * 95.0) / TOTAL_REGISTERS);
-                    progress?.Report((progressPercent, 100, $"Reading {offset}/{TOTAL_REGISTERS} registers..."));
+                    int progressPercent = (int)((offset * 95.0) / totalRegisters);
+                    progress?.Report((progressPercent, 100, $"Reading {offset}/{totalRegisters} registers."));
 
                     var data = modbus.ReadDataFrom16bitRegisters(
-                        unitId, readAddr, (ushort)toRead, RegType16b.HoldingRegister,
-                        out var state, $"Read batch offset {offset}");
+                        unitId,
+                        readAddr,
+                        (ushort)toRead,
+                        RegType16b.HoldingRegister,
+                        out var state,
+                        $"Read batch offset {offset}");
 
                     if (state != ModbusStateCode.Success || data == null)
                     {
-                        Console.WriteLine($"[READ] FAILED: {state}");
                         return (false, new List<ActivationZone>(), false,
-                            $"Failed to read batch at offset {offset}: {state}");
+                            $"Failed to read batch at 0x{readAddr:X4}: {state}");
                     }
 
                     Array.Copy(data, 0, allData, offset, data.Length);
                     registersRead += data.Length;
-                    Console.WriteLine($"[READ] OK - {data.Length} regs (total: {registersRead}/{TOTAL_REGISTERS})");
-
-                    System.Threading.Thread.Sleep(30);
                 }
 
                 // Zpracování zón - 95% až 100%
@@ -4180,7 +4184,6 @@ namespace V2XController
                 Console.WriteLine($"\n=== Read complete: {registersRead} registers ===");
 
                 const int ZONE_STRIDE = 10;
-                int maxZones = TOTAL_REGISTERS / ZONE_STRIDE;
 
                 for (int zoneIdx = 0; zoneIdx < maxZones; zoneIdx++)
                 {
@@ -4430,26 +4433,31 @@ namespace V2XController
 
                 var zones = new List<ActivationZone>();
 
-                const ushort FIRST_REGISTER = 176;
-                const ushort LAST_REGISTER = 524;
-                const int TOTAL_REGISTERS = LAST_REGISTER - FIRST_REGISTER + 1;
                 const int CHUNK_SIZE = 50;
 
-                Console.WriteLine($"[REG] Registers: {FIRST_REGISTER}-{LAST_REGISTER} (total {TOTAL_REGISTERS})");
-
-                var allData = new ushort[TOTAL_REGISTERS];
                 int registersRead = 0;
+                ushort firstRegister = isRtv
+                    ? (ushort)(MPC_BASE_ADDR + MPCv3RTV_WRITE_OFFSET)
+                    : (ushort)(MPC_BASE_ADDR + MPCv3WLC_WRITE_OFFSET);
 
-                for (int offset = 0; offset < TOTAL_REGISTERS; offset += CHUNK_SIZE)
+                int maxZones = isRtv ? 35 : 20;
+                int totalRegisters = maxZones * MPC_ZONE_STRIDE;
+
+                var allData = new ushort[totalRegisters];
+
+                for (int offset = 0; offset < totalRegisters; offset += CHUNK_SIZE)
                 {
-                    int toRead = Math.Min(CHUNK_SIZE, TOTAL_REGISTERS - offset);
-                    ushort readAddr = (ushort)(MPC_BASE_ADDR + FIRST_REGISTER + offset);
-
-                    Console.WriteLine($"[READ] Reading TCP chunk: {toRead} regs from 0x{readAddr:X4} (offset {offset})...");
+                    int toRead = Math.Min(CHUNK_SIZE, totalRegisters - offset);
+                    ushort readAddr = (ushort)(firstRegister + offset);
 
                     var data = modbus.ReadDataFrom16bitRegisters(
-                        unitId, readAddr, (ushort)toRead, RegType16b.HoldingRegister,
-                        out var state, $"Read batch offset {offset}");
+                        unitId,
+                        readAddr,
+                        (ushort)toRead,
+                        RegType16b.HoldingRegister,
+                        out var state,
+                        $"Read batch offset {offset}");
+
 
                     if (state != ModbusStateCode.Success || data == null)
                     {
@@ -4460,7 +4468,7 @@ namespace V2XController
 
                     Array.Copy(data, 0, allData, offset, data.Length);
                     registersRead += data.Length;
-                    Console.WriteLine($"[READ] OK - {data.Length} regs (total: {registersRead}/{TOTAL_REGISTERS})");
+                    Console.WriteLine($"[READ] OK - {data.Length} regs (total: {registersRead})");
 
                     System.Threading.Thread.Sleep(50); // Změněno z 100ms na 50ms
                 }
@@ -4468,7 +4476,6 @@ namespace V2XController
                 Console.WriteLine($"\n=== Read complete: {registersRead} registers ===");
 
                 const int ZONE_STRIDE = 10;
-                int maxZones = TOTAL_REGISTERS / ZONE_STRIDE;
 
                 for (int zoneIdx = 0; zoneIdx < maxZones; zoneIdx++)
                 {
@@ -4841,8 +4848,8 @@ namespace V2XController
                         if (zoneState != ModbusStateCode.Success || data == null || data.Length < 10) continue;
                         if (data.All(v => v == 0)) continue;
 
-                        double latitude = WordsToFloatWS(data[0], data[1]);
-                        double longitude = WordsToFloatWS(data[2], data[3]);
+                        double longitude = WordsToFloatWS(data[0], data[1]);
+                        double latitude = WordsToFloatWS(data[2], data[3]);
                         double height = WordsToFloatWS(data[4], data[5]);
                         double width = WordsToFloatWS(data[6], data[7]);
                         int azimuth = (int)Math.Round(WordsToFloatWS(data[8], data[9]));
@@ -5054,8 +5061,8 @@ namespace V2XController
                         if (data.All(v => v == 0))
                             continue;
 
-                        double latitude = WordsToFloatWS(data[0], data[1]);
-                        double longitude = WordsToFloatWS(data[2], data[3]);
+                        double longitude = WordsToFloatWS(data[0], data[1]);
+                        double latitude = WordsToFloatWS(data[2], data[3]);
                         double height = data[4] / 100.0;
                         double width = data[6] / 100.0;
                         int azimuth = Math.Clamp((int)data[8], 0, 359);

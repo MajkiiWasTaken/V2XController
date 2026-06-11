@@ -612,13 +612,13 @@ namespace V2XController
             loadedFileName = string.Empty;
             _srvTimer = null;
             _zoomDebounceTimer = null;
-            _pendingNewZone = new ActivationZone();
+            _pendingNewZone = null;
             _lastReplayFile = string.Empty;
             _timeshiftUiTimer = new DispatcherTimer();
             _timeshiftPlaybackCts = new CancellationTokenSource();
             _highlightedRect = new Rectangle();
             _highlightedRectOldBrush = Brushes.Transparent;
-            _pendingNewSwitchZone = new ActivationZone();
+            _pendingNewSwitchZone = null;
 
 #if DEBUG
             AllocConsole();
@@ -1461,7 +1461,7 @@ namespace V2XController
             scale.ScaleX = previewScale;
             scale.ScaleY = previewScale;
 
-            Console.WriteLine($"[ZOOM] Wheel event: {zoom} → {_pendingZoom}, scale: {previewScale:F2}");
+            Console.WriteLine($"[ZOOM] Wheel event: {zoom}  {_pendingZoom}, scale: {previewScale:F2}");
 
             // Vždy znovu vytvořit timer, aby se zajistilo, že funguje
             if (_zoomDebounceTimer != null)
@@ -1489,7 +1489,7 @@ namespace V2XController
             _zoomDebounceTimer.Tick -= OnZoomDebounceTimerTick;
 
             int oldZoom = zoom;
-            Console.WriteLine($"[ZOOM] Timer fired: processing zoom {oldZoom} → {_pendingZoom}");
+            Console.WriteLine($"[ZOOM] Timer fired: processing zoom {oldZoom}  {_pendingZoom}");
 
             // Schovat všechny overlaye před reprojectem – zabrání bliknutí/přeskoku velikosti
             var overlays = TileCanvas.Children
@@ -1568,7 +1568,7 @@ namespace V2XController
                     UpdateVehicleTrail(lastV2XMessage);
                 }
 
-                Console.WriteLine($"[ZOOM] Complete: {oldZoom} → {zoom}");
+                Console.WriteLine($"[ZOOM] Complete: {oldZoom}  {zoom}");
             }
             catch (Exception ex)
             {
@@ -4966,7 +4966,7 @@ namespace V2XController
                 };
 
                 polylineData.Vertices.Add(vertexData);
-                Console.WriteLine($"[POLYLINE] Vertex {i + 1}: Canvas({canvasPoint.X:F2}, {canvasPoint.Y:F2}) → Geo({lat:F7}, {lon:F7})");
+                Console.WriteLine($"[POLYLINE] Vertex {i + 1}: Canvas({canvasPoint.X:F2}, {canvasPoint.Y:F2})  Geo({lat:F7}, {lon:F7})");
             }
 
             mapRectangles.Add(new MapRectangle(currentPolyline));
@@ -5050,7 +5050,7 @@ namespace V2XController
                     // Increment pro nový segment
                     currentSubZone++;
 
-                    // SubZone přesáhl 4 → další MainZone
+                    // SubZone přesáhl 4  další MainZone
                     if (currentSubZone > 4 && !isrtvmode)
                     {
                         currentMainZone++;
@@ -5533,7 +5533,7 @@ namespace V2XController
                                 polyline.Points[prevSegmentIndex + 1]
                             );
 
-                            Console.WriteLine($"[DRAG] Segment {prevSegmentIndex}: Len={prevSegment.Height:F2}m, Az={prevSegment.Azimuth}°, Width={prevSegment.Width:F2}m");
+                            Console.WriteLine($"[DRAG] Segment {prevSegmentIndex}: Len={prevSegment.Height:F2}m, Az={prevSegment.Azimuth}, Width={prevSegment.Width:F2}m");
                         }
                     }
 
@@ -5557,7 +5557,7 @@ namespace V2XController
                                 polyline.Points[nextSegmentIndex + 1]
                             );
 
-                            Console.WriteLine($"[DRAG] Segment {nextSegmentIndex}: Len={nextSegment.Height:F2}m, Az={nextSegment.Azimuth}°, Width={nextSegment.Width:F2}m");
+                            Console.WriteLine($"[DRAG] Segment {nextSegmentIndex}: Len={nextSegment.Height:F2}m, Az={nextSegment.Azimuth}, Width={nextSegment.Width:F2}m");
                         }
                     }
 
@@ -5728,7 +5728,7 @@ namespace V2XController
                     {
                         // Konec aktuální skupiny
                         groups.Add((startIdx, i - 1, currentColor, currentColorStr, currentWidth));
-                        Console.WriteLine($"[REBUILD VAR] ✓ Merged group: seg {startIdx}-{i - 1} ({i - startIdx} segments), RGB=({currentColor.R},{currentColor.G},{currentColor.B}), width={currentWidth:F2}m");
+                        Console.WriteLine($"[REBUILD VAR]  Merged group: seg {startIdx}-{i - 1} ({i - startIdx} segments), RGB=({currentColor.R},{currentColor.G},{currentColor.B}), width={currentWidth:F2}m");
 
                         // Začátek nové skupiny
                         currentColor = virtualSegments[i].color;
@@ -5738,16 +5738,16 @@ namespace V2XController
                     }
                     else
                     {
-                        Console.WriteLine($"[REBUILD VAR]   → Seg {i} merged (same color+width)");
+                        Console.WriteLine($"[REBUILD VAR]    Seg {i} merged (same color+width)");
                     }
                 }
 
                 // Poslední skupina
                 groups.Add((startIdx, virtualSegments.Count - 1, currentColor, currentColorStr, currentWidth));
-                Console.WriteLine($"[REBUILD VAR] ✓ Merged group: seg {startIdx}-{virtualSegments.Count - 1} ({virtualSegments.Count - startIdx} segments), RGB=({currentColor.R},{currentColor.G},{currentColor.B}), width={currentWidth:F2}m");
+                Console.WriteLine($"[REBUILD VAR]  Merged group: seg {startIdx}-{virtualSegments.Count - 1} ({virtualSegments.Count - startIdx} segments), RGB=({currentColor.R},{currentColor.G},{currentColor.B}), width={currentWidth:F2}m");
             }
 
-            Console.WriteLine($"[REBUILD VAR] Total: {virtualSegments.Count} segments → {groups.Count} merged groups");
+            Console.WriteLine($"[REBUILD VAR] Total: {virtualSegments.Count} segments  {groups.Count} merged groups");
 
             // Vykreslíme zóny
             foreach (var group in groups)
@@ -5929,7 +5929,7 @@ namespace V2XController
                 }
             }
 
-            Console.WriteLine($"[REBUILD VAR] ✓ Created {_polylineToSegments[polyline].Count} Path elements");
+            Console.WriteLine($"[REBUILD VAR]  Created {_polylineToSegments[polyline].Count} Path elements");
         }
 
         private void AddCircleForSegment(ActivationZone zone, Ellipse circle)
@@ -7105,6 +7105,70 @@ namespace V2XController
             }
             root.Add(zonesElement);
 
+            XElement polylinesElement = new XElement("Polylines");
+
+            foreach (var kvp in _polylineGeoPoints)
+            {
+                Polyline polyline = kvp.Key;
+                List<(double lat, double lon)> geoPoints = kvp.Value;
+
+                if (geoPoints.Count < 2)
+                    continue;
+
+                string polylineId = Guid.NewGuid().ToString();
+
+                List<ActivationZone> segments = new List<ActivationZone>();
+                if (_polylineToSegmentZones.TryGetValue(polyline, out var savedSegments))
+                    segments = savedSegments;
+
+                if (segments.Count > 0 && segments[0].PolylineId != Guid.Empty)
+                    polylineId = segments[0].PolylineId.ToString();
+
+                XElement polylineElement = new XElement("Polyline",
+                    new XAttribute("Id", polylineId),
+                    new XAttribute("Stroke", (polyline.Stroke as SolidColorBrush)?.Color.ToString() ?? "#FFFF0000"),
+                    new XAttribute("StrokeThickness", polyline.StrokeThickness.ToString(CultureInfo.InvariantCulture))
+                );
+
+                XElement verticesElement = new XElement("Vertices");
+
+                for (int i = 0; i < geoPoints.Count; i++)
+                {
+                    verticesElement.Add(new XElement("Vertex",
+                        new XAttribute("Index", i.ToString(CultureInfo.InvariantCulture)),
+                        new XAttribute("Latitude", geoPoints[i].lat.ToString(CultureInfo.InvariantCulture)),
+                        new XAttribute("Longitude", geoPoints[i].lon.ToString(CultureInfo.InvariantCulture))
+                    ));
+                }
+
+                polylineElement.Add(verticesElement);
+
+                XElement segmentsElement = new XElement("Segments");
+
+                foreach (var segment in segments.OrderBy(s => s.SegmentIndex))
+                {
+                    segmentsElement.Add(new XElement("Segment",
+                        new XAttribute("Index", segment.SegmentIndex.ToString(CultureInfo.InvariantCulture)),
+                        new XAttribute("Name", segment.Name ?? string.Empty),
+                        new XAttribute("Latitude", segment.Latitude.ToString(CultureInfo.InvariantCulture)),
+                        new XAttribute("Longitude", segment.Longitude.ToString(CultureInfo.InvariantCulture)),
+                        new XAttribute("Width", segment.Width.ToString(CultureInfo.InvariantCulture)),
+                        new XAttribute("Height", segment.Height.ToString(CultureInfo.InvariantCulture)),
+                        new XAttribute("Azimuth", segment.Azimuth.ToString(CultureInfo.InvariantCulture)),
+                        new XAttribute("Color", segment.Color ?? "#FF0000"),
+                        new XAttribute("MainZone", segment.MainZone.ToString(CultureInfo.InvariantCulture)),
+                        new XAttribute("SubZone", segment.SubZone.ToString(CultureInfo.InvariantCulture)),
+                        new XAttribute("SegmentType", segment.SegmentType ?? string.Empty),
+                        new XAttribute("IsSwitchZone", segment.IsSwitchZone.ToString(CultureInfo.InvariantCulture))
+                    ));
+                }
+
+                polylineElement.Add(segmentsElement);
+                polylinesElement.Add(polylineElement);
+            }
+
+            root.Add(polylinesElement);
+
             if (recordedCamMessages.Count > 0)
             {
                 XElement camMessagesElement = new XElement("CamMessages");
@@ -7303,6 +7367,8 @@ namespace V2XController
                 _suppressModeSwitch = false;
             }
 
+            LoadPolylinesFromXml(root);
+
             UpdateUiEnabledState();
 
             foreach (var vehicle in activeVehicles.Values)
@@ -7314,6 +7380,172 @@ namespace V2XController
 
 
         }
+
+        private void LoadPolylinesFromXml(XElement root)
+        {
+            XElement? polylinesElement = root.Element("Polylines");
+            if (polylinesElement == null)
+                return;
+
+            foreach (var polylineElement in polylinesElement.Elements("Polyline"))
+            {
+                Guid polylineId = Guid.TryParse(polylineElement.Attribute("Id")?.Value, out var parsedId)
+                    ? parsedId
+                    : Guid.NewGuid();
+
+                string strokeText = polylineElement.Attribute("Stroke")?.Value ?? "#FFFF0000";
+                Brush strokeBrush = TryBrushFromColor(strokeText) ?? Brushes.Red;
+
+                var polyline = new Polyline
+                {
+                    Stroke = strokeBrush,
+                    StrokeThickness = 2,
+                    Fill = null,
+                    IsHitTestVisible = true
+                };
+
+                TileCanvas.Children.Add(polyline);
+                Panel.SetZIndex(polyline, 100);
+
+                var geoPoints = new List<(double lat, double lon)>();
+                var canvasPoints = new List<Point>();
+
+                XElement? verticesElement = polylineElement.Element("Vertices");
+                if (verticesElement != null)
+                {
+                    foreach (var vertexElement in verticesElement.Elements("Vertex")
+                                 .OrderBy(v => int.Parse(v.Attribute("Index")?.Value ?? "0", CultureInfo.InvariantCulture)))
+                    {
+                        double lat = double.Parse(vertexElement.Attribute("Latitude")?.Value ?? "0", CultureInfo.InvariantCulture);
+                        double lon = double.Parse(vertexElement.Attribute("Longitude")?.Value ?? "0", CultureInfo.InvariantCulture);
+
+                        geoPoints.Add((lat, lon));
+
+                        var canvas = ConvertLatLonToCanvasXY(lat, lon);
+                        var point = new Point(canvas.x, canvas.y);
+
+                        canvasPoints.Add(point);
+                        polyline.Points.Add(point);
+
+                        AddLoadedPolylineVertexDot(polyline, point, canvasPoints.Count - 1);
+                    }
+                }
+
+                if (canvasPoints.Count < 2)
+                {
+                    TileCanvas.Children.Remove(polyline);
+                    continue;
+                }
+
+                _polylineGeoPoints[polyline] = geoPoints;
+                _polylineToSegments[polyline] = new List<System.Windows.Shapes.Path>();
+
+                var segmentZones = new List<ActivationZone>();
+
+                XElement? segmentsElement = polylineElement.Element("Segments");
+                if (segmentsElement != null)
+                {
+                    foreach (var segmentElement in segmentsElement.Elements("Segment"))
+                    {
+                        var segment = new ActivationZone
+                        {
+                            PolylineId = polylineId,
+                            SegmentIndex = int.Parse(segmentElement.Attribute("Index")?.Value ?? "0", CultureInfo.InvariantCulture),
+                            Name = segmentElement.Attribute("Name")?.Value ?? string.Empty,
+                            Latitude = double.Parse(segmentElement.Attribute("Latitude")?.Value ?? "0", CultureInfo.InvariantCulture),
+                            Longitude = double.Parse(segmentElement.Attribute("Longitude")?.Value ?? "0", CultureInfo.InvariantCulture),
+                            Width = double.Parse(segmentElement.Attribute("Width")?.Value ?? "50", CultureInfo.InvariantCulture),
+                            Height = double.Parse(segmentElement.Attribute("Height")?.Value ?? "0", CultureInfo.InvariantCulture),
+                            Azimuth = int.Parse(segmentElement.Attribute("Azimuth")?.Value ?? "0", CultureInfo.InvariantCulture),
+                            Color = segmentElement.Attribute("Color")?.Value ?? "#FF0000",
+                            MainZone = int.Parse(segmentElement.Attribute("MainZone")?.Value ?? "0", CultureInfo.InvariantCulture),
+                            SubZone = int.Parse(segmentElement.Attribute("SubZone")?.Value ?? "0", CultureInfo.InvariantCulture),
+                            SegmentType = segmentElement.Attribute("SegmentType")?.Value ?? string.Empty,
+                            IsSwitchZone = bool.TryParse(segmentElement.Attribute("IsSwitchZone")?.Value, out var isSwitch) && isSwitch
+                        };
+
+                        if (string.IsNullOrWhiteSpace(segment.Name))
+                            segment.UpdateName();
+
+                        _polylineRows.Add(segment);
+
+                        if (segment.IsSwitchZone)
+                            _switchRows.Add(segment);
+
+                        ActivationZonesCollection.Add(segment);
+                        segmentZones.Add(segment);
+                    }
+                }
+
+                _polylineToSegmentZones[polyline] = segmentZones;
+
+                RebuildPolylineZoneWithVariableWidths(polyline, canvasPoints);
+                UpdatePolylineDirectionArrows(polyline, canvasPoints);
+
+                mapRectangles.Add(new MapRectangle(polyline));
+
+                var polylineData = new PolylineData
+                {
+                    PolylineId = polylineId,
+                    CreatedAt = DateTime.Now,
+                    ColorHex = strokeText,
+                    Vertices = new List<PolylinePointData>()
+                };
+
+                for (int i = 0; i < geoPoints.Count; i++)
+                {
+                    polylineData.Vertices.Add(new PolylinePointData
+                    {
+                        VertexIndex = i,
+                        CanvasPosition = canvasPoints[i],
+                        Latitude = geoPoints[i].lat,
+                        Longitude = geoPoints[i].lon,
+                        Timestamp = DateTime.Now
+                    });
+                }
+
+                foreach (var segment in segmentZones.OrderBy(s => s.SegmentIndex))
+                {
+                    polylineData.Segments.Add(new PolylineSegmentData
+                    {
+                        SegmentIndex = segment.SegmentIndex,
+                        LengthMeters = segment.Height,
+                        AzimuthDegrees = segment.Azimuth,
+                        WidthMeters = segment.Width,
+                        SegmentType = segment.SegmentType
+                    });
+                }
+
+                _drawnPolylines.Add(polylineData);
+            }
+        }
+
+        private void AddLoadedPolylineVertexDot(Polyline polyline, Point point, int index)
+        {
+            var dot = new Ellipse
+            {
+                Width = 8,
+                Height = 8,
+                Fill = Brushes.Black,
+                Stroke = Brushes.White,
+                StrokeThickness = 1,
+                IsHitTestVisible = true,
+                Tag = "PolylineVertex"
+            };
+
+            Canvas.SetLeft(dot, point.X - 4);
+            Canvas.SetTop(dot, point.Y - 4);
+
+            dot.MouseEnter += PolylineVertex_MouseEnter;
+            dot.MouseLeave += PolylineVertex_MouseLeave;
+
+            TileCanvas.Children.Add(dot);
+            Panel.SetZIndex(dot, 1000000);
+
+            polylineVertexDots.Add(dot);
+            _polylineVertexMap[dot] = (polyline, index);
+        }
+
 
         /// <summary>
         /// Updates the bounds of the specified activation zone.
@@ -8602,7 +8834,7 @@ namespace V2XController
                     bool validDirection = IsValidEntryDirection(pos, zone, heading);
                     _vehicleZoneValidEntry[key] = validDirection;
 
-                    Console.WriteLine($"[ZONE] {shortId} entered zone '{zone.Name}' | heading={heading:F0}° | valid={validDirection}");
+                    Console.WriteLine($"[ZONE] {shortId} entered zone '{zone.Name}' | heading={heading:F0} | valid={validDirection}");
 
                     if (!validDirection)
                         continue;
@@ -8662,7 +8894,7 @@ namespace V2XController
 
             bool valid = diff <= 80.0;
 
-            Console.WriteLine($"[ZONE DIR] heading={heading:F0}° | zoneAz={zoneAzimuth:F0}° | diff={diff:F0}° | valid={valid}");
+            Console.WriteLine($"[ZONE DIR] heading={heading:F0} | zoneAz={zoneAzimuth:F0} | diff={diff:F0} | valid={valid}");
 
             return valid;
         }
@@ -8733,8 +8965,6 @@ namespace V2XController
 
             // zóna bude reagovat užší než její vykreslená šířka
             double halfWidthPx = (zone.Width / 2.0) / mpp;
-            halfWidthPx *= 0.55;
-
             return distance <= halfWidthPx;
         }
 
@@ -10205,7 +10435,7 @@ namespace V2XController
                 .OrderBy(s => s.SegmentIndex)
                 .ToList();
 
-            // *** ZMĚNA MainZone → automatická změna barvy ***
+            // *** ZMĚNA MainZone  automatická změna barvy ***
             if (propertyName == nameof(ActivationZone.MainZone))
             {
                 string newColor = GetColorForMainZone(segment.MainZone, IsSwitchMode());
@@ -10214,7 +10444,7 @@ namespace V2XController
                 if (segment.Color != newColor)
                 {
                     segment.Color = newColor;
-                    Console.WriteLine($"[POLYLINE] MainZone→{segment.MainZone} → Color={newColor} for seg {segment.SegmentIndex}");
+                    Console.WriteLine($"[POLYLINE] MainZone{segment.MainZone}  Color={newColor} for seg {segment.SegmentIndex}");
                 }
 
                 if (_polylineGeoPoints.TryGetValue(polyline, out var geoPoints))
@@ -10327,11 +10557,11 @@ namespace V2XController
                     polyline.Points.Clear();
                     foreach (var pt in points)
                         polyline.Points.Add(pt);
-
+                    UpdatePolylineDirectionArrows(polyline, points);
                     UpdatePolylineVertexPositions(polyline, points);
                 }
 
-                Console.WriteLine($"[POLYLINE] Azimuth changed to {segment.Azimuth}° for segment {segment.SegmentIndex}");
+                Console.WriteLine($"[POLYLINE] Azimuth changed to {segment.Azimuth} for segment {segment.SegmentIndex}");
             }
             else if (propertyName == nameof(ActivationZone.Latitude) ||
                      propertyName == nameof(ActivationZone.Longitude))
@@ -10838,24 +11068,18 @@ namespace V2XController
         private void PolylineButton_Click(object sender, RoutedEventArgs e)
         {
             Console.WriteLine("[POLYLINE] Polyline drawing mode activated");
+
             isSelectionMode = false;
             currentDrawingMode = DrawingMode.Polyline;
-            _isDrawingPolyline = true;
+            _isDrawingPolyline = false;
 
-            // OPRAVA: Vytvořit preview polyline hned při aktivaci mode
-            if (currentPolyline == null)
-            {
-                currentPolyline = new Polyline
-                {
-                    Stroke = _strokeBrush,
-                    StrokeThickness = 2,
-                    Fill = null,
-                    IsHitTestVisible = false // Preview je non-interactive
-                };
-                TileCanvas.Children.Add(currentPolyline);
-                Panel.SetZIndex(currentPolyline, 100);
-                Console.WriteLine("[POLYLINE] Created preview polyline");
-            }
+            currentPolyline = null;
+            polylinePoints.Clear();
+            polylineVertexDots.Clear();
+            _currentPolylineCircles.Clear();
+            _currentPolylineSegments.Clear();
+            _polylineCommittedPointsCount = 0;
+            _currentPolylineCircleGeoPoints.Clear();
 
             if (PolylineWidthPanel != null)
                 PolylineWidthPanel.Visibility = Visibility.Visible;
@@ -11596,12 +11820,14 @@ namespace V2XController
         {
             // consider activation zones and railways too
             bool hasZones = activationZones.Count > 0 || (ActivationZonesCollection?.Count > 0);
+            bool hasPolylines = _polylineGeoPoints.Count > 0;
 
             bool hasAnything =
                 hasZones ||
                 points.Count > 0 ||
                 mapRectangles.Count > 0 ||
-                connectionLine.Points.Count > 0;
+                connectionLine.Points.Count > 0 ||
+                hasPolylines;
 
             if (!hasAnything)
             {
@@ -13110,15 +13336,23 @@ namespace V2XController
         /// <param name="e"></param>
         private void ActivationZonesDataGrid_PreviewKeyDown(object sender, KeyEventArgs e)
         {
-            if (e.Key == Key.Enter && _pendingNewZone != null)
-            {
-                // Commit current editor values first
-                ActivationZonesDataGrid?.CommitEdit(DataGridEditingUnit.Cell, true);
-                ActivationZonesDataGrid?.CommitEdit(DataGridEditingUnit.Row, true);
+            if (e.Key != Key.Enter)
+                return;
 
-                TryFinalizePendingNewZone();
-                e.Handled = true; // prevent default Enter navigation
-            }
+            if (_pendingNewZone == null)
+                return;
+
+            if (ActivationZonesDataGrid?.CurrentItem is not ActivationZone current)
+                return;
+
+            if (!ReferenceEquals(current, _pendingNewZone))
+                return;
+
+            ActivationZonesDataGrid.CommitEdit(DataGridEditingUnit.Cell, true);
+            ActivationZonesDataGrid.CommitEdit(DataGridEditingUnit.Row, true);
+
+            TryFinalizePendingNewZone();
+            e.Handled = true;
         }
 
         /// <summary>
@@ -13192,19 +13426,11 @@ namespace V2XController
             if (missing)
             {
                 var res = MessageBox.Show(
-                    "The new activation/switch zone is missing required properties.\n\n" +
+                    "The new activation zone is missing required properties.\n\n" +
                     "Required: Name, Latitude, Longitude, Azimuth (0–359), Width (>0), Height (>0).",
                     "Incomplete row",
-                    MessageBoxButton.YesNo,
-                    MessageBoxImage.Question);
-
-                if (res == MessageBoxResult.No)
-                {
-                    ActivationZonesCollection.Remove(zone);
-                    _switchRows.Remove(zone);
-                    _pendingNewZone = null;
-                    return true;
-                }
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
 
                 Dispatcher.BeginInvoke(new Action(() => FocusFirstMissingField(zone)), DispatcherPriority.Background);
                 return true;
@@ -14767,15 +14993,8 @@ namespace V2XController
                     "The new switch zone is missing required properties.\n\n" +
                     "Required: Name, Latitude, Longitude, Azimuth (0–359), Width (>0), Height (>0).",
                     "Incomplete zone",
-                    MessageBoxButton.YesNo,
-                    MessageBoxImage.Question);
-
-                if (res == MessageBoxResult.No)
-                {
-                    SwitchZonesCollection.Remove(zone);
-                    _pendingNewSwitchZone = null;
-                    return true;
-                }
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
 
                 Dispatcher.BeginInvoke(new Action(() =>
                 {
@@ -15252,6 +15471,39 @@ namespace V2XController
                     }
                     _polylineGeoPoints.Clear();
                 }
+
+                // Remove polyline visual zone outlines/fills
+                if (_polylineVisualGroups != null)
+                {
+                    foreach (var groupList in _polylineVisualGroups.Values)
+                    {
+                        foreach (var path in groupList.ToList())
+                        {
+                            if (path?.Parent is Panel parent)
+                                parent.Children.Remove(path);
+                        }
+                    }
+
+                    _polylineVisualGroups.Clear();
+                }
+
+                _segmentToVisualPath?.Clear();
+
+                if (_segmentToCircles != null)
+                {
+                    foreach (var circles in _segmentToCircles.Values)
+                    {
+                        foreach (var circle in circles.ToList())
+                        {
+                            if (circle?.Parent is Panel parent)
+                                parent.Children.Remove(circle);
+                        }
+                    }
+
+                    _segmentToCircles.Clear();
+                }
+
+                ClearPolylineDirectionArrows();
 
                 // Clear current drawing state
                 currentPolyline = null;
@@ -15832,7 +16084,7 @@ namespace V2XController
                 UpdateRectanglePositionFromStartPoint(zone);
 
                 isDirty = true;
-                Console.WriteLine($"[ROTATE] Zone '{zone.Name}' rotated to {zone.Azimuth}°");
+                Console.WriteLine($"[ROTATE] Zone '{zone.Name}' rotated to {zone.Azimuth}");
             }
             catch (Exception ex)
             {
@@ -16991,85 +17243,73 @@ namespace V2XController
         /// </summary>
         /// <param name="sender"></param>
         /// <param name="e"></param>
-        private void TestProtobuf_Click(object sender, RoutedEventArgs e)
-        {
-            try
-            {
-                // První kliknutí - dekódovat a uložit zprávu
-                if (string.IsNullOrEmpty(_protobufTestDecoded))
-                {
-                    string testMessage = "COvDAxILCJrg8c8GEKTWiiFShwEKCwia4PHPBhCk1oohEhAKCjIzNTg5NDUwMTcQPBgKUjoKCQkAAACgmRlsQBEBP/Tu2etIQBnCNdKtMkgyQFIbUB6iAQUN4XqkQJIDDgoFDeF6pEASBQ3heqRAXTMzP0FlZuaqQ6UBuKeAQ/IBGQgUogEEMTMzOfIBBDIwMDSABQDCDAPwAQA=";
+        //private void TestProtobuf_Click(object sender, RoutedEventArgs e)
+        //{
+        //    try
+        //    {
+        //        // První kliknutí - dekódovat a uložit zprávu
+        //        if (string.IsNullOrEmpty(_protobufTestDecoded))
+        //        {
+        //            string testMessage = "COvDAxILCJrg8c8GEKTWiiFShwEKCwia4PHPBhCk1oohEhAKCjIzNTg5NDUwMTcQPBgKUjoKCQkAAACgmRlsQBEBP/Tu2etIQBnCNdKtMkgyQFIbUB6iAQUN4XqkQJIDDgoFDeF6pEASBQ3heqRAXTMzP0FlZuaqQ6UBuKeAQ/IBGQgUogEEMTMzOfIBBDIwMDSABQDCDAPwAQA=";
 
-                    if (!ProtobufParser.TryDecodeProtobufFromHex(testMessage, out _protobufTestDecoded))
-                    {
-                        Console.WriteLine("ERROR: Failed to decode");
-                        return;
-                    }
+        //            if (!ProtobufParser.TryDecodeProtobufFromHex(testMessage, out _protobufTestDecoded))
+        //            {
+        //                Console.WriteLine("ERROR: Failed to decode");
+        //                return;
+        //            }
 
-                    Console.WriteLine("Click to toggle tram position");
-                    _protobufTestLatOffset = 0.0;
-                    _protobufTestDirection = true;
-                }
+        //            Console.WriteLine("Click to toggle tram position");
+        //            _protobufTestLatOffset = 0.0;
+        //            _protobufTestDirection = true;
+        //        }
 
-                // Parsovat zprávu
-                var protoCam = ProtoCam.ParseFromJson(_protobufTestDecoded);
-                if (protoCam == null)
-                {
-                    Console.WriteLine("ERROR: Parse failed");
-                    return;
-                }
+        //        // Parsovat zprávu
+        //        var protoCam = ProtoCam.ParseFromJson(_protobufTestDecoded);
+        //        if (protoCam == null)
+        //        {
+        //            Console.WriteLine("ERROR: Parse failed");
+        //            return;
+        //        }
 
-                // Přepnout směr
-                _protobufTestDirection = !_protobufTestDirection;
+        //        // Přepnout směr
+        //        _protobufTestDirection = !_protobufTestDirection;
 
-                double jumpMeters = 50.0;
-                double latDelta = jumpMeters / 111000.0;
+        //        double jumpMeters = 50.0;
+        //        double latDelta = jumpMeters / 111000.0;
 
-                if (_protobufTestDirection)
-                {
-                    _protobufTestLatOffset += latDelta;
-                }
-                else
-                {
-                    _protobufTestLatOffset -= latDelta;
-                }
+        //        if (_protobufTestDirection)
+        //        {
+        //            _protobufTestLatOffset += latDelta;
+        //        }
+        //        else
+        //        {
+        //            _protobufTestLatOffset -= latDelta;
+        //        }
 
-                // Aplikovat offset
-                protoCam.Latitude = (protoCam.Latitude ?? 0.0) + _protobufTestLatOffset;
-                protoCam.Timestamp = DateTime.UtcNow;
-                protoCam.Speed = 15.0;
-                protoCam.Heading = _protobufTestDirection ? 0.0 : 180.0;
+        //        // Aplikovat offset
+        //        protoCam.Latitude = (protoCam.Latitude ?? 0.0) + _protobufTestLatOffset;
+        //        protoCam.Timestamp = DateTime.UtcNow;
+        //        protoCam.Speed = 15.0;
+        //        protoCam.Heading = _protobufTestDirection ? 0.0 : 180.0;
 
-                // Převést a vykreslit
-                var v2xMsg = protoCam.ToV2XMessage();
-                v2xMsg.MessageType = "CAM";
+        //        // Převést a vykreslit
+        //        var v2xMsg = protoCam.ToV2XMessage();
+        //        v2xMsg.MessageType = "CAM";
 
-                var fakeXml = $@"<vehPt lat=""{v2xMsg.Latitude}"" lon=""{v2xMsg.Longitude}"" speed=""{v2xMsg.Speed}"" heading=""{v2xMsg.Heading}"" accuracy=""{protoCam.AccuracyInMeters ?? 0.0}"" />";
+        //        var fakeXml = $@"<vehPt lat=""{v2xMsg.Latitude}"" lon=""{v2xMsg.Longitude}"" speed=""{v2xMsg.Speed}"" heading=""{v2xMsg.Heading}"" accuracy=""{protoCam.AccuracyInMeters ?? 0.0}"" />";
 
-                var shortId = v2xMsg.VehicleID.Length > 4 ? v2xMsg.VehicleID[^4..] : v2xMsg.VehicleID;
-                var arrow = _protobufTestDirection ? "▲" : "▼";
-                Console.WriteLine($"{arrow} JUMP {jumpMeters}m | {shortId} | Lat={v2xMsg.Latitude:F6} | Lon={v2xMsg.Longitude} | Total delta={_protobufTestLatOffset * 111000:F0}m");
+        //        var shortId = v2xMsg.VehicleID.Length > 4 ? v2xMsg.VehicleID[^4..] : v2xMsg.VehicleID;
+        //        var arrow = _protobufTestDirection ? "▲" : "▼";
+        //        Console.WriteLine($"{arrow} JUMP {jumpMeters}m | {shortId} | Lat={v2xMsg.Latitude:F6} | Lon={v2xMsg.Longitude} | Total delta={_protobufTestLatOffset * 111000:F0}m");
 
-                // Vykreslit na mapu
-                HandleV2XMessage(v2xMsg, fakeXml);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"ERROR: {ex.Message}", Brushes.Red);
-            }
-        }
-
-        public void StartProtobufTest(string base64Message)
-        {
-            // Už nepotřebujeme - používáme TestProtobuf_Click
-        }
-
-        public void StopProtobufTest()
-        {
-            _protobufTestDecoded = "";
-            _protobufTestLatOffset = 0.0;
-            _protobufTestDirection = true;
-        }
+        //        // Vykreslit na mapu
+        //        HandleV2XMessage(v2xMsg, fakeXml);
+        //    }
+        //    catch (Exception ex)
+        //    {
+        //        Console.WriteLine($"ERROR: {ex.Message}", Brushes.Red);
+        //    }
+        //}
 
         private void SelectZoneInTable(ActivationZone zone)
         {
@@ -17149,6 +17389,7 @@ namespace V2XController
 
                 Console.WriteLine("=== V2X Controller Debug Mode ===");
                 Console.WriteLine("Close button is disabled for simplicity.");
+                Console.WriteLine("Heartbeat period: 3s");
             }
             else
             {
@@ -17327,7 +17568,7 @@ namespace V2XController
                 Console.WriteLine("[SIGNAL LIVE] intersection_id not found, using fallback 640");
             }
 
-            Console.WriteLine($"[SIGNAL LIVE] Intersection {intersectionId} → {direction}");
+            Console.WriteLine($"[SIGNAL LIVE] Intersection {intersectionId}  {direction}");
 
             Dispatcher.Invoke(() =>
             {
@@ -17546,7 +17787,7 @@ namespace V2XController
                 if (allStates.Any(IsSignalPreMovement)) return TramSignalDirection.PreMovement;
                 if (allStates.Any(IsSignalStop)) return TramSignalDirection.Stop;
 
-                Console.WriteLine("[SIGNAL PARSE] No matching state → None");
+                Console.WriteLine("[SIGNAL PARSE] No matching state  None");
                 return TramSignalDirection.None;
             }
             catch (Exception ex)
