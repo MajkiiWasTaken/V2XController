@@ -8,6 +8,7 @@ using System.Globalization;
 using System.IO;
 using System.IO.Ports;
 using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
@@ -708,17 +709,6 @@ namespace V2XController
                 DrawRadiusCircle();
                 UpdateUiEnabledState();
 
-                // Load OSM tram stops and draw them
-                try
-                {
-                    stops = await LoadStopsFromOSM();
-                    Console.WriteLine($"[STOPS] Loaded {stops.Count} tram stops from OSM.");
-                    DrawStopsOnCanvasSafe();
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[STOPS] Failed to load stops: {ex.Message}");
-                }
             };
 
             ActiveTramsDataGrid.ItemsSource = TramTable;
@@ -808,7 +798,7 @@ namespace V2XController
                 {
                     stops = await LoadStopsFromOSM();
                     Console.WriteLine($"[STOPS] Loaded {stops.Count} tram stops from OSM.");
-                    DrawStopsOnCanvasSafe();
+                    //DrawStopsOnCanvasSafe();
                 }
                 catch (Exception ex)
                 {
@@ -1014,6 +1004,7 @@ namespace V2XController
         {
             var lonlat = CanvasPixelsToLatLon(new Point(x, y), latitude, longitude, zoom);
             return (lonlat.Y, lonlat.X);
+
         }
 
         /// <summary>
@@ -1058,7 +1049,7 @@ namespace V2XController
                         ReprojectDrawnTramsOnMapChange();
                         ReprojectActiveVehiclesOnMapChange();
                         ReprojectReplayOnMapChange();
-                        DrawStopsOnCanvasSafe();
+                        //DrawStopsOnCanvasSafe();
                     });
 
                     await BringAllOverlaysToFrontSafeAsync();
@@ -1461,7 +1452,7 @@ namespace V2XController
             scale.ScaleX = previewScale;
             scale.ScaleY = previewScale;
 
-            Console.WriteLine($"[ZOOM] Wheel event: {zoom}  {_pendingZoom}, scale: {previewScale:F2}");
+            Console.WriteLine($"[ZOOM] Wheel event: {zoom} -> {_pendingZoom}, scale: {previewScale:F2}");
 
             // Vždy znovu vytvořit timer, aby se zajistilo, že funguje
             if (_zoomDebounceTimer != null)
@@ -2246,7 +2237,7 @@ namespace V2XController
             // If we don't have the right number of stops, redraw everything
             if (stopMarkers.Count != stops.Count || stopLabels.Count != stops.Count)
             {
-                DrawStopsOnCanvasSafe();
+                //DrawStopsOnCanvasSafe();
                 return;
             }
 
@@ -10876,34 +10867,71 @@ namespace V2XController
         /// <returns>A list of stops.</returns>
         async Task<List<Stop>> LoadStopsFromOSM()
         {
-            string query = @"[out:json];
-                     node[""railway""=""tram_stop""](49.77,18.19,49.87,18.32);
-                     out;";
+            string query = @"
+                [out:json][timeout:25];
+                (
+                  node[""railway""=""tram_stop""](49.70,18.05,49.90,18.40);
+                  node[""public_transport""=""platform""][""tram""=""yes""](49.70,18.05,49.90,18.40);
+                  node[""tram""=""yes""](49.70,18.05,49.90,18.40);
+                );
+                out body;
+                ";
 
             using var client = new HttpClient();
-            var response = await client.GetStringAsync(
-                "https://overpass-api.de/api/interpreter?data=" + Uri.EscapeDataString(query));
 
-            using var doc = JsonDocument.Parse(response);
-            var root = doc.RootElement;
-            var elements = root.GetProperty("elements");
+            client.DefaultRequestHeaders.UserAgent.ParseAdd("V2XController/1.0");
+            client.DefaultRequestHeaders.Accept.Add(
+                new MediaTypeWithQualityHeaderValue("application/json")
+            );
+
+            string body = "data=" + Uri.EscapeDataString(query);
+
+            using var content = new StringContent(
+                body,
+                Encoding.UTF8,
+                "application/x-www-form-urlencoded"
+            );
+
+            using var response = await client.PostAsync(
+                "https://overpass-api.de/api/interpreter",
+                content
+            );
+
+            string responseText = await response.Content.ReadAsStringAsync();
+
+            if (!response.IsSuccessStatusCode)
+            {
+                Console.WriteLine($"Overpass chyba: {(int)response.StatusCode}\n\n{responseText}");
+                return new List<Stop>();
+            }
+
+            using var doc = JsonDocument.Parse(responseText);
+            var elements = doc.RootElement.GetProperty("elements");
+
+            Console.WriteLine($"OSM elements: {elements.GetArrayLength()}");
 
             List<Stop> stops = new List<Stop>();
 
             foreach (var el in elements.EnumerateArray())
             {
-                var lat = el.GetProperty("lat").GetDouble();
-                var lon = el.GetProperty("lon").GetDouble();
-                string? name = el.TryGetProperty("tags", out var tags) &&
-                              tags.TryGetProperty("name", out var stopNameEl)
-                    ? stopNameEl.GetString()
-                    : "Bez názvu";
+                if (!el.TryGetProperty("lat", out var latEl)) continue;
+                if (!el.TryGetProperty("lon", out var lonEl)) continue;
+
+                string name = "Bez názvu";
+
+                if (el.TryGetProperty("tags", out var tags))
+                {
+                    if (tags.TryGetProperty("name", out var stopNameEl))
+                    {
+                        name = stopNameEl.GetString() ?? "Bez názvu";
+                    }
+                }
 
                 stops.Add(new Stop
                 {
                     StopName = name,
-                    Latitude = lat,
-                    Longitude = lon
+                    Latitude = latEl.GetDouble(),
+                    Longitude = lonEl.GetDouble()
                 });
             }
 
@@ -10913,58 +10941,58 @@ namespace V2XController
         /// <summary>
         /// Draws stops on the canvas safely, ensuring thread safety.
         /// </summary>
-        private void DrawStopsOnCanvasSafe()
-        {
-            if (TileCanvas == null) return;
+        //private void DrawStopsOnCanvasSafe()
+        //{
+        //    if (TileCanvas == null) return;
 
-            Dispatcher.Invoke(() =>
-            {
-                if (stops == null || stops.Count == 0)
-                    return;
+        //    Dispatcher.Invoke(() =>
+        //    {
+        //        if (stops == null || stops.Count == 0)
+        //            return;
 
-                // Remove previous stop visuals
-                foreach (var el in TileCanvas.Children.OfType<FrameworkElement>()
-                             .Where(el => Equals(el.Tag, "Stop"))
-                             .ToList())
-                {
-                    TileCanvas.Children.Remove(el);
-                }
+        //        // Remove previous stop visuals
+        //        foreach (var el in TileCanvas.Children.OfType<FrameworkElement>()
+        //                     .Where(el => Equals(el.Tag, "Stop"))
+        //                     .ToList())
+        //        {
+        //            TileCanvas.Children.Remove(el);
+        //        }
 
-                foreach (var stop in stops)
-                {
-                    var (x, y) = ConvertLatLonToCanvasXY(stop.Latitude, stop.Longitude);
+        //        foreach (var stop in stops)
+        //        {
+        //            var (x, y) = ConvertLatLonToCanvasXY(stop.Latitude, stop.Longitude);
 
-                    var stopMarker = new Ellipse
-                    {
-                        Width = 8,
-                        Height = 8,
-                        Fill = Brushes.Red,
-                        Stroke = Brushes.White,
-                        StrokeThickness = 1,
-                        Tag = "Stop",
-                        IsHitTestVisible = false
-                    };
-                    Canvas.SetLeft(stopMarker, x - 4);
-                    Canvas.SetTop(stopMarker, y - 4);
-                    Panel.SetZIndex(stopMarker, 500);
-                    TileCanvas.Children.Add(stopMarker);
+        //            var stopMarker = new Ellipse
+        //            {
+        //                Width = 7,
+        //                Height = 7,
+        //                Fill = Brushes.Red,
+        //                Stroke = Brushes.White,
+        //                StrokeThickness = 1,
+        //                Tag = "Stop",
+        //                IsHitTestVisible = false
+        //            };
+        //            Canvas.SetLeft(stopMarker, x - 4);
+        //            Canvas.SetTop(stopMarker, y - 4);
+        //            Panel.SetZIndex(stopMarker, 500);
+        //            TileCanvas.Children.Add(stopMarker);
 
-                    var stopLabel = new TextBlock
-                    {
-                        Text = stop.StopName,
-                        FontWeight = FontWeights.Bold,
-                        Foreground = Brushes.Black,
-                        FontSize = 15,
-                        Tag = "Stop",
-                        IsHitTestVisible = false
-                    };
-                    Canvas.SetLeft(stopLabel, x + 6);
-                    Canvas.SetTop(stopLabel, y - 6);
-                    Panel.SetZIndex(stopLabel, 501);
-                    TileCanvas.Children.Add(stopLabel);
-                }
-            });
-        }
+        //            var stopLabel = new TextBlock
+        //            {
+        //                Text = stop.StopName,
+        //                FontWeight = FontWeights.Bold,
+        //                Foreground = Brushes.Black,
+        //                FontSize = 11,
+        //                Tag = "Stop",
+        //                IsHitTestVisible = false
+        //            };
+        //            Canvas.SetLeft(stopLabel, x + 6);
+        //            Canvas.SetTop(stopLabel, y - 6);
+        //            Panel.SetZIndex(stopLabel, 101);
+        //            TileCanvas.Children.Add(stopLabel);
+        //        }
+        //    });
+        //}
 
 
         /// <summary>
@@ -13031,8 +13059,7 @@ namespace V2XController
             ReprojectReplayOnMapChange();
             ReprojectDrawnTramsOnMapChange();
             ReprojectPolylines();
-            UpdatePolylinePositions();
-            DrawStopsOnCanvasSafe();
+            //DrawStopsOnCanvasSafe();
             UpdateTramSignalPositions();
             await BringAllOverlaysToFrontSafeAsync();
         }
@@ -16954,7 +16981,7 @@ namespace V2XController
                 return;
 
             // Arrow density: ~desiredArrows per polyline
-            int desiredArrows = 4;
+            int desiredArrows = 36;
             int step = Math.Max(1, (points.Count - 1) / desiredArrows);
 
             // Arrow visual parameters (in canvas pixels)
