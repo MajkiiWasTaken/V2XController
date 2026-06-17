@@ -17044,7 +17044,7 @@ namespace V2XController
         }
 
 
-        private void SetPolylineZonesLiveSorting(bool enabled)
+        private void SetPolylineZonesLiveSorting(bool enabled) 
         {
             var view = CollectionViewSource.GetDefaultView(PolylineZonesCollection);
             if (view is ICollectionViewLiveShaping live)
