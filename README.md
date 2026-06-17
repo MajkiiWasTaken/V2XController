@@ -6,9 +6,7 @@
 ![Language](https://img.shields.io/badge/language-C%23-239120)
 ![Status](https://img.shields.io/badge/status-Prototype%20%2F%20Internal-orange)
 
----
-
-##  Overview
+###  Overview
 
 **V2X Controller** is a WPF desktop application designed for working with **V2X data**, visualizing vehicles on a map, drawing **activation/switch zones**, replaying recordings, and exporting zones to external hardware via **Modbus TCP / serial / serial tunnel**.
 
@@ -25,7 +23,7 @@ The application combines multiple functionalities into a single tool:
 
 ---
 
-##  Features
+###  Features
 
 ###  Map Visualization
 - tile-based map rendering,
@@ -81,7 +79,7 @@ Dedicated `ProtobufWindow` allows:
 
 ---
 
-##  How It Works
+###  How It Works
 
 The application is built around a **map-based visualization engine**, where all entities (vehicles, zones, signals) are rendered on a canvas aligned with geographic coordinates.
 
@@ -109,7 +107,7 @@ The application is built around a **map-based visualization engine**, where all 
 
 ---
 
-##  Data Flow
+###  Data Flow
 
 ### Live Mode
 1. User selects COM port and baudrate  
@@ -137,7 +135,7 @@ The application is built around a **map-based visualization engine**, where all 
 
 ---
 
-##  Requirements
+###  Requirements
 
 - Windows  
 - .NET 8 SDK  
@@ -146,7 +144,7 @@ The application is built around a **map-based visualization engine**, where all 
 
 ---
 
-##  Getting Started
+###  Getting Started
 
 1. Clone the repository  
 2. Open the project in Visual Studio  
@@ -158,7 +156,7 @@ The application is built around a **map-based visualization engine**, where all 
 
 ---
 
-##  Technologies Used
+###  Technologies Used
 
 - **C# / WPF**
 - **.NET**
@@ -169,7 +167,7 @@ The application is built around a **map-based visualization engine**, where all 
 
 ---
 
-##  Use Case
+###  Use Case
 
 This application is intended for:
 
@@ -180,7 +178,7 @@ This application is intended for:
 
 ---
 
-##  Copyright
+###  Copyright
 
 **Copyright (c) 2025 Hroší stavby Morava a.s.**
 **All rights reserved.**
@@ -189,6 +187,6 @@ This project is primarily an **internal tool** used for development, testing and
 
 ---
 
-##  Author: Michal Švrček and others
+###  Author: Michal Švrček and others
 
 Developed as part of a real-world intelligent transport system project.
