@@ -20,6 +20,11 @@ The application combines multiple functionalities into a single tool:
 - exporting zones to MPC devices,
 - built-in **Protobuf message decoder**,
 - debug terminal for internal diagnostics.
+  
+---
+
+### V2X Demo
+<img width="1280" height="784" alt="v2x" src="https://github.com/user-attachments/assets/cd51181b-12d6-487d-b661-6ff98c0b725c" />
 
 ---
 
