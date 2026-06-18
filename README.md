@@ -23,7 +23,7 @@ The application combines multiple functionalities into a single tool:
   
 ---
 
-### V2X Demo
+### V2X Controller Demo
 <img width="1280" height="784" alt="v2x" src="https://github.com/user-attachments/assets/cd51181b-12d6-487d-b661-6ff98c0b725c" />
 
 ---
