@@ -37,3 +37,7 @@ bld/
 *.Cache
 *.tlog
 *.ide
+
+.v2x/
+.svn/
+.vs/
