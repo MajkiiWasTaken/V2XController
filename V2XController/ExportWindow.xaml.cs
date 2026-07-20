@@ -82,6 +82,9 @@ namespace V2XController
         private class ExportWindowState
         {
             public int? ConnectionIndex { get; set; }
+
+            public string? SelectedProfileName { get; set; }
+
             public string? TunnelRemoteHost { get; set; }
             public string? TunnelRemotePort { get; set; }
         }
@@ -240,24 +243,49 @@ namespace V2XController
             return await Dispatcher.InvokeAsync(() => MessageBox.Show(this, text, caption, buttons, icon), DispatcherPriority.Background);
         }
 
-        private void LoadWindowState()
+        private ExportWindowState? LoadWindowState()
         {
             try
             {
-                var dir = System.IO.Path.GetDirectoryName(_stateFilePath);
-                if (!string.IsNullOrEmpty(dir) && System.IO.Directory.Exists(dir) && System.IO.File.Exists(_stateFilePath))
+                var dir =
+                    System.IO.Path.GetDirectoryName(_stateFilePath);
+
+                if (!string.IsNullOrEmpty(dir) &&
+                    System.IO.Directory.Exists(dir) &&
+                    System.IO.File.Exists(_stateFilePath))
                 {
-                    var json = System.IO.File.ReadAllText(_stateFilePath);
-                    var st = JsonSerializer.Deserialize<ExportWindowState>(json);
+                    var json =
+                        System.IO.File.ReadAllText(_stateFilePath);
+
+                    var st =
+                        JsonSerializer.Deserialize<ExportWindowState>(json);
+
                     if (st != null)
                     {
-                        if (st.ConnectionIndex.HasValue && st.ConnectionIndex.Value >= 0 && st.ConnectionIndex.Value < ConnectionComboBox.Items.Count)
-                            ConnectionComboBox.SelectedIndex = st.ConnectionIndex.Value;
+                        if (st.ConnectionIndex.HasValue &&
+                            st.ConnectionIndex.Value >= 0 &&
+                            st.ConnectionIndex.Value <
+                            ConnectionComboBox.Items.Count)
+                        {
+                            ConnectionComboBox.SelectedIndex =
+                                st.ConnectionIndex.Value;
+                        }
 
-                        if (!string.IsNullOrWhiteSpace(st.TunnelRemoteHost))
-                            TunnelRemoteHostTextBox.Text = st.TunnelRemoteHost;
-                        if (!string.IsNullOrWhiteSpace(st.TunnelRemotePort))
-                            TunnelRemotePortTextBox.Text = st.TunnelRemotePort;
+                        if (!string.IsNullOrWhiteSpace(
+                            st.TunnelRemoteHost))
+                        {
+                            TunnelRemoteHostTextBox.Text =
+                                st.TunnelRemoteHost;
+                        }
+
+                        if (!string.IsNullOrWhiteSpace(
+                            st.TunnelRemotePort))
+                        {
+                            TunnelRemotePortTextBox.Text =
+                                st.TunnelRemotePort;
+                        }
+
+                        return st;
                     }
                 }
             }
@@ -265,6 +293,8 @@ namespace V2XController
             {
                 // ignore loading errors
             }
+
+            return null;
         }
 
         private void SaveWindowState()
@@ -274,16 +304,35 @@ namespace V2XController
                 var st = new ExportWindowState
                 {
                     ConnectionIndex = ConnectionComboBox.SelectedIndex,
-                    TunnelRemoteHost = TunnelRemoteHostTextBox?.Text,
-                    TunnelRemotePort = TunnelRemotePortTextBox?.Text
+
+                    SelectedProfileName =
+                        SelectComboBox.SelectedItem as string,
+
+                    TunnelRemoteHost =
+                        TunnelRemoteHostTextBox?.Text,
+
+                    TunnelRemotePort =
+                        TunnelRemotePortTextBox?.Text
                 };
 
                 var dir = System.IO.Path.GetDirectoryName(_stateFilePath);
-                if (!string.IsNullOrEmpty(dir) && !System.IO.Directory.Exists(dir))
-                    System.IO.Directory.CreateDirectory(dir);
 
-                var json = JsonSerializer.Serialize(st, new JsonSerializerOptions { WriteIndented = true });
-                System.IO.File.WriteAllText(_stateFilePath ?? string.Empty, json);
+                if (!string.IsNullOrEmpty(dir) &&
+                    !System.IO.Directory.Exists(dir))
+                {
+                    System.IO.Directory.CreateDirectory(dir);
+                }
+
+                var json = JsonSerializer.Serialize(
+                    st,
+                    new JsonSerializerOptions
+                    {
+                        WriteIndented = true
+                    });
+
+                System.IO.File.WriteAllText(
+                    _stateFilePath ?? string.Empty,
+                    json);
             }
             catch
             {
@@ -298,27 +347,44 @@ namespace V2XController
         }
 
 
-        private void ExportWindow_Loaded(object sender, RoutedEventArgs e)
+        private void ExportWindow_Loaded(
+    object sender,
+    RoutedEventArgs e)
         {
-            LoadWindowState();
-
-            if (ConnectionComboBox.SelectedIndex < 0)
-                ConnectionComboBox.SelectedIndex = 0;
-            ApplyConnectionLayout();
+            var windowState = LoadWindowState();
 
             _profiles.Clear();
             _profiles.AddRange(ExportSettingsStorage.Load());
 
-            RefreshProfilesList();
+            string? profileToSelect =
+                windowState?.SelectedProfileName;
 
-            if (_profiles.Count > 0)
+            // Pokud uložený profil už neexistuje,
+            // použije se první dostupný
+            if (string.IsNullOrWhiteSpace(profileToSelect) ||
+                !_profiles.Any(p => p.Name == profileToSelect))
             {
-                _suppressProfileChange = true;
-                SelectComboBox.SelectedIndex = 0;
-                _suppressProfileChange = false;
+                profileToSelect =
+                    _profiles.FirstOrDefault()?.Name;
+            }
 
-                PopulateForm(_profiles[0].Settings);
-                CaptureLoadedSnapshot(_profiles[0].Settings, _profiles[0].Name);
+            RefreshProfilesList(
+                selectName: profileToSelect);
+
+            if (!string.IsNullOrWhiteSpace(profileToSelect))
+            {
+                var selectedProfile =
+                    _profiles.FirstOrDefault(
+                        p => p.Name == profileToSelect);
+
+                if (selectedProfile != null)
+                {
+                    PopulateForm(selectedProfile.Settings);
+
+                    CaptureLoadedSnapshot(
+                        selectedProfile.Settings,
+                        selectedProfile.Name);
+                }
             }
             else
             {
@@ -327,11 +393,16 @@ namespace V2XController
                 _loadedSettings = null;
             }
 
+            if (ConnectionComboBox.SelectedIndex < 0)
+                ConnectionComboBox.SelectedIndex = 0;
+
+            ApplyConnectionLayout();
             AttachChangeTracking();
 
-            // Set the appropriate mode based on the title
-            if (Title == "Read Activation Zones") SetReadMode(true);
-            else SetReadMode(false);  // Default to export mode
+            if (Title == "Read Activation Zones")
+                SetReadMode(true);
+            else
+                SetReadMode(false);
         }
 
         private async void Start_Click(object sender, RoutedEventArgs e)
@@ -476,7 +547,13 @@ namespace V2XController
             }
 
             // Spočítat celkový počet registrů pro progress
-            int totalRegisters = zonesToExport.Count * 10; // 10 registrů na zónu
+            int totalZoneSlots =
+                exportingWLC
+                    ? 4 * 5
+                    : 5 * 7;
+
+            int totalRegisters =
+                totalZoneSlots * MPC_ZONE_STRIDE;
             ShowBusy($"Exporting {zoneTypeName}...", showProgress: true, maxProgress: totalRegisters);
             await Task.Delay(50);
 
@@ -657,47 +734,21 @@ namespace V2XController
                 }
 
                 const ushort BASE_ADDR = MPC_BASE_ADDR;       // 0x0300
-                const int ZONE_STRIDE = MPC_ZONE_STRIDE;      // 10
                 ushort FIRST_ZONE_BASE = (ushort)(BASE_ADDR + writeOffset); // Použít předaný offset
 
                 // Sestavit všechny registry
-                var allRegisters = new List<(ushort addr, ushort value)>();
+                var completeBlock =
+                BuildCompleteZoneRegisterBlock(
+                    zones,
+                    writeOffset);
 
-                for (int idx = 0; idx < zones.Count; idx++)
-                {
-                    var z = zones[idx];
-                    int mainZone = z.MainZone + 1;
-                    int subZone = z.SubZone + 1;
+                ushort firstZoneBase =
+                    (ushort)(MPC_BASE_ADDR + writeOffset);
 
-                    // Pro WLC: 4 hlavní × 5 sub = 20 zón
-                    // Pro RTV: 5 hlavních × 7 sub = 35 zón
-                    int subsPerMain = (writeOffset == MPCv3WLC_WRITE_OFFSET) ? 5 : 7;
-                    int zoneIndex = ((mainZone - 1) * subsPerMain) + (subZone - 1);
-                    ushort zoneBase = (ushort)(FIRST_ZONE_BASE + (zoneIndex * ZONE_STRIDE));
-
-                    var (latLo, latHi) = FloatToWordsWS((float)z.Latitude);
-                    var (lonLo, lonHi) = FloatToWordsWS((float)z.Longitude);
-                    var (heightLo, heightHi) = FloatToWordsWS((float)z.Height);
-                    var (widthLo, widthHi) = FloatToWordsWS((float)z.Width);
-                    var (azLo, azHi) = FloatToWordsWS((float)z.Azimuth);
-
-                    // OPRAVA: Zapsat VŠECH 10 registrů pro každou zónu
-                    allRegisters.Add((zoneBase, lonLo));
-                    allRegisters.Add(((ushort)(zoneBase + 1), lonHi));
-                    allRegisters.Add(((ushort)(zoneBase + 2), latLo));
-                    allRegisters.Add(((ushort)(zoneBase + 3), latHi));
-                    allRegisters.Add(((ushort)(zoneBase + 4), heightLo));
-                    allRegisters.Add(((ushort)(zoneBase + 5), heightHi));
-                    allRegisters.Add(((ushort)(zoneBase + 6), widthLo));
-                    allRegisters.Add(((ushort)(zoneBase + 7), widthHi));
-                    allRegisters.Add(((ushort)(zoneBase + 8), azLo));
-                    allRegisters.Add(((ushort)(zoneBase + 9), azHi));
-
-
-                    Console.WriteLine($"[ZONE] Zone {mainZone}-{subZone}: base=0x{zoneBase:X4}, 10 regs");
-                }
-
-                Console.WriteLine($"[ZONE] Total registers to write: {allRegisters.Count}");
+                Console.WriteLine(
+                    $"[ZONE] Writing complete block: " +
+                    $"{completeBlock.Length} registers " +
+                    $"from 0x{firstZoneBase:X4}");
 
                 // Připojení pro TCP
                 ModbusTcpIp? modbusTcp = null;
@@ -713,71 +764,104 @@ namespace V2XController
                 try
                 {
                     int offset = 0;
-                    while (offset < allRegisters.Count)
+
+                    while (offset < completeBlock.Length)
                     {
                         if (isTcp)
                         {
-                            modbusTcp!.WriteToHoldingRegister(unitId, UNLOCK_REGISTER, UNLOCK_VALUE, out _, "Re-unlock");
+                            if (!modbusTcp!.WriteToHoldingRegister(
+                                unitId,
+                                UNLOCK_REGISTER,
+                                UNLOCK_VALUE,
+                                out state,
+                                "Re-unlock"))
+                            {
+                                error =
+                                    $"Re-unlock failed, state={state}";
+
+                                return false;
+                            }
+
                             System.Threading.Thread.Sleep(250);
                         }
 
-                        int chunkSize = Math.Min(MAX_REGS_PER_CHUNK, allRegisters.Count - offset);
-                        ushort startAddr = allRegisters[offset].addr;
-                        int actualChunkSize = 1;
+                        int chunkSize = Math.Min(
+                            MAX_REGS_PER_CHUNK,
+                            completeBlock.Length - offset);
 
-                        for (int i = 1; i < chunkSize; i++)
-                        {
-                            if (allRegisters[offset + i].addr != startAddr + i)
-                                break;
-                            actualChunkSize++;
-                        }
+                        ushort startAddr =
+                            (ushort)(firstZoneBase + offset);
 
-                        var chunkData = new ushort[actualChunkSize];
-                        for (int i = 0; i < actualChunkSize; i++)
-                        {
-                            chunkData[i] = allRegisters[offset + i].value;
-                        }
+                        var chunkData =
+                            new ushort[chunkSize];
 
-                        Console.WriteLine($"[WRITE] Writing {(isTcp ? "TCP" : "RS485")} batch: {actualChunkSize} regs from 0x{startAddr:X4}");
+                        Array.Copy(
+                            completeBlock,
+                            offset,
+                            chunkData,
+                            0,
+                            chunkSize);
 
-                        // Report progress
-                        progress?.Report((offset, allRegisters.Count, $"[WRITE] Writing registers {offset}/{allRegisters.Count}..."));
+                        progress?.Report((
+                            offset,
+                            completeBlock.Length,
+                            $"Writing registers " +
+                            $"{offset}/{completeBlock.Length}"));
 
-                        // Zápis
                         if (isTcp)
                         {
                             if (!modbusTcp!.WriteDataToHoldingRegisters(
                                 unitId,
                                 startAddr,
-                                (ushort)actualChunkSize,
+                                (ushort)chunkSize,
                                 chunkData,
                                 out state,
                                 $"Batch {offset}"))
                             {
-                                error = $"[ERR] TCP write failed at 0x{startAddr:X4}";
+                                error =
+                                    $"TCP write failed at " +
+                                    $"0x{startAddr:X4}, state={state}";
+
                                 return false;
                             }
                         }
 
-                        Console.WriteLine($"[WRITE] OK");
-                        offset += actualChunkSize;
+                        Console.WriteLine(
+                            $"[WRITE] OK: {chunkSize} regs " +
+                            $"from 0x{startAddr:X4}");
+
+                        offset += chunkSize;
+
                         System.Threading.Thread.Sleep(150);
                     }
-
-                    // Lock
-                    progress?.Report((allRegisters.Count, allRegisters.Count, "Locking device..."));
-                    if (isTcp)
-                    {
-                        modbusTcp!.WriteToHoldingRegister(unitId, UNLOCK_REGISTER, 0, out _, "Lock");
-                    }
-
-                    Console.WriteLine("\n=== ALL ZONES WRITTEN (BATCHED) ===");
-                    return true;
                 }
                 finally
                 {
                     modbusTcp?.Dispose();
                 }
+
+                progress?.Report((
+                    completeBlock.Length,
+                    completeBlock.Length,
+                    "Locking device..."));
+
+                if (isTcp)
+                {
+                    TryWriteUnlockTcp(
+                        host,
+                        port,
+                        unitId,
+                        UNLOCK_REGISTER,
+                        0,
+                        connectTimeoutMs,
+                        sendTimeoutMs,
+                        receiveTimeoutMs,
+                        out _,
+                        out _);
+                }
+
+                Console.WriteLine("\n=== COMPLETE ZONE BLOCK WRITTEN ===");
+                return true;
             }
             catch (Exception ex)
             {
@@ -921,95 +1005,92 @@ namespace V2XController
                 const int ZONE_STRIDE = MPC_ZONE_STRIDE;
                 ushort FIRST_ZONE_BASE = (ushort)(BASE_ADDR + writeOffset); // Použít předaný offset
 
-                var allRegisters = new List<(ushort addr, ushort value)>();
+                var completeBlock =
+                 BuildCompleteZoneRegisterBlock(
+                     zones,
+                     writeOffset);
 
-                for (int idx = 0; idx < zones.Count; idx++)
-                {
-                    var z = zones[idx];
-                    int mainZone = z.MainZone + 1;
-                    int subZone = z.SubZone + 1;
+                ushort firstZoneBase =
+                    (ushort)(MPC_BASE_ADDR + writeOffset);
 
-                    // Pro WLC: 4 hlavní × 5 sub = 20 zón
-                    // Pro RTV: 5 hlavních × 7 sub = 35 zón
-                    int subsPerMain = (writeOffset == MPCv3WLC_WRITE_OFFSET) ? 5 : 7;
-                    int zoneIndex = ((mainZone - 1) * subsPerMain) + (subZone - 1);
-                    ushort zoneBase = (ushort)(FIRST_ZONE_BASE + (zoneIndex * ZONE_STRIDE));
-
-                    float lonF = (float)z.Longitude;
-                    float latF = (float)z.Latitude;
-                    float heightF = (float)z.Height;
-                    float widthF = (float)z.Width;
-                    float azF = (float)z.Azimuth;
-
-                    var (lonLo, lonHi) = FloatToWordsWS(lonF);
-                    var (latLo, latHi) = FloatToWordsWS(latF);
-                    var (heightLo, heightHi) = FloatToWordsWS(heightF);
-                    var (widthLo, widthHi) = FloatToWordsWS(widthF);
-                    var (azLo, azHi) = FloatToWordsWS(azF);
-
-                    // Přidat registry do seznamu (adresa musí být souvislá!)
-                    allRegisters.Add((zoneBase, lonLo));
-                    allRegisters.Add(((ushort)(zoneBase + 1), lonHi));
-                    allRegisters.Add(((ushort)(zoneBase + 2), latLo));
-                    allRegisters.Add(((ushort)(zoneBase + 3), latHi));
-                    allRegisters.Add(((ushort)(zoneBase + 4), heightLo));
-                    allRegisters.Add(((ushort)(zoneBase + 5), heightHi));
-                    allRegisters.Add(((ushort)(zoneBase + 6), widthLo));
-                    allRegisters.Add(((ushort)(zoneBase + 7), widthHi));
-                    allRegisters.Add(((ushort)(zoneBase + 8), azLo));
-                    allRegisters.Add(((ushort)(zoneBase + 9), azHi));
-                }
-
-                Console.WriteLine($"[ZONE] Total registers to write: {allRegisters.Count}");
+                Console.WriteLine(
+                $"[ZONE] Total registers to write: {completeBlock.Length}");
 
                 // Rozdělit do dávek po 50
                 int offset = 0;
-                while (offset < allRegisters.Count)
+
+                while (offset < completeBlock.Length)
                 {
-                    // Re-unlock
-                    var (ruOk, ruSt, ruErr) = await WriteHoldingRegistersRtuAsync(s, unitId, UNLOCK_REGISTER, new[] { UNLOCK_VALUE }, timeoutMs);
-                    if (!ruOk || ruSt != ModbusStateCode.Success)
-                        return (false, ruSt, $"Re-unlock failed: {ruErr}");
+                    var (ruOk, ruSt, ruErr) =
+                        await WriteHoldingRegistersRtuAsync(
+                            s,
+                            unitId,
+                            UNLOCK_REGISTER,
+                            new[] { UNLOCK_VALUE },
+                            timeoutMs);
+
+                    if (!ruOk ||
+                        ruSt != ModbusStateCode.Success)
+                    {
+                        return (
+                            false,
+                            ruSt,
+                            $"Re-unlock failed: {ruErr}");
+                    }
+
                     await Task.Delay(250);
 
-                    // Zjistit velikost dávky
-                    int chunkSize = Math.Min(MAX_REGS_PER_CHUNK, allRegisters.Count - offset);
-                    ushort startAddr = allRegisters[offset].addr;
-                    int actualChunkSize = 1;
+                    int chunkSize = Math.Min(
+                        MAX_REGS_PER_CHUNK,
+                        completeBlock.Length - offset);
 
-                    for (int i = 1; i < chunkSize; i++)
+                    ushort startAddr =
+                        (ushort)(firstZoneBase + offset);
+
+                    var chunkData =
+                        new ushort[chunkSize];
+
+                    Array.Copy(
+                        completeBlock,
+                        offset,
+                        chunkData,
+                        0,
+                        chunkSize);
+
+                    progress?.Report((
+                        offset,
+                        completeBlock.Length,
+                        $"Writing registers " +
+                        $"{offset}/{completeBlock.Length}"));
+
+                    var (wok, wst, werr) =
+                        await WriteHoldingRegistersRtuAsync(
+                            s,
+                            unitId,
+                            startAddr,
+                            chunkData,
+                            timeoutMs);
+
+                    if (!wok ||
+                        wst != ModbusStateCode.Success)
                     {
-                        if (allRegisters[offset + i].addr != startAddr + i)
-                            break;
-                        actualChunkSize++;
+                        return (
+                            false,
+                            wst,
+                            $"Batch write failed at " +
+                            $"0x{startAddr:X4}: {werr}");
                     }
 
-                    var chunkData = new ushort[actualChunkSize];
-                    for (int i = 0; i < actualChunkSize; i++)
-                    {
-                        chunkData[i] = allRegisters[offset + i].value;
-                    }
+                    offset += chunkSize;
 
-                    Console.WriteLine($"[WRITE] Writing RS485 batch: {actualChunkSize} regs from 0x{startAddr:X4}");
-
-                    // Report progress
-                    progress?.Report((offset, allRegisters.Count, $"[WRITE] Writing registers {offset}/{allRegisters.Count}..."));
-
-                    // Zápis
-                    var (wok, wst, werr) = await WriteHoldingRegistersRtuAsync(s, unitId, startAddr, chunkData, timeoutMs);
-                    if (!wok || wst != ModbusStateCode.Success)
-                    {
-                        Console.WriteLine($"[WRITE] FAILED: {werr}");
-                        return (false, wst, $"Batch write failed: {werr}");
-                    }
-
-                    Console.WriteLine($"[WRITE] OK");
-                    offset += actualChunkSize;
                     await Task.Delay(150);
                 }
 
                 // Lock
-                progress?.Report((allRegisters.Count, allRegisters.Count, "Locking device..."));
+                progress?.Report((
+                    completeBlock.Length,
+                    completeBlock.Length,
+                    "Locking device..."));
                 await WriteHoldingRegistersRtuAsync(s, unitId, UNLOCK_REGISTER, new[] { (ushort)0 }, timeoutMs);
 
                 Console.WriteLine("\n=== ALL ZONES WRITTEN (BATCHED RS485) ===");
@@ -1594,31 +1675,53 @@ namespace V2XController
             Close();
         }
 
-        private void SelectComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        private void SelectComboBox_SelectionChanged(
+            object sender,
+            SelectionChangedEventArgs e)
         {
-            if (_suppressProfileChange) return;
+            if (_suppressProfileChange)
+                return;
 
-            var name = SelectComboBox.SelectedItem as string;
-            if (string.IsNullOrWhiteSpace(name)) return;
-            var prof = _profiles.FirstOrDefault(p => p.Name == name);
-            if (prof == null) return;
+            var name =
+                SelectComboBox.SelectedItem as string;
+
+            if (string.IsNullOrWhiteSpace(name))
+                return;
+
+            var prof =
+                _profiles.FirstOrDefault(p => p.Name == name);
+
+            if (prof == null)
+                return;
 
             if (!TryOfferSaveChangesIfDirty())
             {
-                // Revert selection
                 _suppressProfileChange = true;
-                if (!string.IsNullOrWhiteSpace(_loadedProfileName) && _profiles.Any(p => p.Name == _loadedProfileName))
-                    SelectComboBox.SelectedItem = _loadedProfileName;
+
+                if (!string.IsNullOrWhiteSpace(_loadedProfileName) &&
+                    _profiles.Any(
+                        p => p.Name == _loadedProfileName))
+                {
+                    SelectComboBox.SelectedItem =
+                        _loadedProfileName;
+                }
                 else if (_profiles.Count > 0)
+                {
                     SelectComboBox.SelectedIndex = 0;
+                }
                 else
+                {
                     SelectComboBox.SelectedItem = null;
+                }
+
                 _suppressProfileChange = false;
                 return;
             }
 
             PopulateForm(prof.Settings);
             CaptureLoadedSnapshot(prof.Settings, prof.Name);
+
+            SaveWindowState();
         }
 
         private void SaveButton_Click(object sender, RoutedEventArgs e)
@@ -1732,7 +1835,13 @@ namespace V2XController
             }
         }
 
-        private void ConnectionComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e) => ApplyConnectionLayout();
+        private void ConnectionComboBox_SelectionChanged(
+            object sender,
+            SelectionChangedEventArgs e)
+        {
+            ApplyConnectionLayout();
+            SaveWindowState();
+        }
 
         private void ApplyConnectionLayout()
         {
@@ -7151,6 +7260,88 @@ namespace V2XController
             }
 
             throw new TimeoutException("Modbus ASCII read timed out.");
+        }
+
+        private static ushort[] BuildCompleteZoneRegisterBlock(
+    IReadOnlyList<ActivationZone> zones,
+    ushort writeOffset)
+        {
+            bool isWlc = writeOffset == MPCv3WLC_WRITE_OFFSET;
+
+            int mainCount = isWlc ? 4 : 5;
+            int subsPerMain = isWlc ? 5 : 7;
+
+            int totalZoneSlots = mainCount * subsPerMain;
+            int totalRegisters = totalZoneSlots * MPC_ZONE_STRIDE;
+
+            // Všechny neexistující zóny budou automaticky nulové
+            var registers = new ushort[totalRegisters];
+
+            foreach (var z in zones)
+            {
+                int mainZone = z.MainZone;
+                int subZone = z.SubZone;
+
+                if (mainZone < 0 ||
+                    mainZone >= mainCount ||
+                    subZone < 0 ||
+                    subZone >= subsPerMain)
+                {
+                    Console.WriteLine(
+                        $"[ZONE] Skipping invalid zone " +
+                        $"{mainZone}-{subZone}");
+
+                    continue;
+                }
+
+                int zoneIndex =
+                    mainZone * subsPerMain + subZone;
+
+                int registerIndex =
+                    zoneIndex * MPC_ZONE_STRIDE;
+
+                var (lonLo, lonHi) =
+                    FloatToWordsWS((float)z.Longitude);
+
+                var (latLo, latHi) =
+                    FloatToWordsWS((float)z.Latitude);
+
+                var (heightLo, heightHi) =
+                    FloatToWordsWS((float)z.Height);
+
+                var (widthLo, widthHi) =
+                    FloatToWordsWS((float)z.Width);
+
+                var (azLo, azHi) =
+                    FloatToWordsWS((float)z.Azimuth);
+
+                registers[registerIndex + 0] = lonLo;
+                registers[registerIndex + 1] = lonHi;
+
+                registers[registerIndex + 2] = latLo;
+                registers[registerIndex + 3] = latHi;
+
+                registers[registerIndex + 4] = heightLo;
+                registers[registerIndex + 5] = heightHi;
+
+                registers[registerIndex + 6] = widthLo;
+                registers[registerIndex + 7] = widthHi;
+
+                registers[registerIndex + 8] = azLo;
+                registers[registerIndex + 9] = azHi;
+
+                Console.WriteLine(
+                    $"[ZONE] Added zone " +
+                    $"{mainZone + 1}-{subZone + 1}, " +
+                    $"slot={zoneIndex}");
+            }
+
+            Console.WriteLine(
+                $"[ZONE] Complete block built: " +
+                $"{totalZoneSlots} slots, " +
+                $"{totalRegisters} registers");
+
+            return registers;
         }
 
         private static string BuildAsciiRequest(byte slave, byte function, ReadOnlySpan<byte> pdu)

@@ -379,7 +379,7 @@
 
         <!-- Activation Zones Table - Bottom -->
         <GroupBox Header="Activation Zones" Padding="10" HorizontalAlignment="Left" 
-          MaxWidth="790" Width="790" Margin="2,0,0,5" VerticalAlignment="Bottom">
+          MaxWidth="790" Width="790" Margin="0,0,0,10" VerticalAlignment="Bottom">
             <StackPanel>
                 <ScrollViewer HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Disabled">
                     <DataGrid x:Name="ActivationZonesDataGrid"
@@ -467,6 +467,7 @@
                 </Style>
             </Button.Style>
         </Button>
+        <Label Content="Build Version: 3.1.8" FontWeight="Bold" HorizontalAlignment="Left" Height="26" Margin="340,738,0,0" VerticalAlignment="Top" Width="125"/>
 
     </Grid>
 </Window>

@@ -30,7 +30,7 @@ using Windows.UI.Composition;
 /**********************************************************************************************************
  * V2X Controller - MainWindow.xaml.cs
  * Author: Michal Švrček
- * Version: 3.1.2
+ * Version: 3.1.6
  * Description: Main window logic of the V2X Controller application. Handles map display, user interactions, 
  *              CAM/SRV message processing, and activation zone management. Provides a visual interface 
  *              for monitoring and controlling V2X communications in real-time. 
@@ -107,6 +107,14 @@ namespace V2XController
         private const int RecentLocalWritesMax = 16;
 
         private const int MaxCachedTiles = 2000;
+        private readonly List<string> recordedCamMessages = new();
+        private readonly List<string> recordedSrvMessages = new();
+        private const int MaxRecordedCamMessages = 300;
+        private const int MaxRecordedSrvMessages = 60;
+        private readonly object _camBufferLock = new();
+        private readonly object _srvBufferLock = new();
+
+        private DispatcherTimer? _dumpTimer;
 
         //tram table
         public ObservableCollection<TramInfo> TramTable { get; set; }
@@ -163,8 +171,6 @@ namespace V2XController
         private readonly Dictionary<Polyline, List<System.Windows.Shapes.Path>> _polylineVisualGroups = new();
         private readonly Dictionary<ActivationZone, System.Windows.Shapes.Path> _segmentToVisualPath = new();
         private readonly Dictionary<ActivationZone, List<Ellipse>> _segmentToCircles = new();
-
-        private List<string> recordedCamMessages = new();
 
         private enum DrawingMode
         {
@@ -399,9 +405,6 @@ namespace V2XController
         // add near other small constants/fields inside MainWindow
         private static readonly TimeSpan ReplayVisibilityTimeout = TimeSpan.FromSeconds(23);
         private int _maxTrailLength = 6; // max number of segments (points = segments + 1)
-
-        // near other buffers
-        private List<string> recordedSrvMessages = new();
 
         // SRV replay containers (near other replay fields)
         private readonly Dictionary<string, List<(TimeSpan ts, double lat, double lon)>> _replaySrvFramesById = new();
@@ -649,8 +652,20 @@ namespace V2XController
                                  $"Zoom: {zoom} | " +
                                  $"Conn: {connStatus} | " +
                                  $"Status: {playStatus} | " +
-                                 $"Zones: {ActivationZonesCollection.Count} | " +
-                                 $"Vehicles: {activeVehicles.Count}");
+                                 $"Zones: {ActivationZonesCollection.Count}");
+                Console.WriteLine(
+                    $"MEMCHECK | " +
+                    $"Canvas={TileCanvas.Children.Count}, " +
+                    $"activeVehicles={activeVehicles.Count}, " +
+                    $"vehicleColorMap={vehicleColorMap.Count}, " +
+                    $"lastLatLon={_lastLatLon.Count}, " +
+                    $"lastHeading={_lastHeadingLive.Count}, " +
+                    $"boxes={_vehicleBoxes.Count}, " +
+                    $"accTexts={_liveAccuracyTextById.Count}, " +
+                    $"cleanupTokens={vehicleTrailCleanupTokens.Count}, " +
+                    $"camBuf={recordedCamMessages.Count}, " +
+                    $"srvBuf={recordedSrvMessages.Count}"
+                );
             };
 
             _heartbeatTimer.Start();
@@ -668,6 +683,19 @@ namespace V2XController
 
             // timer for cleanup of old vehicles
             StartCleanupTimer();
+
+            _dumpTimer = new DispatcherTimer
+            {
+                Interval = TimeSpan.FromSeconds(60)
+            };
+
+            _dumpTimer.Tick += async (s, e) =>
+            {
+                await DumpCamBufferAsync("timer");
+                await DumpSrvBufferAsync("timer");
+            };
+
+            _dumpTimer.Start();
 
             // cam timer 
             camTimer = new DispatcherTimer();
@@ -837,10 +865,7 @@ namespace V2XController
 
 
             //check if the points are still active (65 seconds)
-            var cleanupTimer = new DispatcherTimer();
-            cleanupTimer.Interval = TimeSpan.FromSeconds(5);
-            cleanupTimer.Tick += CleanupOldVehicles;
-            cleanupTimer.Start();
+            StartCleanupTimer();
 
             //point connection line
             TileCanvas.Children.Add(connectionLine);
@@ -907,8 +932,42 @@ namespace V2XController
                     }
                 }
             }
+
+            StopTimer(_heartbeatTimer);
+            StopTimer(camTimer);
+            StopTimer(cleanupTimer, CleanupOldVehicles);
+            StopTimer(_srvTimer);
+            StopTimer(_timeshiftUiTimer);
+
+            _tileCts?.Cancel();
+            _tileCts?.Dispose();
+            _tileCts = null;
+
+            _timeshiftPlaybackCts?.Cancel();
+            _timeshiftPlaybackCts?.Dispose();
+
+            _ = DumpCamBufferAsync("closing");
+            _ = DumpSrvBufferAsync("closing");
+
+            foreach (var cts in vehicleTrailCleanupTokens.Values)
+            {
+                cts.Cancel();
+                cts.Dispose();
+            }
+
+            vehicleTrailCleanupTokens.Clear();
         }
 
+        private void StopTimer(DispatcherTimer? timer, EventHandler? handler = null)
+        {
+            if (timer == null)
+                return;
+
+            timer.Stop();
+
+            if (handler != null)
+                timer.Tick -= handler;
+        }
 
         /// <summary>
         /// Loads available COM ports into the dropdown. Called on startup and when refreshing the list.
@@ -943,6 +1002,60 @@ namespace V2XController
             }
 
             RadiusComboBox.SelectedItem = item;
+        }
+
+        private async Task DumpCamBufferAsync(string reason)
+        {
+            List<string> batch;
+
+            lock (_camBufferLock)
+            {
+                if (recordedCamMessages.Count == 0)
+                    return;
+
+                batch = recordedCamMessages.ToList();
+                recordedCamMessages.Clear();
+            }
+
+            await DumpMessagesAsync("CAM", batch, reason);
+        }
+
+        private async Task DumpSrvBufferAsync(string reason)
+        {
+            List<string> batch;
+
+            lock (_srvBufferLock)
+            {
+                if (recordedSrvMessages.Count == 0)
+                    return;
+
+                batch = recordedSrvMessages.ToList();
+                recordedSrvMessages.Clear();
+            }
+
+            await DumpMessagesAsync("SRV", batch, reason);
+        }
+
+        private async Task DumpMessagesAsync(string type, List<string> batch, string reason)
+        {
+            try
+            {
+                string dir = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "message_dumps");
+                Directory.CreateDirectory(dir);
+
+                string file = System.IO.Path.Combine(
+                    dir,
+                    $"{type}_{DateTime.Now:yyyyMMdd_HHmmss_fff}_{reason}_{batch.Count}.log"
+                );
+
+                await System.IO.File.WriteAllLinesAsync(file, batch);
+
+                Console.WriteLine($"[{type} DUMP] {batch.Count} messages dumped because of {reason}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[{type} DUMP ERR] {ex.Message}");
+            }
         }
 
 
@@ -6558,6 +6671,7 @@ namespace V2XController
             _ = RemoveDrawnTramTrailGradually(idx, tram, cts.Token);
         }
 
+        // mozna memory leak
         private async Task RemoveDrawnTramTrailGradually(int idx, MapPoint tram, CancellationToken token)
         {
             string key = $"drawn_{idx}_trail";
@@ -6565,10 +6679,12 @@ namespace V2XController
             try
             {
                 bool continueRemoving = true;
+
                 while (continueRemoving)
                 {
                     continueRemoving = false;
-                    Dispatcher.Invoke(() =>
+
+                    await Dispatcher.InvokeAsync(() =>
                     {
                         var trail = drawnTramTrails[idx];
 
@@ -6598,29 +6714,24 @@ namespace V2XController
 
                 await Task.Delay(1000, token);
 
-                Dispatcher.Invoke(() =>
+                await Dispatcher.InvokeAsync(() =>
                 {
                     if (token.IsCancellationRequested)
                         return;
 
-                    if (!vehicleTrailCleanupTokens.TryGetValue(key, out var activeCts) || activeCts.Token != token)
-                        return;
-
-                    if (tram.Ellipse != null) tram.Ellipse.Visibility = Visibility.Collapsed;
-                    if (tram.Text != null) tram.Text.Visibility = Visibility.Collapsed;
-                    if (tram.Speed != null) tram.Speed.Visibility = Visibility.Collapsed;
-
-                    string manualId = drawnTramIds[idx];
-                    if (_vehicleBoxes.TryGetValue(manualId, out var box))
-                        box.Visibility = Visibility.Collapsed;
-
-                    vehicleTrailCleanupTokens.Remove(key);
                     RemoveDrawnTramCompletely(idx, tram);
                 });
             }
             catch (TaskCanceledException)
             {
-                // Cancelled — token already removed by the cancelling caller, nothing to do here
+            }
+            finally
+            {
+                if (vehicleTrailCleanupTokens.TryGetValue(key, out var cts))
+                {
+                    cts.Dispose();
+                    vehicleTrailCleanupTokens.Remove(key);
+                }
             }
         }
 
@@ -6735,50 +6846,132 @@ namespace V2XController
         {
             Dispatcher.Invoke(() =>
             {
+                string tramId = drawnTramIds[idx];
+
                 if (tram.Ellipse != null)
                     TileCanvas.Children.Remove(tram.Ellipse);
+
                 if (tram.Text != null)
                     TileCanvas.Children.Remove(tram.Text);
-                if (drawnTramTrails[idx] != null)
-                    TileCanvas.Children.Remove(drawnTramTrails[idx]);
-                if (tram.TrailDots != null)
-                {
-                    foreach (var dot in tram.TrailDots)
-                        TileCanvas.Children.Remove(dot);
-                    tram.TrailDots.Clear();
-                }
 
                 if (tram.Speed != null)
                     TileCanvas.Children.Remove(tram.Speed);
 
+                if (drawnTramTrails[idx] != null)
+                {
+                    TileCanvas.Children.Remove(drawnTramTrails[idx]);
+                    drawnTramTrails[idx] = null;
+                }
+
+                if (tram.TrailDots != null)
+                {
+                    foreach (var dot in tram.TrailDots.ToList())
+                        TileCanvas.Children.Remove(dot);
+
+                    tram.TrailDots.Clear();
+                }
+
+                if (_vehicleBoxes.TryGetValue(tramId, out var box))
+                {
+                    TileCanvas.Children.Remove(box);
+                    _vehicleBoxes.Remove(tramId);
+                }
+
+                if (_liveAccuracyTextById.TryGetValue(tramId, out var accText))
+                {
+                    TileCanvas.Children.Remove(accText);
+                    _liveAccuracyTextById.Remove(tramId);
+                }
+
+                var accCircles = TileCanvas.Children
+                    .OfType<Ellipse>()
+                    .Where(e => e.Tag is string tag && tag == $"live_acc_{tramId}")
+                    .ToList();
+
+                foreach (var circle in accCircles)
+                    TileCanvas.Children.Remove(circle);
+
                 drawnTramTrailPoints[idx].Clear();
                 drawnTramTrailGeoPoints[idx].Clear();
+
                 drawnTramLat[idx] = null;
                 drawnTramLon[idx] = null;
                 drawnTrams[idx] = null;
 
-                // Fix: cancel the correct token key for drawn trams
-                var tramKey = $"drawn_{idx}_trail";
-                if (vehicleTrailCleanupTokens.TryGetValue(tramKey, out var cts))
-                {
-                    cts.Cancel();
-                    cts.Dispose();
-                    vehicleTrailCleanupTokens.Remove(tramKey);
-                }
+                _lastLatLon.Remove(tramId);
+                _lastHeadingLive.Remove(tramId);
+                _lastLiveAccuracyById.Remove(tramId);
+                activeVehicles.Remove(tramId);
+                vehicleColorMap.Remove(tramId);
+                lastCamUpdates.Remove(tramId);
+                lastCamTimes.Remove(tramId);
+                prevCamTimes.Remove(tramId);
 
-                var tramInfo = TramTable.FirstOrDefault(t => t.VehicleId == (tram.Label.Length > 4 ? tram.Label[^4..] : tram.Label));
+                string shortId = tramId.Length >= 4 ? tramId[^4..] : tramId;
+
+                var tramInfo = TramTable.FirstOrDefault(t => t.VehicleId == shortId);
                 if (tramInfo != null)
                     TramTable.Remove(tramInfo);
 
-                var manualId = drawnTramIds[idx];
-                if (_vehicleBoxes.TryGetValue(manualId, out var bodyRect))
+                string tokenKey = $"drawn_{idx}_trail";
+                if (vehicleTrailCleanupTokens.TryGetValue(tokenKey, out var cts))
                 {
-                    TileCanvas.Children.Remove(bodyRect);
-                    _vehicleBoxes.Remove(manualId);
+                    cts.Cancel();
+                    cts.Dispose();
+                    vehicleTrailCleanupTokens.Remove(tokenKey);
                 }
             });
         }
 
+        private void AddCamToBuffer(string message)
+        {
+            bool shouldDump = false;
+
+            lock (_camBufferLock)
+            {
+                recordedCamMessages.Add(message);
+                shouldDump = recordedCamMessages.Count >= MaxRecordedCamMessages;
+            }
+
+            if (shouldDump)
+                _ = DumpCamBufferAsync("limit");
+        }
+
+        private void AddSrvToBuffer(string message)
+        {
+            bool shouldDump = false;
+
+            lock (_srvBufferLock)
+            {
+                recordedSrvMessages.Add(message);
+                shouldDump = recordedSrvMessages.Count >= MaxRecordedSrvMessages;
+            }
+
+            if (shouldDump)
+                _ = DumpSrvBufferAsync("limit");
+        }
+
+        private async Task DumpCamBatchAsync(List<string> batch)
+        {
+            try
+            {
+                string dir = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "cam_dumps");
+                Directory.CreateDirectory(dir);
+
+                string file = System.IO.Path.Combine(
+                    dir,
+                    $"cam_{DateTime.Now:yyyyMMdd_HHmmss_fff}.log"
+                );
+
+                await File.WriteAllLinesAsync(file, batch);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[CAM DUMP ERR] {ex.Message}");
+            }
+        }
+
+        // mozna memory leak
         /// <summary>
         /// Gradually removes a vehicle's trail from the map.
         /// </summary>
@@ -7324,7 +7517,7 @@ namespace V2XController
                 if (camMessagesElement != null)
                 {
                     foreach (var camElem in camMessagesElement.Elements("CAM"))
-                        recordedCamMessages.Add(camElem.ToString(SaveOptions.DisableFormatting));
+                        AddCamToBuffer(camElem.ToString(SaveOptions.DisableFormatting));
                 }
 
                 isDirty = false;
@@ -7833,7 +8026,7 @@ namespace V2XController
                         {
                             // Ulož raw protobuf řádek z COM portu do bufferu nahrávky
                             if (_timeshiftEnabled)
-                                recordedCamMessages.Add(rawLine.Trim());
+                                AddRecordedCamMessage(rawLine.Trim());
 
                             Dispatcher.Invoke(() =>
                             {
@@ -7893,7 +8086,7 @@ namespace V2XController
                             {
                                 bool valid = IsValidCamMessage(rawXml);
                                 if (_timeshiftEnabled && valid && !(msg.VehicleID?.StartsWith("000000") ?? false))
-                                    recordedCamMessages.Add(rawXml);
+                                    AddCamToBuffer(rawXml);
 
                                 Dispatcher.Invoke(() =>
                                 {
@@ -7909,7 +8102,7 @@ namespace V2XController
                             else if (msg.MessageType == "SRV")
                             {
                                 if (_timeshiftEnabled)
-                                    recordedSrvMessages.Add(rawXml);
+                                    AddSrvToBuffer(rawXml);
                             }
 
                             if (_timeshiftEnabled && _timeshiftPaused)
@@ -9334,7 +9527,7 @@ namespace V2XController
                     if (camMessagesElement != null)
                     {
                         foreach (var camElem in camMessagesElement.Elements("CAM"))
-                            recordedCamMessages.Add(camElem.ToString(SaveOptions.DisableFormatting));
+                            AddCamToBuffer(camElem.ToString(SaveOptions.DisableFormatting));
                     }
 
                     isDirty = false;
@@ -10313,6 +10506,9 @@ namespace V2XController
         /// </summary>
         private void StartCleanupTimer()
         {
+            if (cleanupTimer != null)
+                return;
+
             cleanupTimer = new DispatcherTimer();
             cleanupTimer.Interval = TimeSpan.FromSeconds(1);
             cleanupTimer.Tick += CleanupOldVehicles;
@@ -11677,6 +11873,11 @@ namespace V2XController
                     StopSrvAutoTimer();
                     _isConnected = false;
                     UpdateUiEnabledState();
+                    serialPort?.Dispose();
+                    serialPort = null;
+                    recordedCamMessages.Clear();
+                    recordedSrvMessages.Clear();
+                    _terminalBuffer.Clear();
                     Console.WriteLine($"[DISCONNECT] User disconnected from selected serial port.");
                     MessageBox.Show("Disconnected from serial port.");
 
@@ -12891,7 +13092,7 @@ namespace V2XController
 
             if (_timeshiftEnabled)
             {
-                recordedSrvMessages.Add(xml);
+                AddSrvToBuffer(xml);
             }
 
             try
@@ -12984,6 +13185,17 @@ namespace V2XController
             CircleCheckBox?.SetValue(IsEnabledProperty, _isConnected);
             PrevCam?.SetValue(IsEnabledProperty, _playbackLoaded);
             NextCam?.SetValue(IsEnabledProperty, _playbackLoaded);
+        }
+
+        private void AddRecordedCamMessage(string msg)
+        {
+            AddCamToBuffer(msg);
+
+            if (recordedCamMessages.Count > MaxRecordedCamMessages)
+            {
+                int removeCount = recordedCamMessages.Count - MaxRecordedCamMessages;
+                recordedCamMessages.RemoveRange(0, removeCount);
+            }
         }
 
 
@@ -14156,7 +14368,9 @@ namespace V2XController
             {
                 try
                 {
-                    var prevZone = activationZones.Values.FirstOrDefault(z => ReferenceEquals(z.Rectangle, _highlightedRect));
+                    var prevZone = activationZones.Values
+                        .FirstOrDefault(z => ReferenceEquals(z.Rectangle, _highlightedRect));
+
                     var correctBrush = prevZone != null
                         ? (TryBrushFromColor(prevZone.Color) ?? Brushes.Red)
                         : (_highlightedRectOldBrush ?? _highlightedRect.Stroke);
@@ -14164,11 +14378,26 @@ namespace V2XController
                     _highlightedRect.Stroke = correctBrush;
 
                     bool wasActive = prevZone?.IsActive == true;
-                    _highlightedRect.StrokeThickness = wasActive ? 6 : (_highlightedRectOldThickness > 0 ? _highlightedRectOldThickness : 2);
+
+                    _highlightedRect.StrokeThickness = wasActive
+                        ? 6
+                        : (_highlightedRectOldThickness > 0
+                            ? _highlightedRectOldThickness
+                            : 2);
+
+                    if (_zoneArrows.TryGetValue(_highlightedRect, out var oldArrow))
+                    {
+                        oldArrow.Opacity = 0.20;
+                        oldArrow.StrokeThickness = 0.5;
+                        Panel.SetZIndex(oldArrow, 950);
+                    }
 
                     Panel.SetZIndex(_highlightedRect, 100);
                 }
-                catch { }
+                catch
+                {
+                }
+
                 _highlightedRect = null;
                 _highlightedRectOldBrush = null;
                 _highlightedRectOldThickness = 0;
@@ -14202,34 +14431,72 @@ namespace V2XController
             return new SolidColorBrush(Color.FromArgb(alpha, c.R, c.G, c.B));
         }
 
-        private void EmphasizeZoneWithOwnColor(ActivationZone zone, TimeSpan? revertAfter = null)
+        private void EmphasizeZoneWithOwnColor(
+            ActivationZone zone,
+            TimeSpan? revertAfter = null)
         {
-            if (zone?.Rectangle == null) return;
+            if (zone?.Rectangle == null)
+                return;
 
             var rect = zone.Rectangle;
             var brush = TryBrushFromColor(zone.Color) ?? Brushes.Red;
 
             rect.Stroke = brush;
 
-            bool isSelected = _highlightedRect == rect;
+            bool isSelected = ReferenceEquals(_highlightedRect, rect);
 
             rect.StrokeThickness = 6;
 
             if (!isSelected)
                 rect.Fill = MakeAlphaBrush((SolidColorBrush)brush, 40);
 
+            // zvýraznění šipky
+            EnsureZoneArrow(zone);
+
+            if (_zoneArrows.TryGetValue(rect, out var arrow))
+            {
+                arrow.Fill = brush;
+                arrow.Stroke = Brushes.Red;
+                arrow.StrokeThickness = 3;
+                arrow.Opacity = 1.0;
+
+                Panel.SetZIndex(arrow, 1001);
+            }
+
             if (revertAfter.HasValue && !isSelected)
             {
-                var t = new DispatcherTimer { Interval = revertAfter.Value };
+                var t = new DispatcherTimer
+                {
+                    Interval = revertAfter.Value
+                };
+
                 t.Tick += (s, e) =>
                 {
-                    ((DispatcherTimer)s).Stop();
+                    ((DispatcherTimer)s!).Stop();
+
                     if (zone.Rectangle != null && !zone.IsActive)
                     {
                         zone.Rectangle.StrokeThickness = 2;
                         zone.Rectangle.Fill = Brushes.Transparent;
+
+                        if (_zoneArrows.TryGetValue(
+                            zone.Rectangle,
+                            out var oldArrow))
+                        {
+                            var oldBrush =
+                                TryBrushFromColor(zone.Color)
+                                ?? Brushes.Gray;
+
+                            oldArrow.Fill = oldBrush;
+                            oldArrow.Stroke = oldBrush;
+                            oldArrow.StrokeThickness = 0.5;
+                            oldArrow.Opacity = 0.20;
+
+                            Panel.SetZIndex(oldArrow, 950);
+                        }
                     }
                 };
+
                 t.Start();
             }
 
@@ -17253,7 +17520,7 @@ namespace V2XController
                 if (_timeshiftEnabled)
                 {
                     var fakeXml = $@"<SRV lat=""{srvMsg.Latitude}"" lon=""{srvMsg.Longitude}"" />";
-                    recordedSrvMessages.Add(fakeXml);
+                    AddSrvToBuffer(fakeXml);
                 }
 
                 IncrementSrvOkCount();
