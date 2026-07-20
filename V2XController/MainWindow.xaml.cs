@@ -6380,43 +6380,40 @@ namespace V2XController
         /// <param name="e">The event data.</param>
         private void Rectangle_MouseEnter(object? sender, MouseEventArgs e)
         {
-            if (sender is not Rectangle rect) return;
-            if (_highlightedRect == rect) return;
+            if (sender is not Rectangle rect)
+                return;
+
+            if (_highlightedRect == rect)
+                return;
 
             bool isTableSelected =
-                (ActivationZonesDataGrid?.SelectedItem is ActivationZone az && ReferenceEquals(az.Rectangle, rect));
+                ActivationZonesDataGrid?.SelectedItem is ActivationZone az &&
+                ReferenceEquals(az.Rectangle, rect);
 
-            if (isTableSelected) return;
+            if (isTableSelected)
+                return;
 
             _highlightedRect = rect;
             _highlightedRectOldBrush = rect.Stroke;
             _highlightedRectOldThickness = rect.StrokeThickness;
 
-            var scale = new ScaleTransform(1.04, 1.04, rect.Width / 2.0, rect.Height / 2.0);
-            if (rect.RenderTransform is TransformGroup tg)
+            if (activationZones != null &&
+                activationZones.TryGetValue(rect, out var zone))
             {
-                if (!_rectHighlightScales.TryGetValue(rect, out _))
-                {
-                    tg.Children.Insert(0, scale);
-                    _rectHighlightScales[rect] = scale;
-                }
-            }
-            else
-            {
-                var newGroup = new TransformGroup();
-                newGroup.Children.Add(scale);
-                newGroup.Children.Add(rect.RenderTransform ?? Transform.Identity);
-                rect.RenderTransform = newGroup;
-                _rectHighlightScales[rect] = scale;
+                var brush = TryBrushFromColor(zone.Color) as SolidColorBrush
+                            ?? Brushes.Gray;
+
+                rect.Stroke = MakeAlphaBrush(brush, 255);
             }
 
-            if (activationZones != null && activationZones.TryGetValue(rect, out var zone))
+            if (_zoneArrows.TryGetValue(rect, out var arrow))
             {
-                var brush = TryBrushFromColor(zone.Color) ?? Brushes.Gray;
-                rect.Stroke = MakeAlphaBrush((SolidColorBrush)brush, 210);
+                arrow.Fill = rect.Stroke;
+                arrow.Opacity = 1.0;
             }
 
-            rect.StrokeThickness = Math.Max(1.0, rect.StrokeThickness) + 1.5;
+            rect.StrokeThickness = 
+                Math.Max(1.0, _highlightedRectOldThickness) + 1.5;
         }
 
         /// <summary>
@@ -6426,32 +6423,31 @@ namespace V2XController
         /// <param name="e">The event data.</param>
         private void Rectangle_MouseLeave(object? sender, MouseEventArgs e)
         {
-            if (sender is not Rectangle rect) return;
-            if (_highlightedRect != rect) return;
+            if (sender is not Rectangle rect)
+                return;
 
-            bool zoneIsActive = false;
-            if (activationZones.TryGetValue(rect, out var az))
-                zoneIsActive = az.IsActive;
+            if (_highlightedRect != rect)
+                return;
 
-            rect.Stroke = _highlightedRectOldBrush ?? rect.Stroke;
+            rect.Stroke = _highlightedRectOldBrush;
+            rect.StrokeThickness = _highlightedRectOldThickness;
 
-            rect.StrokeThickness = zoneIsActive ? 6 : _highlightedRectOldThickness;
-
-            if (rect.RenderTransform is TransformGroup tg && _rectHighlightScales.TryGetValue(rect, out var scale))
+            if (_zoneArrows.TryGetValue(rect, out var arrow))
             {
-                tg.Children.Remove(scale);
+                if (activationZones != null &&
+                    activationZones.TryGetValue(rect, out var zone))
+                {
+                    var brush = TryBrushFromColor(zone.Color) as SolidColorBrush ?? Brushes.Gray;
+                    arrow.Fill = brush;
+                }
 
-                if (tg.Children.Count == 1)
-                    rect.RenderTransform = tg.Children[0];
-                else
-                    rect.RenderTransform = tg;
-
-                _rectHighlightScales.Remove(rect);
+                arrow.Stroke = null;
+                arrow.StrokeThickness = 0;
+                arrow.Opacity = 0.20;
             }
 
             _highlightedRect = null;
             _highlightedRectOldBrush = null;
-            _highlightedRectOldThickness = 0;
         }
 
         /// <summary>
@@ -14456,7 +14452,7 @@ namespace V2XController
             if (_zoneArrows.TryGetValue(rect, out var arrow))
             {
                 arrow.Fill = brush;
-                arrow.Stroke = Brushes.Red;
+                arrow.Stroke = Brushes.Transparent;
                 arrow.StrokeThickness = 3;
                 arrow.Opacity = 1.0;
 
