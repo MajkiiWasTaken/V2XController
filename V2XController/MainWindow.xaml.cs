@@ -24,6 +24,7 @@ using System.Windows.Shapes;
 using System.Windows.Threading;
 using System.Xml;
 using System.Xml.Linq;
+using System.Management;
 using Windows.UI.Composition;
 
 
@@ -975,9 +976,33 @@ namespace V2XController
         private void LoadAvailableComPorts()
         {
             ComPortsComboBox.Items.Clear();
-            var ports = SerialPort.GetPortNames().OrderBy(p => p).ToArray();
-            foreach (var port in ports)
-                ComPortsComboBox.Items.Add(port);
+
+            using (var searcher = new ManagementObjectSearcher(
+                "SELECT Name FROM Win32_PnPEntity WHERE Name LIKE '%(COM%'"))
+            {
+                foreach (ManagementObject obj in searcher.Get())
+                {
+                    string displayName = obj["Name"]?.ToString();
+
+                    if (string.IsNullOrEmpty(displayName))
+                        continue;
+
+                    var match = System.Text.RegularExpressions.Regex.Match(
+                        displayName,
+                        @"\(COM\d+\)");
+
+                    if (!match.Success)
+                        continue;
+
+                    string portName = match.Value.Trim('(', ')');
+
+                    ComPortsComboBox.Items.Add(new ComPortInfo
+                    {
+                        PortName = portName,
+                        DisplayName = displayName
+                    });
+                }
+            }
 
             if (ComPortsComboBox.Items.Count > 0)
                 ComPortsComboBox.SelectedIndex = 0;
