@@ -25,7 +25,6 @@ using System.Windows.Threading;
 using System.Xml;
 using System.Xml.Linq;
 using System.Management;
-using Windows.UI.Composition;
 
 
 /**********************************************************************************************************
@@ -15112,8 +15111,6 @@ namespace V2XController
             }), DispatcherPriority.Background);
         }
 
-        // ADD this helper near ValidateSubzoneContinuity
-
 
         private void ExportButton_Click(object sender, RoutedEventArgs e)
         {
@@ -15147,7 +15144,8 @@ namespace V2XController
             if (!string.IsNullOrEmpty(errors))
             {
                 MessageBox.Show(
-                    "The order of zones is not valid:\n\n" + errors,
+                    "The order of zones is n" +
+                    "ot valid:\n\n" + errors,
                     "Checking zones",
                     MessageBoxButton.OK,
                     MessageBoxImage.Warning);

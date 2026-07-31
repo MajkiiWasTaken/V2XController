@@ -408,9 +408,11 @@ namespace V2XController
         private async void Start_Click(object sender, RoutedEventArgs e)
         {
             Settings = ExportSettings.FromWindow(this);
+            SetButtonActiveStates(ReadButton, false);
             if (Settings == null)
             {
                 MessageBox.Show("Missing export settings.", "Export", MessageBoxButton.OK, MessageBoxImage.Warning);
+                SetButtonActiveStates(ReadButton, false);
                 return;
             }
 
@@ -427,11 +429,13 @@ namespace V2XController
                 if (string.IsNullOrWhiteSpace(remoteHost))
                 {
                     MessageBox.Show("Remote host is required for the tunnel.", "Export", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    SetButtonActiveStates(ReadButton, false);
                     return;
                 }
                 if (!int.TryParse(TunnelRemotePortTextBox?.Text?.Trim(), out var remotePort) || remotePort <= 0 || remotePort > 65535)
                 {
                     MessageBox.Show("Remote port is invalid (1-65535).", "Export", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    SetButtonActiveStates(ReadButton, false);
                     return;
                 }
 
@@ -443,12 +447,14 @@ namespace V2XController
             if (!TryValidateSettings(Settings, out var validationError))
             {
                 MessageBox.Show(validationError, "Export - validation", MessageBoxButton.OK, MessageBoxImage.Warning);
+                SetButtonActiveStates(ReadButton, false);
                 return;
             }
 
             if (Owner is not MainWindow mw)
             {
                 MessageBox.Show("No main window owner.", "Export", MessageBoxButton.OK, MessageBoxImage.Error);
+                SetButtonActiveStates(ReadButton, false);
                 return;
             }
 
@@ -459,6 +465,7 @@ namespace V2XController
             if (zonesAct.Count == 0 && zonesSw.Count == 0)
             {
                 MessageBox.Show("No activation zones or switch zones to export.", "Export", MessageBoxButton.OK, MessageBoxImage.Information);
+                SetButtonActiveStates(ReadButton, false);
                 return;
             }
 
@@ -513,6 +520,7 @@ namespace V2XController
                         "Export Type Mismatch",
                         MessageBoxButton.OK,
                         MessageBoxImage.Error);
+                    SetButtonActiveStates(ReadButton, false);
                     return;
                 }
                 else
@@ -541,8 +549,10 @@ namespace V2XController
                 {
                     var shortPreview = string.Join(Environment.NewLine, report.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None).Take(15));
                     var msg = $"{zoneTypeName} look empty (all coordinates are zero or sizes are zero).\n\nContinue anyway?\n\n" + shortPreview;
+                    SetButtonActiveStates(ReadButton, false);
                     if (MessageBox.Show(msg, "Export preflight", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
                         return;
+
                 }
             }
 
@@ -592,12 +602,14 @@ namespace V2XController
                             await ShowMessageAfterBusyAsync(
                                 $"Tunnel export ({zoneTypeName}) failed: {actErr}\nTarget={displayEndpoint}, UnitId={unitId}",
                                 "Export", MessageBoxButton.OK, MessageBoxImage.Error);
+                            SetButtonActiveStates(ReadButton, false);
                             return;
                         }
 
                         await ShowMessageAfterBusyAsync(
                             $"Exported {zonesToExport.Count} {zoneTypeName} via tunnel to {displayEndpoint} (UnitId {unitId}).",
                             "Export", MessageBoxButton.OK, MessageBoxImage.Information);
+                        SetButtonActiveStates(ReadButton, false);
                     }
                     else
                     {
@@ -613,10 +625,12 @@ namespace V2XController
                                     $"Remote {displayEndpoint} responds as raw serial (no MBAP). This is a serial tunnel.\n\n" +
                                     "Select 'Serial tunnel' in the connection dropdown and try again.",
                                     "Tunnel", MessageBoxButton.OK, MessageBoxImage.Warning);
+                                SetButtonActiveStates(ReadButton, false);
                                 return;
                             }
 
                             await ShowMessageAfterBusyAsync($"No Modbus reply from {displayEndpoint} (UnitId {unitId}).\nDiag: {pingDiag}", "Export", MessageBoxButton.OK, MessageBoxImage.Warning);
+                            SetButtonActiveStates(ReadButton, false);
                             return;
                         }
 
@@ -638,12 +652,14 @@ namespace V2XController
                         {
                             await ShowMessageAfterBusyAsync($"Export ({zoneTypeName}) failed.\nTarget={displayEndpoint}, UnitId={unitId}",
                                 "Export", MessageBoxButton.OK, MessageBoxImage.Error);
+                            SetButtonActiveStates(ReadButton, false);
                             return;
                         }
 
                         await ShowMessageAfterBusyAsync(
                             $"Exported {zonesToExport.Count} {zoneTypeName} to {displayEndpoint} (UnitId {unitId}).",
                             "Export", MessageBoxButton.OK, MessageBoxImage.Information);
+                        SetButtonActiveStates(ReadButton, false);
                     }
                 }
                 // === SERIAL PORT (RS485) ===
@@ -661,12 +677,14 @@ namespace V2XController
                     {
                         var extra = string.IsNullOrWhiteSpace(err) ? "" : $" ({err})";
                         await ShowMessageAfterBusyAsync($"Export {zoneTypeName} over RS485 failed (state={st}){extra}.", "Export", MessageBoxButton.OK, MessageBoxImage.Error);
+                        SetButtonActiveStates(ReadButton, false);
                         return;
                     }
 
                     await ShowMessageAfterBusyAsync(
                         $"Exported {zonesToExport.Count} {zoneTypeName} over RS485 on {Settings.SerialPortName} (slave {slave}).",
                         "Export", MessageBoxButton.OK, MessageBoxImage.Information);
+                    SetButtonActiveStates(ReadButton, false);
                 }
             }
             catch (Exception ex)
@@ -677,6 +695,7 @@ namespace V2XController
 
                 var path = SaveExportError(ex, tcpLike ? (usingTunnel ? "Tunnel" : "TCP") : "RTU", target, uid, MPC_BASE_ADDR, 0, null);
                 await ShowMessageAfterBusyAsync($"Export error. Details were copied to clipboard and saved:\n{path}", "Export", MessageBoxButton.OK, MessageBoxImage.Error);
+                SetButtonActiveStates(ReadButton, false);
                 return;
             }
             finally
@@ -693,6 +712,8 @@ namespace V2XController
                     catch { }
                 }
             }
+
+            SetButtonActiveStates(ReadButton, false);
         }
 
         private static bool WriteMpcZonesBatchedWithProgress(
@@ -3588,6 +3609,7 @@ namespace V2XController
 
         private async void ReadButton_Click(object sender, RoutedEventArgs e)
         {
+            SetButtonActiveStates(Start, false); // set inactive state of a start button
             Settings = ExportSettings.FromWindow(this);
             if (Settings == null)
             {
@@ -3664,11 +3686,13 @@ namespace V2XController
                     else
                     {
                         Console.WriteLine($"[WARN] Unknown device type: {reg0Value}");
+                        Start?.SetValue(IsEnabledProperty, false);
                     }
                 }
                 else
                 {
                     Console.WriteLine($"[WARN] WARNING: Failed to read register 0x0000: {error}");
+                    Start?.SetValue(IsEnabledProperty, false);
                 }
             }
             catch (Exception diagEx)
@@ -3725,6 +3749,7 @@ namespace V2XController
                     var port = Settings.TcpPort ?? 502;
                     if (string.IsNullOrWhiteSpace(host))
                     {
+                        SetButtonActiveStates(Start, false);
                         await ShowMessageAfterBusyAsync("Modbus TCP host is required.", "Read", MessageBoxButton.OK, MessageBoxImage.Warning);
                         return;
                     }
@@ -3737,6 +3762,7 @@ namespace V2XController
                         var result = await ReadZonesRtuOverTcpWithProgressAsync(hostOnly, port, unitId, 5000, progress);
                         if (!result.ok)
                         {
+                            SetButtonActiveStates(Start, false);
                             await ShowMessageAfterBusyAsync($"Failed to read zones via tunnel: {result.error}", "Read", MessageBoxButton.OK, MessageBoxImage.Error);
                             return;
                         }
@@ -3748,6 +3774,7 @@ namespace V2XController
                         var result = await Task.Run(() => ReadZonesFromModbusTcpWorker(hostOnly, port, unitId, asSerialTcp: false));
                         if (!result.ok)
                         {
+                            SetButtonActiveStates(Start, false);
                             await ShowMessageAfterBusyAsync($"Failed to read zones via TCP: {result.error}", "Read", MessageBoxButton.OK, MessageBoxImage.Error);
                             return;
                         }
@@ -3760,7 +3787,14 @@ namespace V2XController
                     var (ok, readZones, err) = await ReadZonesFromModbusRtuWorkerAsyncWithProgress(unitId, progress);
                     if (!ok)
                     {
-                        await ShowMessageAfterBusyAsync($"Failed to read zones via RS485: {err}", "Read", MessageBoxButton.OK, MessageBoxImage.Error);
+                        SetButtonActiveStates(Start, true);
+
+                        await ShowMessageAfterBusyAsync(
+                            $"Failed to read zones via RS485: {err}",
+                            "Read",
+                            MessageBoxButton.OK,
+                            MessageBoxImage.Error);
+
                         return;
                     }
                     zones = readZones;
@@ -3777,19 +3811,30 @@ namespace V2XController
                         }
                     });
 
+                    SetButtonActiveStates(Start, false);
                     await ShowMessageAfterBusyAsync(
                         $"Successfully read {zones.Count} zone(s) from {(isTcp ? "TCP" : "RS485")}.",
                         "Read", MessageBoxButton.OK, MessageBoxImage.Information);
+
                 }
             }
             catch (Exception ex)
             {
-                await ShowMessageAfterBusyAsync($"Read error: {ex.Message}", "Read", MessageBoxButton.OK, MessageBoxImage.Error);
+                SetButtonActiveStates(Start, false);
+
+                await ShowMessageAfterBusyAsync(
+                    $"Read error {ex.Message}",
+                    "Read",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Error);
             }
             finally
             {
                 HideBusy();
+                Start?.SetValue(IsEnabledProperty, false);
             }
+
+            
         }
 
         private async Task<(bool success, string value, string? error)> ReadRegister0x0000AsStringAsync()
@@ -7426,6 +7471,30 @@ namespace V2XController
             return (true, slave, func, payload, null);
         }
 
+
+        private static void SetButtonActiveStates(Button button, bool val)
+        {
+            /*zjistit jaky okno je otevreny
+             zjistit jestli se zaktivovalo tlacitko a forcenout ho do stavu vypnuto
+            pro reinit je to podle toho jestli bylo otevreny read a nebo export
+             */
+            Window? activeWindow = CheckActiveWindow();
+
+
+            if (activeWindow is ExportWindow exportWindow)
+            {
+                button.IsEnabled = val;
+                return;
+            }
+            
+            
+        }
+
+        private static Window? CheckActiveWindow()
+        {
+            return Application.Current.Windows.OfType<Window>().FirstOrDefault(w => w.IsActive);
+
+        }
 
     }
 }

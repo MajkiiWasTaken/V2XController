@@ -5,7 +5,6 @@ using System.Text;
 using System.Text.Json;
 using System.Windows.Media;
 using System.Threading.Tasks;
-using Windows.ApplicationModel.Activation;
 
 /**********************************************************************************************************
  * ProtoCam.xaml.cs

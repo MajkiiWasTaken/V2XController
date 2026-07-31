@@ -9,7 +9,7 @@
             Background="Black"
             CornerRadius="0.5" IsHitTestVisible="False">
 
-        <Canvas Margin="0,0,0,4">
+        <Canvas>
             <!-- Levý indikátor -->
             <Rectangle x:Name="RightIndicator"
                        Canvas.Left="10"
