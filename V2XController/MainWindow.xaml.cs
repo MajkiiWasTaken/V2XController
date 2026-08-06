@@ -7,8 +7,10 @@ using System.ComponentModel;
 using System.Globalization;
 using System.IO;
 using System.IO.Ports;
+using System.Management;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
@@ -24,7 +26,6 @@ using System.Windows.Shapes;
 using System.Windows.Threading;
 using System.Xml;
 using System.Xml.Linq;
-using System.Management;
 
 
 /**********************************************************************************************************
@@ -82,8 +83,25 @@ namespace V2XController
         // all the variables and objects used in the application
 
         //!!!!!!PORT and BAUDRATE!!!!!!!!!
-        private SerialPort serialPort = new SerialPort("COM10", 57600);
+        private SerialPort? serialPort;
         private readonly object _serialIoLock = new();
+
+        private TcpClient? _tcpClient;
+        private NetworkStream? _tcpStream;
+        private StreamReader? _tcpReader;
+        private StreamWriter? _tcpWriter;
+
+        private CancellationTokenSource? _connectionCts;
+
+        private enum ConnectionType
+        {
+            Serial,
+            Ethernet
+        }
+
+        private ConnectionType _connectionType = ConnectionType.Serial;
+
+        private readonly object _connectionWriteLock = new();
 
         //HEARTBEAT
         private DispatcherTimer? _heartbeatTimer;
@@ -645,7 +663,9 @@ namespace V2XController
 
             _heartbeatTimer.Tick += (s, e) =>
             {
-                var connStatus = _isConnected ? $"Connected ({serialPort?.PortName})" : "Disconnected";
+                var connStatus = _isConnected
+                    ? $"Connected ({GetConnectionDisplayName()})"
+                    : "Disconnected";
                 var playStatus = isPlaying ? "Playing" : (isRecording ? "Recording" : "Idle");
 
                 Console.WriteLine($"[HEARTBEAT] " +
@@ -739,7 +759,6 @@ namespace V2XController
 
             };
 
-            ActiveTramsDataGrid.ItemsSource = TramTable;
             ActivationZonesDataGrid.ItemsSource = ActivationZonesCollection;
 
             foreach (var column in ActivationZonesDataGrid.Columns)
@@ -891,6 +910,19 @@ namespace V2XController
             ActivationZonesDataGrid.CurrentCellChanged += ActivationZonesDataGrid_CurrentCellChanged;
 
             this.Closing += MainWindow_Closing;
+        }
+
+        private string GetConnectionDisplayName()
+        {
+            if (_connectionType == ConnectionType.Serial)
+            {
+                return serialPort?.PortName ?? "COM";
+            }
+
+            string host = EthernetAddressTB?.Text?.Trim() ?? "?";
+            string port = EthernetPortTB?.Text?.Trim() ?? "?";
+
+            return $"{host}:{port}";
         }
 
         /// <summary>
@@ -8001,23 +8033,173 @@ namespace V2XController
         //||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
         // V2X MESSAGE METHODS
 
-
-        //V2X Listener !!!!
-        /// <summary>
-        /// Starts the V2X listener on the specified port and baud rate.
-        /// </summary>
-        /// <param name="portName">The name of the serial port.</param>
-        /// <param name="baudRate">The baud rate for the serial port.</param>
-        /// <returns>A task representing the asynchronous operation.</returns>
-        private Task StartV2XListenerAsync(string portName, int baudRate)
+        private Task StartSerialConnectionAsync(
+    string portName,
+    int baudRate,
+    CancellationToken cancellationToken)
         {
             serialPort = new SerialPort(portName, baudRate)
             {
                 NewLine = "\r\n",
-                Encoding = Encoding.ASCII
+                Encoding = Encoding.ASCII,
+                ReadTimeout = 1000,
+                WriteTimeout = 1000
             };
-            serialPort.Open();
 
+            serialPort.Open();
+            Console.WriteLine(
+                $"[SERIAL] Opened {portName}, baud={baudRate}, " +
+                $"newline={BitConverter.ToString(Encoding.ASCII.GetBytes(serialPort.NewLine))}");
+
+            _ = Task.Run(
+                () => SerialReceiveLoopAsync(cancellationToken),
+                cancellationToken);
+
+            StartAutomaticSrvIfRequired();
+
+            return Task.CompletedTask;
+        }
+
+        private async Task SerialReceiveLoopAsync(
+            CancellationToken cancellationToken)
+        {
+            if (serialPort == null)
+                return;
+
+            while (!cancellationToken.IsCancellationRequested &&
+                   serialPort.IsOpen)
+            {
+                try
+                {
+                    string line = await ReadLineAsync(serialPort)
+                        .ConfigureAwait(false);
+
+                    Console.WriteLine($"[SERIAL RX RAW] len={line.Length}: {line}");
+
+                    if (!string.IsNullOrWhiteSpace(line))
+                    {
+                        await ProcessReceivedLineAsync(line)
+                            .ConfigureAwait(false);
+                    }
+                }
+                catch (TimeoutException)
+                {
+                    // Pouze pokračujeme a zkontrolujeme cancellation token.
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[SERIAL RX ERR] {ex.Message}");
+                    break;
+                }
+            }
+        }
+
+        private async Task StartEthernetConnectionAsync(
+    string host,
+    int port,
+    CancellationToken cancellationToken)
+        {
+            _tcpClient = new TcpClient
+            {
+                NoDelay = true
+            };
+
+            await _tcpClient.ConnectAsync(
+                host,
+                port,
+                cancellationToken);
+
+            Console.WriteLine($"[TCP] Connected to {host}:{port}");
+
+            _tcpStream = _tcpClient.GetStream();
+
+            _tcpReader = new StreamReader(
+                _tcpStream,
+                Encoding.ASCII,
+                detectEncodingFromByteOrderMarks: false,
+                bufferSize: 4096,
+                leaveOpen: true);
+
+            _tcpWriter = new StreamWriter(
+                _tcpStream,
+                Encoding.ASCII,
+                bufferSize: 4096,
+                leaveOpen: true)
+            {
+                NewLine = "\r\n",
+                AutoFlush = true
+            };
+
+            _ = Task.Run(
+                () => EthernetReceiveLoopAsync(cancellationToken),
+                cancellationToken);
+
+            StartAutomaticSrvIfRequired();
+        }
+
+        private async Task EthernetReceiveLoopAsync(
+            CancellationToken cancellationToken)
+        {
+            if (_tcpReader == null)
+                return;
+
+            try
+            {
+                while (!cancellationToken.IsCancellationRequested)
+                {
+                    string? line = await _tcpReader.ReadLineAsync(
+                        cancellationToken);
+
+                    Console.WriteLine(
+                        $"[TCP RX RAW] len={line?.Length ?? 0}: {line ?? "<null>"}");
+
+                    if (line == null)
+                    {
+                        Console.WriteLine("[TCP] Remote device closed connection.");
+                        break;
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(line))
+                    {
+                        await ProcessReceivedLineAsync(line)
+                            .ConfigureAwait(false);
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // Normální ukončení.
+            }
+            catch (IOException ex)
+            {
+                Console.WriteLine($"[TCP RX ERR] {ex.Message}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[TCP RX ERR] {ex}");
+            }
+
+            await Dispatcher.InvokeAsync(() =>
+            {
+                if (_isConnected &&
+                    _connectionType == ConnectionType.Ethernet)
+                {
+                    _isConnected = false;
+                    UpdateUiEnabledState();
+
+                    MessageBox.Show(
+                        "Ethernet connection was closed by the remote device.");
+                }
+            });
+        }
+
+
+        private void StartAutomaticSrvIfRequired()
+        {
             Dispatcher.Invoke(() =>
             {
                 if (SrvCheckBox?.IsChecked == true)
@@ -8026,127 +8208,265 @@ namespace V2XController
                     StartSrvAutoTimerIfEnabled();
                 }
             });
+        }
 
-            _ = Task.Run(async () =>
+        private Task ProcessReceivedLineAsync(string rawLine)
+        {
+            Console.WriteLine(
+        $"[PROCESS RX] len={rawLine?.Length ?? 0}: {rawLine}");
+
+            if (string.IsNullOrWhiteSpace(rawLine))
+                return Task.CompletedTask;
+
+            // =====================================================================
+            // PROTOBUF MESSAGE DETECTION AND HANDLING
+            // =====================================================================
+            if (IsProtobufMessage(rawLine))
             {
-                try
+                if (_timeshiftEnabled)
+                    AddRecordedCamMessage(rawLine.Trim());
+
+                Dispatcher.Invoke(() =>
                 {
-                    while (serialPort.IsOpen)
+                    try
                     {
-                        string rawLine;
-                        try { rawLine = await ReadLineAsync(serialPort).ConfigureAwait(false); }
-                        catch { break; }
-
-                        if (string.IsNullOrWhiteSpace(rawLine)) continue;
-
-                        // =====================================================================
-                        // PROTOBUF MESSAGE DETECTION AND HANDLING
-                        // =====================================================================
-                        if (IsProtobufMessage(rawLine))
+                        if (ProtobufParser.TryDecodeProtobufFromHex(
+                                rawLine.Trim(),
+                                out string decoded))
                         {
-                            // Ulož raw protobuf řádek z COM portu do bufferu nahrávky
-                            if (_timeshiftEnabled)
-                                AddRecordedCamMessage(rawLine.Trim());
+                            HandleProtobufMessage(decoded);
 
-                            Dispatcher.Invoke(() =>
-                            {
-                                try
-                                {
-                                    if (ProtobufParser.TryDecodeProtobufFromHex(rawLine.Trim(), out string decoded))
-                                    {
-                                        HandleProtobufMessage(decoded);
-                                        Console.WriteLine($"[PROTO] Received and decoded Protobuf message ({rawLine.Length} chars)", Brushes.Cyan);
-                                    }
-                                    else
-                                    {
-                                        Console.WriteLine($"[PROTO] Failed to decode Protobuf message", Brushes.Orange);
-                                        IncrementCamErrorCount();
-                                    }
-                                }
-                                catch (Exception protoEx)
-                                {
-                                    Console.WriteLine($"[PROTO] Error processing Protobuf: {protoEx.Message}", Brushes.Red);
-                                    IncrementCamErrorCount();
-                                }
-                            });
-                            continue;
+                            Console.WriteLine(
+                                $"[PROTO] Received and decoded Protobuf message " +
+                                $"({rawLine.Length} chars)",
+                                Brushes.Cyan);
                         }
-
-                        // =====================================================================
-                        // XML MESSAGE HANDLING (CAM/SRV)
-                        // =====================================================================
-
-                        // do not mix with classic replay or timeshift catch-up rendering
-                        if (_isPlaybackSessionActive || _isTimeshiftPlaybackActive) continue;
-
-                        int xmlStart = rawLine.IndexOf('<');
-                        if (xmlStart < 0) continue;
-                        string rawXml = rawLine.Substring(xmlStart);
-
-                        bool wasLocalEcho = false;
-                        lock (_recentLocalWritesLock)
+                        else
                         {
-                            int idx = _recentLocalWrites.FindIndex(s => s == rawXml);
-                            if (idx >= 0)
-                            {
-                                _recentLocalWrites.RemoveAt(idx);
-                                wasLocalEcho = true;
-                            }
-                        }
-                        if (wasLocalEcho)
-                        {
-                            continue;
-                        }
+                            Console.WriteLine(
+                                "[PROTO] Failed to decode Protobuf message",
+                                Brushes.Orange);
 
-                        try
-                        {
-                            var msg = V2XMessageParser.ParseV2XMessage(rawXml);
-
-                            if (msg.MessageType == "CAM")
-                            {
-                                bool valid = IsValidCamMessage(rawXml);
-                                if (_timeshiftEnabled && valid && !(msg.VehicleID?.StartsWith("000000") ?? false))
-                                    AddCamToBuffer(rawXml);
-
-                                Dispatcher.Invoke(() =>
-                                {
-                                    var shortId = string.IsNullOrEmpty(msg.VehicleID) ? "-" : (msg.VehicleID.Length > 4 ? msg.VehicleID[^4..] : msg.VehicleID);
-                                    var crcTxt = valid ? "CRC OK" : "CRC ERR";
-                                    if (valid) IncrementCamOkCount();
-                                    else
-                                    {
-                                        IncrementCamErrorCount();
-                                    }
-                                });
-                            }
-                            else if (msg.MessageType == "SRV")
-                            {
-                                if (_timeshiftEnabled)
-                                    AddSrvToBuffer(rawXml);
-                            }
-
-                            if (_timeshiftEnabled && _timeshiftPaused)
-                                continue;
-
-                            Dispatcher.Invoke(() => HandleV2XMessage(msg, rawXml));
-                        }
-                        catch (Exception ex)
-                        {
-                            Dispatcher.Invoke(() =>
-                            {
-                                IncrementCamErrorCount();
-                            });
+                            IncrementCamErrorCount();
                         }
                     }
-                }
-                catch (Exception loopEx)
+                    catch (Exception protoEx)
+                    {
+                        Console.WriteLine(
+                            $"[PROTO] Error processing Protobuf: {protoEx.Message}",
+                            Brushes.Red);
+
+                        IncrementCamErrorCount();
+                    }
+                });
+
+                return Task.CompletedTask;
+            }
+
+            // =====================================================================
+            // XML MESSAGE HANDLING (CAM/SRV)
+            // =====================================================================
+
+            if (_isPlaybackSessionActive || _isTimeshiftPlaybackActive)
+                return Task.CompletedTask;
+
+            int xmlStart = rawLine.IndexOf('<');
+
+            if (xmlStart < 0)
+                return Task.CompletedTask;
+
+            string rawXml = rawLine.Substring(xmlStart);
+
+            bool wasLocalEcho = false;
+
+            lock (_recentLocalWritesLock)
+            {
+                int idx = _recentLocalWrites.FindIndex(s => s == rawXml);
+
+                if (idx >= 0)
                 {
-                    Dispatcher.Invoke(() => Console.WriteLine($"[SERIAL] Serial listen loop error: {loopEx.Message}"));
+                    _recentLocalWrites.RemoveAt(idx);
+                    wasLocalEcho = true;
                 }
-            });
+            }
+
+            if (wasLocalEcho)
+                return Task.CompletedTask;
+
+            try
+            {
+                var msg = V2XMessageParser.ParseV2XMessage(rawXml);
+
+                if (msg.MessageType == "CAM")
+                {
+                    bool valid = IsValidCamMessage(rawXml);
+
+                    if (_timeshiftEnabled &&
+                        valid &&
+                        !(msg.VehicleID?.StartsWith("000000") ?? false))
+                    {
+                        AddCamToBuffer(rawXml);
+                    }
+
+                    Dispatcher.Invoke(() =>
+                    {
+                        var shortId = string.IsNullOrEmpty(msg.VehicleID)
+                            ? "-"
+                            : msg.VehicleID.Length > 4
+                                ? msg.VehicleID[^4..]
+                                : msg.VehicleID;
+
+                        var crcTxt = valid ? "CRC OK" : "CRC ERR";
+
+                        if (valid)
+                        {
+                            IncrementCamOkCount();
+                        }
+                        else
+                        {
+                            IncrementCamErrorCount();
+                        }
+
+                        Console.WriteLine(
+                            $"[RX][CAM] ID={shortId}, {crcTxt}");
+                    });
+                }
+                else if (msg.MessageType == "SRV")
+                {
+                    if (_timeshiftEnabled)
+                        AddSrvToBuffer(rawXml);
+                }
+
+                if (_timeshiftEnabled && _timeshiftPaused)
+                    return Task.CompletedTask;
+
+                Dispatcher.Invoke(() =>
+                {
+                    HandleV2XMessage(msg, rawXml);
+                });
+            }
+            catch (Exception ex)
+            {
+                Dispatcher.Invoke(() =>
+                {
+                    Console.WriteLine(
+                        $"[RX PARSE ERR] {ex.Message}",
+                        Brushes.Red);
+
+                    IncrementCamErrorCount();
+                });
+            }
 
             return Task.CompletedTask;
         }
+
+        private bool IsTransportConnected()
+        {
+            return _connectionType switch
+            {
+                ConnectionType.Serial =>
+                    serialPort?.IsOpen == true,
+
+                ConnectionType.Ethernet =>
+                    _tcpClient?.Connected == true &&
+                    _tcpStream != null &&
+                    _tcpWriter != null,
+
+                _ => false
+            };
+        }
+
+        private void SendTransportLine(string message)
+        {
+            if (string.IsNullOrEmpty(message))
+                return;
+
+            lock (_connectionWriteLock)
+            {
+                switch (_connectionType)
+                {
+                    case ConnectionType.Serial:
+                        {
+                            if (serialPort?.IsOpen != true)
+                                throw new InvalidOperationException(
+                                    "Serial port is not open.");
+
+                            serialPort.Write(message);
+                            serialPort.Write(serialPort.NewLine);
+                            break;
+                        }
+
+                    case ConnectionType.Ethernet:
+                        {
+                            if (_tcpWriter == null ||
+                                _tcpClient?.Connected != true)
+                            {
+                                throw new InvalidOperationException(
+                                    "Ethernet connection is not open.");
+                            }
+
+                            _tcpWriter.WriteLine(message);
+                            _tcpWriter.Flush();
+                            break;
+                        }
+
+                    default:
+                        throw new InvalidOperationException(
+                            "Unknown connection type.");
+                }
+            }
+        }
+
+
+
+
+
+        ////V2X Listener !!!!
+        ///// <summary>
+        ///// Starts the V2X listener on the specified port and baud rate.
+        ///// </summary>
+        ///// <param name="portName">The name of the serial port.</param>
+        ///// <param name="baudRate">The baud rate for the serial port.</param>
+        ///// <returns>A task representing the asynchronous operation.</returns>
+        //private Task StartV2XListenerAsync(string portName, int baudRate)
+        //{
+        //    serialPort = new SerialPort(portName, baudRate)
+        //    {
+        //        NewLine = "\r\n",
+        //        Encoding = Encoding.ASCII
+        //    };
+        //    serialPort.Open();
+
+        //    Dispatcher.Invoke(() =>
+        //    {
+        //        if (SrvCheckBox?.IsChecked == true)
+        //        {
+        //            SendSrvMessage();
+        //            StartSrvAutoTimerIfEnabled();
+        //        }
+        //    });
+
+        //    _ = Task.Run(async () =>
+        //    {
+        //        try
+        //        {
+        //            while (serialPort.IsOpen)
+        //            {
+        //                string rawLine;
+        //                try { rawLine = await ReadLineAsync(serialPort).ConfigureAwait(false); }
+        //                catch { break; }
+
+                        
+        //            }
+        //        }
+        //        catch (Exception loopEx)
+        //        {
+        //            Dispatcher.Invoke(() => Console.WriteLine($"[SERIAL] Serial listen loop error: {loopEx.Message}"));
+        //        }
+        //    });
+
+        //    return Task.CompletedTask;
+        //}
 
 
         /// <summary>
@@ -8933,8 +9253,8 @@ namespace V2XController
                 {
                     lock (_serialIoLock)
                     {
-                        serialPort.Write(xml);
-                        serialPort.Write(serialPort.NewLine);
+                        SendTransportLine(xml);
+                        SendTransportLine(serialPort.NewLine);
                     }
 
                     // record what we wrote so the listener can ignore echoes
@@ -11813,44 +12133,131 @@ namespace V2XController
         /// <param name="e"></param>
         private async void Connect_Click(object sender, RoutedEventArgs e)
         {
+            if (_isConnected)
+            {
+                MessageBox.Show("Connection is already open.");
+                return;
+            }
+
             try
             {
-                string? portName = ComPortsComboBox.SelectedItem as string;
-                if (string.IsNullOrWhiteSpace(portName))
+                _connectionCts?.Cancel();
+                _connectionCts?.Dispose();
+                _connectionCts = new CancellationTokenSource();
+
+                if (_connectionType == ConnectionType.Serial)
                 {
-                    MessageBox.Show("Select a COM port from the list.");
-                    return;
-                }
+                    if (ComPortsComboBox.SelectedItem is not ComPortInfo selectedPort)
+                    {
+                        MessageBox.Show("Select a COM port.");
+                        return;
+                    }
 
-                if (!int.TryParse(BaudrateTB.Text.Trim(), out int baudRate))
-                {
-                    MessageBox.Show("Enter valid numeric baudrate");
-                    return;
-                }
+                    if (!int.TryParse(
+                            BaudrateTB.Text.Trim(),
+                            out int baudRate) ||
+                        baudRate <= 0)
+                    {
+                        MessageBox.Show("Enter a valid baudrate.");
+                        return;
+                    }
 
-                if (serialPort == null || !serialPort.IsOpen)
-                {
-                    await StartV2XListenerAsync(portName, baudRate);
-                    _isConnected = true;
+                    await StartSerialConnectionAsync(
+                        selectedPort.PortName,
+                        baudRate,
+                        _connectionCts.Token);
 
-                    // START TIMESHIFT RIGHT AFTER CONNECT
-                    StartTimeshiftSession();
-                    UpdateUiEnabledState();
-                    Console.WriteLine($"[CONNECT] User connected on port {portName} at {baudRate} baud/s.");
-                    MessageBox.Show($"Connected on {portName} at {baudRate} bps.");
-
+                    Console.WriteLine(
+                        $"[CONNECT] Serial {selectedPort.PortName}, {baudRate} baud.");
                 }
                 else
                 {
-                    Console.WriteLine($"[CONNECT] User tried to connect to port {portName} but port is already open.");
-                    MessageBox.Show("Port already open.");
+                    string host = EthernetAddressTB.Text.Trim();
 
+                    if (string.IsNullOrWhiteSpace(host))
+                    {
+                        MessageBox.Show("Enter an IP address or hostname.");
+                        return;
+                    }
+
+                    if (!int.TryParse(
+                            EthernetPortTB.Text.Trim(),
+                            out int tcpPort) ||
+                        tcpPort is < 1 or > 65535)
+                    {
+                        MessageBox.Show("Enter a valid TCP port from 1 to 65535.");
+                        return;
+                    }
+
+                    await StartEthernetConnectionAsync(
+                        host,
+                        tcpPort,
+                        _connectionCts.Token);
+
+                    Console.WriteLine(
+                        $"[CONNECT] Ethernet {host}:{tcpPort}.");
+                }
+
+                _isConnected = true;
+
+                StartTimeshiftSession();
+                UpdateUiEnabledState();
+
+                string connectionName = GetConnectionDisplayName();
+
+                MessageBox.Show($"Connected to {connectionName}.");
+            }
+            catch (Exception ex)
+            {
+                DisconnectTransport();
+
+                _isConnected = false;
+                UpdateUiEnabledState();
+
+                Console.WriteLine($"[CONNECT ERR] {ex}");
+                MessageBox.Show($"Failed to connect:\n{ex.Message}");
+            }
+        }
+
+        private void DisconnectTransport()
+        {
+            _connectionCts?.Cancel();
+            _connectionCts?.Dispose();
+            _connectionCts = null;
+
+            try
+            {
+                if (serialPort != null)
+                {
+                    if (serialPort.IsOpen)
+                        serialPort.Close();
+
+                    serialPort.Dispose();
+                    serialPort = null;
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[ERR] Failed to connect: {ex.Message}");
-                MessageBox.Show($"Failed to connect: {ex.Message}");
+                Console.WriteLine($"[SERIAL CLOSE ERR] {ex.Message}");
+            }
+
+            try
+            {
+                _tcpReader?.Dispose();
+                _tcpReader = null;
+
+                _tcpWriter?.Dispose();
+                _tcpWriter = null;
+
+                _tcpStream?.Dispose();
+                _tcpStream = null;
+
+                _tcpClient?.Dispose();
+                _tcpClient = null;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[TCP CLOSE ERR] {ex.Message}");
             }
         }
 
@@ -11877,11 +12284,14 @@ namespace V2XController
                     // proceed with disconnect
                     try
                     {
-                        if (serialPort != null && serialPort.IsOpen)
-                        {
-                            try { serialPort.DataReceived -= SerialPort_DataReceived; } catch { }
-                            serialPort.Close();
-                        }
+                        DisconnectTransport();
+
+                        _isConnected = false;
+                        StopSrvAutoTimer();
+
+                        UpdateUiEnabledState();
+
+                        Console.WriteLine("[DISCONNECT] Connection closed.");
                     }
                     catch (Exception ex)
                     {
@@ -11972,11 +12382,14 @@ namespace V2XController
                 // proceed with disconnect
                 try
                 {
-                    if (serialPort != null && serialPort.IsOpen)
-                    {
-                        try { serialPort.DataReceived -= SerialPort_DataReceived; } catch { }
-                        serialPort.Close();
-                    }
+                    DisconnectTransport();
+
+                    _isConnected = false;
+                    StopSrvAutoTimer();
+
+                    UpdateUiEnabledState();
+
+                    Console.WriteLine("[DISCONNECT] Connection closed.");
                 }
                 catch (Exception ex)
                 {
@@ -13065,7 +13478,7 @@ namespace V2XController
         /// <param name="e"></param>
         private void SrvCheckBox_Checked(object sender, RoutedEventArgs e)
         {
-            if (serialPort != null && serialPort.IsOpen)
+            if (IsTransportConnected())
             {
                 SendSrvMessage();
                 StartSrvAutoTimerIfEnabled();
@@ -13092,17 +13505,14 @@ namespace V2XController
 
             try
             {
-                if (serialPort != null && serialPort.IsOpen)
+                if (IsTransportConnected())
                 {
-                    lock (_serialIoLock)
-                    {
-                        serialPort.Write(xml);
-                        serialPort.Write(serialPort.NewLine);
-                    }
+                    SendTransportLine(xml);
                 }
                 else
                 {
-                    Console.WriteLine("[TX][SRV] Serial port is not open. Skipping SRV transmit.");
+                    Console.WriteLine(
+                        "[TX][SRV] No active connection. Skipping transmit.");
                 }
             }
             catch (Exception ex)
@@ -13163,6 +13573,36 @@ namespace V2XController
         /// </summary>
         private void UpdateUiEnabledState()
         {
+            Disconnect?.SetValue(IsEnabledProperty, _isConnected);
+            SendSrv?.SetValue(IsEnabledProperty, _isConnected);
+            SrvCheckBox?.SetValue(IsEnabledProperty, _isConnected);
+
+            Connect?.SetValue(IsEnabledProperty, !_isConnected);
+
+            ConnectionTypeComboBox?.SetValue(
+                IsEnabledProperty,
+                !_isConnected);
+
+            ComPortsComboBox?.SetValue(
+                IsEnabledProperty,
+                !_isConnected);
+
+            BaudrateTB?.SetValue(
+                IsEnabledProperty,
+                !_isConnected);
+
+            EthernetAddressTB?.SetValue(
+                IsEnabledProperty,
+                !_isConnected);
+
+            EthernetPortTB?.SetValue(
+                IsEnabledProperty,
+                !_isConnected);
+
+            RefreshComPorts?.SetValue(
+                IsEnabledProperty,
+                !_isConnected);
+        
             // Connected-gated (serial)
             Disconnect?.SetValue(IsEnabledProperty, _isConnected);
             SendSrv?.SetValue(IsEnabledProperty, _isConnected);
@@ -15109,6 +15549,124 @@ namespace V2XController
                     ActivationZonesDataGrid.ScrollIntoView(item);
                 }
             }), DispatcherPriority.Background);
+        }
+
+
+        public async Task CenterMapOnZonesAsync(
+            IReadOnlyCollection<ActivationZone> zones)
+        {
+            if (zones == null || zones.Count == 0)
+                return;
+
+            var validZones = zones
+                .Where(z =>
+                    z != null &&
+                    !double.IsNaN(z.Latitude) &&
+                    !double.IsNaN(z.Longitude) &&
+                    !double.IsInfinity(z.Latitude) &&
+                    !double.IsInfinity(z.Longitude) &&
+                    Math.Abs(z.Latitude) > 0.000001 &&
+                    Math.Abs(z.Longitude) > 0.000001)
+                .ToList();
+
+            if (validZones.Count == 0)
+                return;
+
+            double minLatitude = validZones.Min(z => z.Latitude);
+            double maxLatitude = validZones.Max(z => z.Latitude);
+            double minLongitude = validZones.Min(z => z.Longitude);
+            double maxLongitude = validZones.Max(z => z.Longitude);
+
+            latitude = (minLatitude + maxLatitude) / 2.0;
+            longitude = (minLongitude + maxLongitude) / 2.0;
+
+            zoom = validZones.Count == 1
+                ? 18
+                : CalculateZoomForZoneBounds(
+                    minLatitude,
+                    maxLatitude,
+                    minLongitude,
+                    maxLongitude);
+
+            double canvasWidth = TileCanvas.ActualWidth > 0
+                ? TileCanvas.ActualWidth
+                : CanvasSize;
+
+            double canvasHeight = TileCanvas.ActualHeight > 0
+                ? TileCanvas.ActualHeight
+                : CanvasSize;
+
+            double centerWorldX = LonToTileX(longitude, zoom) * TileSize;
+            double centerWorldY = LatToTileY(latitude, zoom) * TileSize;
+
+            cameraX = (int)Math.Round(centerWorldX - canvasWidth / 2.0);
+            cameraY = (int)Math.Round(centerWorldY - canvasHeight / 2.0);
+
+            _currentTopLeftTileX =
+                (int)Math.Floor((double)cameraX / TileSize);
+
+            _currentTopLeftTileY =
+                (int)Math.Floor((double)cameraY / TileSize);
+
+            tileOffsetX = cameraX - (_currentTopLeftTileX * TileSize);
+            tileOffsetY = cameraY - (_currentTopLeftTileY * TileSize);
+
+            UpdateCenterTextBoxesFromFields();
+
+            await LoadTilesSmoothAsync(
+                _currentTopLeftTileX,
+                _currentTopLeftTileY,
+                tileOffsetX,
+                tileOffsetY);
+
+            UpdateAllOverlaysLive();
+            DrawRadiusCircle();
+            await BringAllOverlaysToFrontSafeAsync();
+
+            _ = EnsureLocalAreaAltitudeAsync(force: true);
+        }
+
+
+        private int CalculateZoomForZoneBounds(
+            double minLatitude,
+            double maxLatitude,
+            double minLongitude,
+            double maxLongitude)
+        {
+            double canvasWidth = TileCanvas.ActualWidth > 0
+                ? TileCanvas.ActualWidth
+                : CanvasSize;
+
+            double canvasHeight = TileCanvas.ActualHeight > 0
+                ? TileCanvas.ActualHeight
+                : CanvasSize;
+
+            const double padding = 100.0;
+
+            double availableWidth = Math.Max(100.0, canvasWidth - padding);
+            double availableHeight = Math.Max(100.0, canvasHeight - padding);
+
+            for (int testZoom = 18; testZoom >= 3; testZoom--)
+            {
+                double leftTileX = LonToTileX(minLongitude, testZoom);
+                double rightTileX = LonToTileX(maxLongitude, testZoom);
+                double topTileY = LatToTileY(maxLatitude, testZoom);
+                double bottomTileY = LatToTileY(minLatitude, testZoom);
+
+                double widthInPixels =
+                    Math.Abs(rightTileX - leftTileX) * TileSize;
+
+                double heightInPixels =
+                    Math.Abs(bottomTileY - topTileY) * TileSize;
+
+                if (widthInPixels <= availableWidth &&
+                    heightInPixels <= availableHeight)
+                {
+                    return testZoom;
+                }
+            }
+
+            return 3;
         }
 
 
@@ -18325,6 +18883,39 @@ namespace V2XController
             }
         }
 
+
+        private void ConnectionTypeComboBox_SelectionChanged(
+    object sender,
+    SelectionChangedEventArgs e)
+        {
+            bool ethernetSelected =
+                ConnectionTypeComboBox?.SelectedIndex == 1;
+
+            _connectionType = ethernetSelected
+                ? ConnectionType.Ethernet
+                : ConnectionType.Serial;
+
+            if (SerialConnectionPanel != null)
+            {
+                SerialConnectionPanel.Visibility = ethernetSelected
+                    ? Visibility.Collapsed
+                    : Visibility.Visible;
+            }
+
+            if (EthernetConnectionPanel != null)
+            {
+                EthernetConnectionPanel.Visibility = ethernetSelected
+                    ? Visibility.Visible
+                    : Visibility.Collapsed;
+            }
+
+            if (RefreshComPorts != null)
+            {
+                RefreshComPorts.Visibility = ethernetSelected
+                    ? Visibility.Collapsed
+                    : Visibility.Visible;
+            }
+        }
     }
 
 }

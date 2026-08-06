@@ -1874,40 +1874,49 @@ namespace V2XController
             // Chytré doplnění hodnot při přepínání
             try
             {
-                if (isTcp)
+                if (!_suppressFormEvents && isTcp)
                 {
-                    // Přechod na TCP – pokud TCP pole jsou prázdná, ale tunnel něco má, zkopíruj je
-                    if (TcpHostTextBox != null && string.IsNullOrWhiteSpace(TcpHostTextBox.Text) &&
-                        TunnelRemoteHostTextBox != null && !string.IsNullOrWhiteSpace(TunnelRemoteHostTextBox.Text))
+                    if (TcpHostTextBox != null &&
+                        string.IsNullOrWhiteSpace(TcpHostTextBox.Text) &&
+                        TunnelRemoteHostTextBox != null &&
+                        !string.IsNullOrWhiteSpace(TunnelRemoteHostTextBox.Text))
                     {
-                        TcpHostTextBox.Text = TunnelRemoteHostTextBox.Text;
+                        TcpHostTextBox.Text =
+                            TunnelRemoteHostTextBox.Text;
                     }
 
-                    if (TcpPortTextBox != null && string.IsNullOrWhiteSpace(TcpPortTextBox.Text) &&
-                        TunnelRemotePortTextBox != null && !string.IsNullOrWhiteSpace(TunnelRemotePortTextBox.Text))
+                    if (TcpPortTextBox != null &&
+                        string.IsNullOrWhiteSpace(TcpPortTextBox.Text) &&
+                        TunnelRemotePortTextBox != null &&
+                        !string.IsNullOrWhiteSpace(TunnelRemotePortTextBox.Text))
                     {
-                        TcpPortTextBox.Text = TunnelRemotePortTextBox.Text;
+                        TcpPortTextBox.Text =
+                            TunnelRemotePortTextBox.Text;
                     }
                 }
-                else if (isTunnel)
+                else if (!_suppressFormEvents && isTunnel)
                 {
-                    // Přechod na tunnel – pokud tunnel pole jsou prázdná, ale TCP něco má, zkopíruj je
-                    if (TunnelRemoteHostTextBox != null && string.IsNullOrWhiteSpace(TunnelRemoteHostTextBox.Text) &&
-                        TcpHostTextBox != null && !string.IsNullOrWhiteSpace(TcpHostTextBox.Text))
+                    if (TunnelRemoteHostTextBox != null &&
+                        string.IsNullOrWhiteSpace(TunnelRemoteHostTextBox.Text) &&
+                        TcpHostTextBox != null &&
+                        !string.IsNullOrWhiteSpace(TcpHostTextBox.Text))
                     {
-                        TunnelRemoteHostTextBox.Text = TcpHostTextBox.Text;
+                        TunnelRemoteHostTextBox.Text =
+                            TcpHostTextBox.Text;
                     }
 
-                    if (TunnelRemotePortTextBox != null && string.IsNullOrWhiteSpace(TunnelRemotePortTextBox.Text) &&
-                        TcpPortTextBox != null && !string.IsNullOrWhiteSpace(TcpPortTextBox.Text))
+                    if (TunnelRemotePortTextBox != null &&
+                        string.IsNullOrWhiteSpace(TunnelRemotePortTextBox.Text) &&
+                        TcpPortTextBox != null &&
+                        !string.IsNullOrWhiteSpace(TcpPortTextBox.Text))
                     {
-                        TunnelRemotePortTextBox.Text = TcpPortTextBox.Text;
+                        TunnelRemotePortTextBox.Text =
+                            TcpPortTextBox.Text;
                     }
                 }
             }
             catch
             {
-                // best-effort, nechci shodit okno kvůli UI chybě
             }
 
             TcpFields.Visibility = isTcp ? Visibility.Visible : Visibility.Collapsed;
@@ -2063,31 +2072,83 @@ namespace V2XController
             _isDirty = true;
         }
 
-        private void CaptureLoadedSnapshot(ExportSettings s, string name)
+        private void CaptureLoadedSnapshot(
+            ExportSettings s,
+            string name)
         {
             _loadedProfileName = name;
-            _loadedSettings = CloneSettings(s);
+
+            // Snapshot musí odpovídat skutečným hodnotám ve formuláři,
+            // ne původním hodnotám načteným ze souboru.
+            var currentFormSettings =
+                ExportSettings.FromWindow(this);
+
+            _loadedSettings =
+                CloneSettings(currentFormSettings);
+
             _isDirty = false;
         }
 
         private static ExportSettings CloneSettings(ExportSettings s) => ExportSettings.CloneFrom(s);
 
-        private static bool AreSettingsEqual(ExportSettings a, ExportSettings b)
+        private static bool AreSettingsEqual(
+    ExportSettings a,
+    ExportSettings b)
         {
-            if (a == null || b == null) return false;
+            if (a == null || b == null)
+                return false;
+
             return
                 a.IsTcpSelected == b.IsTcpSelected &&
-                (a.TcpHost ?? "") == (b.TcpHost ?? "") &&
+
+                string.Equals(
+                    a.TcpHost ?? "",
+                    b.TcpHost ?? "",
+                    StringComparison.Ordinal) &&
+
                 a.TcpPort == b.TcpPort &&
-                (a.SerialPortName ?? "") == (b.SerialPortName ?? "") &&
+
+                string.Equals(
+                    a.SerialPortName ?? "",
+                    b.SerialPortName ?? "",
+                    StringComparison.Ordinal) &&
+
                 a.SerialBaudrate == b.SerialBaudrate &&
                 a.SerialDataBits == b.SerialDataBits &&
-                (a.SerialParity ?? "") == (b.SerialParity ?? "") &&
-                (a.SerialStopBits ?? "") == (b.SerialStopBits ?? "") &&
-                (a.SerialHandshake ?? "") == (b.SerialHandshake ?? "") &&
-                (a.ModemRaw ?? "") == (b.ModemRaw ?? "") &&
+
+                string.Equals(
+                    a.SerialParity ?? "",
+                    b.SerialParity ?? "",
+                    StringComparison.Ordinal) &&
+
+                string.Equals(
+                    a.SerialStopBits ?? "",
+                    b.SerialStopBits ?? "",
+                    StringComparison.Ordinal) &&
+
+                string.Equals(
+                    a.SerialHandshake ?? "",
+                    b.SerialHandshake ?? "",
+                    StringComparison.Ordinal) &&
+
+                string.Equals(
+                    a.ModemRaw ?? "",
+                    b.ModemRaw ?? "",
+                    StringComparison.Ordinal) &&
+
                 a.ModemDec == b.ModemDec &&
-                (a.ModemHex ?? "") == (b.ModemHex ?? "");
+
+                string.Equals(
+                    a.ModemHex ?? "",
+                    b.ModemHex ?? "",
+                    StringComparison.Ordinal) &&
+
+                string.Equals(
+                    a.TunnelRemoteHost ?? "",
+                    b.TunnelRemoteHost ?? "",
+                    StringComparison.Ordinal) &&
+
+                a.TunnelRemotePort == b.TunnelRemotePort;
         }
 
         // New helper: update current profile
@@ -2116,6 +2177,62 @@ namespace V2XController
             return true;
         }
 
+        private bool SaveCurrentSettingsAsNewProfile()
+        {
+            var currentSettings = ExportSettings.FromWindow(this);
+
+            string proposedName =
+                string.IsNullOrWhiteSpace(_loadedProfileName)
+                    ? "New Profile"
+                    : $"{_loadedProfileName} (copy)";
+
+            while (true)
+            {
+                string newName = Interaction.InputBox(
+                    "Enter name for the new profile:",
+                    "Save profile as",
+                    proposedName
+                ).Trim();
+
+                // Uživatel dialog zavřel
+                if (string.IsNullOrWhiteSpace(newName))
+                    return false;
+
+                if (_profiles.Any(p =>
+                    string.Equals(
+                        p.Name,
+                        newName,
+                        StringComparison.OrdinalIgnoreCase)))
+                {
+                    MessageBox.Show(
+                        "Profile with this name already exists.",
+                        "Save profile as",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Warning);
+
+                    proposedName = newName;
+                    continue;
+                }
+
+                var newProfile = new ExportProfile
+                {
+                    Name = newName,
+                    Settings = CloneSettings(currentSettings)
+                };
+
+                _profiles.Add(newProfile);
+                ExportSettingsStorage.Save(_profiles);
+
+                RefreshProfilesList(selectName: newName);
+                PopulateForm(newProfile.Settings);
+                CaptureLoadedSnapshot(newProfile.Settings, newName);
+
+                SaveWindowState();
+
+                return true;
+            }
+        }
+
         // Offer to save changes to current profile (no "save as new" here)
         private bool TryOfferSaveChangesIfDirty()
         {
@@ -2123,46 +2240,56 @@ namespace V2XController
                 return true;
 
             var current = ExportSettings.FromWindow(this);
-            if (_loadedSettings != null && AreSettingsEqual(current, _loadedSettings))
+
+            if (_loadedSettings != null &&
+                AreSettingsEqual(current, _loadedSettings))
             {
                 _isDirty = false;
                 return true;
             }
 
-            var selectedName = SelectComboBox.SelectedItem as string;
-            if (!string.IsNullOrWhiteSpace(selectedName))
+            var saveResult = MessageBox.Show(
+                "The selected profile contains unsaved changes.\n\n" +
+                "Do you want to save them?\n\n" +
+                "Yes = save changes\n" +
+                "No = discard changes\n" +
+                "Cancel = stay on this profile",
+                "Unsaved profile changes",
+                MessageBoxButton.YesNoCancel,
+                MessageBoxImage.Question);
+
+            if (saveResult == MessageBoxResult.Cancel)
             {
-                var res = MessageBox.Show(
-                    $"Save changes to profile '{selectedName}'?",
-                    "Unsaved changes",
-                    MessageBoxButton.YesNoCancel,
-                    MessageBoxImage.Question);
+                // Zruší přepnutí profilu nebo zavření okna
+                return false;
+            }
 
-                if (res == MessageBoxResult.Cancel)
-                    return false;
-
-                if (res == MessageBoxResult.Yes)
-                    return SaveChangesToCurrentProfile();
-
-                // No = discard
+            if (saveResult == MessageBoxResult.No)
+            {
+                // Změny zahodíme
                 _isDirty = false;
                 return true;
             }
-            else
+
+            // Uživatel zvolil, že chce změny uložit.
+            var saveTargetResult = MessageBox.Show(
+                $"How do you want to save the changes?\n\n" +
+                $"Yes = update profile '{_loadedProfileName}'\n" +
+                $"No = save as a new profile\n" +
+                $"Cancel = do not continue",
+                "Save profile",
+                MessageBoxButton.YesNoCancel,
+                MessageBoxImage.Question);
+
+            if (saveTargetResult == MessageBoxResult.Cancel)
+                return false;
+
+            if (saveTargetResult == MessageBoxResult.Yes)
             {
-                // No profile selected – cannot save; offer to discard or cancel
-                var res = MessageBox.Show(
-                    "There is no selected profile. Use New to create one.\nDiscard changes?",
-                    "Unsaved changes",
-                    MessageBoxButton.OKCancel,
-                    MessageBoxImage.Question);
-
-                if (res != MessageBoxResult.OK)
-                    return false;
-
-                _isDirty = false;
-                return true;
+                return SaveChangesToCurrentProfile();
             }
+
+            return SaveCurrentSettingsAsNewProfile();
         }
 
         private bool TryBeginBusy(string message)
@@ -3805,11 +3932,14 @@ namespace V2XController
                     await Dispatcher.InvokeAsync(() =>
                     {
                         mw3.ActivationZonesCollection.Clear();
+
                         foreach (var z in zones)
                         {
                             mw3.ActivationZonesCollection.Add(z);
                         }
                     });
+
+                    await mw3.CenterMapOnZonesAsync(zones);
 
                     SetButtonActiveStates(Start, false);
                     await ShowMessageAfterBusyAsync(
@@ -3834,7 +3964,7 @@ namespace V2XController
                 Start?.SetValue(IsEnabledProperty, false);
             }
 
-            
+
         }
 
         private async Task<(bool success, string value, string? error)> ReadRegister0x0000AsStringAsync()
@@ -7486,8 +7616,8 @@ namespace V2XController
                 button.IsEnabled = val;
                 return;
             }
-            
-            
+
+
         }
 
         private static Window? CheckActiveWindow()

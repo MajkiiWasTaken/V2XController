@@ -34,47 +34,134 @@
 
     <Grid Margin="10">
         <!-- Left Panel -->
-        <StackPanel HorizontalAlignment="Left" Width="320" Margin="0,0,0,0" VerticalAlignment="Top">
+        <StackPanel HorizontalAlignment="Left" Width="320" Margin="0,0,0,0" VerticalAlignment="Top" Height="693">
 
             <!-- Connection Settings -->
             <GroupBox Header="Connection Settings" Padding="10" Margin="0,0,0,10">
                 <StackPanel>
+
                     <Grid>
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="10"/>
                             <ColumnDefinition Width="*"/>
                         </Grid.ColumnDefinitions>
-                        <Button x:Name="Connect" Content="Connect" Grid.Column="0"
-                                Click="Connect_Click" Height="37" FontWeight="Bold" FontSize="18"
-                                ToolTip="Connect to selected COM port"/>
-                        <Button x:Name="Disconnect" Content="Disconnect" Grid.Column="2"
-                                Click="Disconnect_Click" Height="37" FontWeight="Bold" FontSize="18"
-                                ToolTip="Disconnect from selected COM port"/>
+
+                        <Button x:Name="Connect"
+                    Content="Connect"
+                    Grid.Column="0"
+                    Click="Connect_Click"
+                    Height="37"
+                    FontWeight="Bold"
+                    FontSize="18"
+                    ToolTip="Connect to COM port or Ethernet"/>
+
+                        <Button x:Name="Disconnect"
+                    Content="Disconnect"
+                    Grid.Column="2"
+                    Click="Disconnect_Click"
+                    Height="37"
+                    FontWeight="Bold"
+                    FontSize="18"
+                    ToolTip="Disconnect"/>
                     </Grid>
 
-                    <Grid Margin="0,10,0,0">
+                    <Label Content="Connection type"
+               FontWeight="Bold"
+               Padding="0,10,0,5"/>
+
+                    <ComboBox x:Name="ConnectionTypeComboBox"
+                  SelectedIndex="0"
+                  SelectionChanged="ConnectionTypeComboBox_SelectionChanged">
+                        <ComboBoxItem Content="COM"/>
+                        <ComboBoxItem Content="Ethernet"/>
+                    </ComboBox>
+
+                    <Grid x:Name="SerialConnectionPanel" Margin="0,10,0,0">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
                         </Grid.RowDefinitions>
+
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="10"/>
                             <ColumnDefinition Width="*"/>
                         </Grid.ColumnDefinitions>
 
-                        <Label Content="Port" FontWeight="Bold" Grid.Row="0" Grid.Column="0" Padding="0,0,0,5"/>
-                        <ComboBox x:Name="ComPortsComboBox" Grid.Row="1" Grid.Column="0" HorizontalContentAlignment="Center"
-                                  SelectionChanged="ComPortsComboBox_SelectionChanged"/>
+                        <Label Content="COM port"
+                   FontWeight="Bold"
+                   Grid.Row="0"
+                   Grid.Column="0"
+                   Padding="0,0,0,5"/>
 
-                        <Label Content="Baudrate" FontWeight="Bold" Grid.Row="0" Grid.Column="2" Padding="0,0,0,5"/>
-                        <TextBox x:Name="BaudrateTB" Text="57600" Grid.Row="1" Grid.Column="2" TextAlignment="Center"
-                                 TextChanged="BaudrateTB_TextChanged"/>
+                        <ComboBox x:Name="ComPortsComboBox"
+                      Grid.Row="1"
+                      Grid.Column="0"
+                      HorizontalContentAlignment="Center"
+                      DisplayMemberPath="DisplayName"
+                      SelectionChanged="ComPortsComboBox_SelectionChanged"/>
+
+                        <Label Content="Baudrate"
+                   FontWeight="Bold"
+                   Grid.Row="0"
+                   Grid.Column="2"
+                   Padding="0,0,0,5"/>
+
+                        <TextBox x:Name="BaudrateTB"
+                     Text="57600"
+                     Grid.Row="1"
+                     Grid.Column="2"
+                     TextAlignment="Center"
+                     TextChanged="BaudrateTB_TextChanged"/>
                     </Grid>
 
-                    <Button x:Name="RefreshComPorts" Content="Refresh ports ↺" Margin="0,10,0,0"
-                            Click="RefreshComPorts_Click" ToolTip="Refresh all COM ports"/>
+                    <Grid x:Name="EthernetConnectionPanel"
+              Margin="0,10,0,0"
+              Visibility="Collapsed">
+
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="10"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+
+                        <Label Content="IP address"
+                   FontWeight="Bold"
+                   Grid.Row="0"
+                   Grid.Column="0"
+                   Padding="0,0,0,5"/>
+
+                        <TextBox x:Name="EthernetAddressTB"
+                     Text="192.168.1.100"
+                     Grid.Row="1"
+                     Grid.Column="0"
+                     TextAlignment="Center"/>
+
+                        <Label Content="TCP port"
+                   FontWeight="Bold"
+                   Grid.Row="0"
+                   Grid.Column="2"
+                   Padding="0,0,0,5"/>
+
+                        <TextBox x:Name="EthernetPortTB"
+                     Text="5000"
+                     Grid.Row="1"
+                     Grid.Column="2"
+                     TextAlignment="Center"/>
+                    </Grid>
+
+                    <Button x:Name="RefreshComPorts"
+                Content="Refresh ports ↺"
+                Margin="0,10,0,0"
+                Click="RefreshComPorts_Click"
+                ToolTip="Refresh all COM ports"/>
+
                 </StackPanel>
             </GroupBox>
 
@@ -153,24 +240,6 @@
             </GroupBox>
 
             <!-- Active Trams Table - PŘESUNUTO POD Drawing Tools -->
-            <GroupBox Header="Active Trams" Padding="8" Margin="0,0,0,4">
-                <DataGrid x:Name="ActiveTramsDataGrid"
-          AutoGenerateColumns="False"
-          HeadersVisibility="Column"
-          IsReadOnly="True"
-          Height="75"
-          HorizontalScrollBarVisibility="Hidden"
-          FontSize="9">
-                    <DataGrid.Columns>
-                        <DataGridTextColumn Header="ID" Binding="{Binding VehicleId}" 
-                  IsReadOnly="True" Width="105" CanUserResize="False"/>
-                        <DataGridTextColumn Header="Time" Binding="{Binding LastCamTime}" 
-                  IsReadOnly="True" Width="105" CanUserResize="False"/>
-                        <DataGridTextColumn Header="[s]" Binding="{Binding SecondsSinceLastCam}" 
-                  IsReadOnly="True" Width="60" CanUserResize="False"/>
-                    </DataGrid.Columns>
-                </DataGrid>
-            </GroupBox>
 
         </StackPanel>
 
@@ -379,12 +448,12 @@
 
         <!-- Activation Zones Table - Bottom -->
         <GroupBox Header="Activation Zones" Padding="10" HorizontalAlignment="Left" 
-          MaxWidth="790" Width="790" Margin="0,0,0,10" VerticalAlignment="Bottom">
-            <StackPanel>
+          MaxWidth="790" Width="790" Margin="0,0,0,31" VerticalAlignment="Bottom" Height="201">
+            <StackPanel Height="164">
                 <ScrollViewer HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Disabled">
                     <DataGrid x:Name="ActivationZonesDataGrid"
           HeadersVisibility="Column"
-          Height="110"
+          Height="126"
           AutoGenerateColumns="False"
           CanUserAddRows="False"
           IsReadOnly="False"
@@ -467,7 +536,7 @@
                 </Style>
             </Button.Style>
         </Button>
-        <Label Content="Build Version: 3.1.9" FontWeight="Bold" HorizontalAlignment="Left" Height="26" Margin="340,738,0,0" VerticalAlignment="Top" Width="125"/>
+        <Label Content="Build Version: 3.2.2" FontWeight="Bold" HorizontalAlignment="Left" Height="26" Margin="0,930,0,0" VerticalAlignment="Top" Width="125"/>
 
     </Grid>
 </Window>
