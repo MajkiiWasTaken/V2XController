@@ -359,8 +359,6 @@ namespace V2XController
             string? profileToSelect =
                 windowState?.SelectedProfileName;
 
-            // Pokud uložený profil už neexistuje,
-            // použije se první dostupný
             if (string.IsNullOrWhiteSpace(profileToSelect) ||
                 !_profiles.Any(p => p.Name == profileToSelect))
             {
@@ -379,7 +377,8 @@ namespace V2XController
 
                 if (selectedProfile != null)
                 {
-                    PopulateForm(selectedProfile.Settings);
+                    PopulateForm(
+                        selectedProfile.Settings);
 
                     CaptureLoadedSnapshot(
                         selectedProfile.Settings,
@@ -391,6 +390,25 @@ namespace V2XController
                 _isDirty = false;
                 _loadedProfileName = null;
                 _loadedSettings = null;
+
+                // No profile -> initialize serial defaults
+                RefreshSerialPorts();
+
+                SelectComboBoxValue(
+                    SerialBaudComboBox,
+                    "19200");
+
+                SelectComboBoxValue(
+                    SerialDataBitsComboBox,
+                    "8");
+
+                SelectComboBoxValue(
+                    SerialParityComboBox,
+                    "None");
+
+                SelectComboBoxValue(
+                    SerialStopBitsComboBox,
+                    "1");
             }
 
             if (ConnectionComboBox.SelectedIndex < 0)
@@ -1987,15 +2005,60 @@ namespace V2XController
             catch { }
 
             // Serial fields
+            // Serial fields
             try
             {
-                SerialPortTextBox.Text = s.SerialPortName ?? string.Empty;
-                SerialBaudTextBox.Text = s.SerialBaudrate?.ToString(CultureInfo.InvariantCulture) ?? string.Empty;
-                SerialDataBitsTextBox.Text = s.SerialDataBits?.ToString(CultureInfo.InvariantCulture) ?? string.Empty;
-                SerialParityTextBox.Text = s.SerialParity ?? string.Empty;
-                SerialStopBitsTextBox.Text = s.SerialStopBits ?? string.Empty;
+                RefreshSerialPorts(s.SerialPortName);
+
+                string baud =
+                    s.SerialBaudrate?.ToString(CultureInfo.InvariantCulture)
+                    ?? "19200";
+
+                bool isStandardBaud =
+                    baud == "115200" ||
+                    baud == "57600" ||
+                    baud == "38400" ||
+                    baud == "19200" ||
+                    baud == "9600";
+
+                if (isStandardBaud)
+                {
+                    SelectComboBoxValue(
+                        SerialBaudComboBox,
+                        baud);
+
+                    SerialCustomBaudTextBox.Text = string.Empty;
+                    SerialCustomBaudTextBox.Visibility =
+                        Visibility.Collapsed;
+                }
+                else
+                {
+                    SelectComboBoxValue(
+                        SerialBaudComboBox,
+                        "Custom");
+
+                    SerialCustomBaudTextBox.Text = baud;
+                    SerialCustomBaudTextBox.Visibility =
+                        Visibility.Visible;
+                }
+
+                SelectComboBoxValue(
+                    SerialDataBitsComboBox,
+                    s.SerialDataBits?.ToString(
+                        CultureInfo.InvariantCulture)
+                    ?? "8");
+
+                SelectComboBoxValue(
+                    SerialParityComboBox,
+                    s.SerialParity ?? "None");
+
+                SelectComboBoxValue(
+                    SerialStopBitsComboBox,
+                    s.SerialStopBits ?? "1");
             }
-            catch { }
+            catch
+            {
+            }
 
             // Modem
             try
@@ -2024,11 +2087,27 @@ namespace V2XController
             TcpHostTextBox.Text = "";
             TcpPortTextBox.Text = "";
 
-            SerialPortTextBox.Text = "";
-            SerialBaudTextBox.Text = "";
-            SerialDataBitsTextBox.Text = "";
-            SerialParityTextBox.Text = "";
-            SerialStopBitsTextBox.Text = "";
+            RefreshSerialPorts();
+
+            SelectComboBoxValue(
+                SerialBaudComboBox,
+                "19200");
+
+            SerialCustomBaudTextBox.Text = string.Empty;
+            SerialCustomBaudTextBox.Visibility =
+                Visibility.Collapsed;
+
+            SelectComboBoxValue(
+                SerialDataBitsComboBox,
+                "8");
+
+            SelectComboBoxValue(
+                SerialParityComboBox,
+                "None");
+
+            SelectComboBoxValue(
+                SerialStopBitsComboBox,
+                "1");
 
             ModemTextBox.Text = "";
 
@@ -2151,7 +2230,6 @@ namespace V2XController
                 a.TunnelRemotePort == b.TunnelRemotePort;
         }
 
-        // New helper: update current profile
         private bool SaveChangesToCurrentProfile()
         {
             var selectedName = SelectComboBox.SelectedItem as string;
@@ -7437,6 +7515,97 @@ namespace V2XController
             throw new TimeoutException("Modbus ASCII read timed out.");
         }
 
+
+        private static string GetComboBoxValue(ComboBox comboBox)
+        {
+            if (comboBox.SelectedItem is ComboBoxItem item)
+                return item.Content?.ToString() ?? string.Empty;
+
+            return comboBox.SelectedItem?.ToString() ?? string.Empty;
+        }
+
+
+        private static void SelectComboBoxValue(
+    ComboBox comboBox,
+    string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return;
+
+            foreach (var item in comboBox.Items.OfType<ComboBoxItem>())
+            {
+                if (string.Equals(
+                    item.Content?.ToString(),
+                    value,
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    comboBox.SelectedItem = item;
+                    return;
+                }
+            }
+        }
+
+
+        private void RefreshSerialPorts(string? preferredPort = null)
+        {
+            string? currentPort =
+                preferredPort ??
+                SerialPortComboBox.SelectedItem?.ToString();
+
+            var ports = SerialPort
+                .GetPortNames()
+                .OrderBy(p => p)
+                .ToList();
+
+            SerialPortComboBox.ItemsSource = ports;
+
+            if (!string.IsNullOrWhiteSpace(currentPort) &&
+                ports.Contains(currentPort, StringComparer.OrdinalIgnoreCase))
+            {
+                SerialPortComboBox.SelectedItem =
+                    ports.First(p =>
+                        string.Equals(
+                            p,
+                            currentPort,
+                            StringComparison.OrdinalIgnoreCase));
+            }
+            else if (ports.Count > 0)
+            {
+                SerialPortComboBox.SelectedIndex = 0;
+            }
+        }
+
+        private void SerialBaudComboBox_SelectionChanged(
+    object sender,
+    SelectionChangedEventArgs e)
+        {
+            if (SerialCustomBaudTextBox == null)
+                return;
+
+            string value = GetComboBoxValue(SerialBaudComboBox);
+
+            SerialCustomBaudTextBox.Visibility =
+                value == "Custom"
+                    ? Visibility.Visible
+                    : Visibility.Collapsed;
+
+            MarkDirtyIfActive();
+        }
+
+        private void SerialCustomBaudTextBox_TextChanged(
+            object sender,
+            TextChangedEventArgs e)
+        {
+            MarkDirtyIfActive();
+        }
+
+        private void SerialSettingComboBox_SelectionChanged(
+            object sender,
+            SelectionChangedEventArgs e)
+        {
+            MarkDirtyIfActive();
+        }
+
         private static ushort[] BuildCompleteZoneRegisterBlock(
     IReadOnlyList<ActivationZone> zones,
     ushort writeOffset)
@@ -7619,6 +7788,9 @@ namespace V2XController
 
 
         }
+
+
+
 
         private static Window? CheckActiveWindow()
         {

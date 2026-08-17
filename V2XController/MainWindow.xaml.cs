@@ -1,11 +1,8 @@
-﻿using Google.Protobuf.WellKnownTypes;
-using System.Diagnostics;
-using System.Reflection;
-using System.Collections.Concurrent;
-using System.Collections.Generic;
+﻿using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
 using System.Collections.Specialized;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.IO.Ports;
@@ -13,6 +10,7 @@ using System.Management;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
@@ -604,7 +602,7 @@ namespace V2XController
                 IntersectionId = 663,
                 Name = "663-right",
                 Title = "V633",
-                Latitude = 49.845336, 
+                Latitude = 49.845336,
                 Longitude = 18.280349,
                 RotationDeg = 175.0,
                 Side = TramSignalSide.Right
@@ -5026,10 +5024,24 @@ namespace V2XController
                     return;
                 }
 
-                // Rebuild zone with merged geometry
-                double mpp = MetersPerPixel(latitude, zoom);
-                double halfWidthPx = (_polylineZoneWidthMeters / 2.0) / mpp;
-                RebuildPolylineZone(polyline, polyline.Points.ToList(), halfWidthPx);
+                // Rebuild finalized polyline from current table segment data
+                var rebuiltPoints = polyline.Points.ToList();
+
+                if (_polylineToSegmentZones.TryGetValue(polyline, out var remainingSegments) &&
+                    remainingSegments.Count > 0)
+                {
+                    RebuildPolylineZoneWithVariableWidths(polyline, rebuiltPoints);
+                }
+                else
+                {
+                    double mpp = MetersPerPixel(latitude, zoom);
+                    double halfWidthPx = (_polylineZoneWidthMeters / 2.0) / mpp;
+
+                    RebuildPolylineZone(polyline, rebuiltPoints, halfWidthPx);
+                }
+
+                UpdatePolylineDirectionArrows(polyline, rebuiltPoints);
+
 
                 isDirty = true;
                 Console.WriteLine($"[POLYLINE] Vertex deleted. Remaining: {polyline.Points.Count}");
@@ -6234,141 +6246,265 @@ namespace V2XController
 
                 if (wasContinuation)
                 {
-                    Console.WriteLine($"[POLYLINE] Restoring previously finalized polyline with {_polylineCommittedPointsCount} committed points");
+                    Console.WriteLine(
+                        $"[POLYLINE] Restoring previously finalized polyline with " +
+                        $"{_polylineCommittedPointsCount} committed points");
 
-                    // Remove only the NEW dots and circles added after continuation
-                    for (int i = _polylineCommittedPointsCount; i < polylineVertexDots.Count; i++)
+                    if (_polylineToSegmentZones.TryGetValue(currentPolyline, out var tableSegments))
+                    {
+                        int committedSegmentCount =
+                            Math.Max(0, _polylineCommittedPointsCount - 1);
+
+                        var newSegments = tableSegments
+                            .Where(s => s.SegmentIndex >= committedSegmentCount)
+                            .ToList();
+
+                        foreach (var segment in newSegments)
+                        {
+                            Console.WriteLine(
+                                $"[POLYLINE] Cancel continuation: removing new segment " +
+                                $"{segment.SegmentIndex}");
+
+                            segment.PropertyChanged -= ActivationZone_PropertyChanged;
+
+                            tableSegments.Remove(segment);
+                            _polylineRows.Remove(segment);
+
+                            if (ActivationZonesCollection.Contains(segment))
+                                ActivationZonesCollection.Remove(segment);
+
+                            if (PolylineZonesCollection.Contains(segment))
+                                PolylineZonesCollection.Remove(segment);
+
+                            _segmentToVisualPath.Remove(segment);
+                            _segmentToCircles.Remove(segment);
+                        }
+                    }
+
+                    for (int i = _polylineCommittedPointsCount;
+                         i < polylineVertexDots.Count;
+                         i++)
                     {
                         var dot = polylineVertexDots[i];
+
                         if (TileCanvas.Children.Contains(dot))
                             TileCanvas.Children.Remove(dot);
-
-                        _polylineVertexMap.Remove(dot);
 
                         if (_polylineVertexToCircle.TryGetValue(dot, out var circle))
                         {
                             if (TileCanvas.Children.Contains(circle))
                                 TileCanvas.Children.Remove(circle);
+
                             _polylineVertexToCircle.Remove(dot);
                         }
+
+                        _polylineVertexMap.Remove(dot);
                     }
 
-                    // Remove new circles that were added AFTER continuation
-                    for (int i = _polylineCommittedPointsCount; i < _currentPolylineCircles.Count; i++)
+                    for (int i = _polylineCommittedPointsCount;
+                         i < _currentPolylineCircles.Count;
+                         i++)
                     {
                         var circle = _currentPolylineCircles[i];
+
                         if (TileCanvas.Children.Contains(circle))
                             TileCanvas.Children.Remove(circle);
                     }
 
-                    // Remove ALL current segment paths and rebuild properly
-                    foreach (var seg in _currentPolylineSegments)
+                    if (_polylineToSegments.TryGetValue(currentPolyline, out var visualSegments))
                     {
-                        if (TileCanvas.Children.Contains(seg))
-                            TileCanvas.Children.Remove(seg);
+                        foreach (var segmentPath in visualSegments.ToList())
+                        {
+                            if (TileCanvas.Children.Contains(segmentPath))
+                                TileCanvas.Children.Remove(segmentPath);
+                        }
+
+                        visualSegments.Clear();
                     }
+
                     _currentPolylineSegments.Clear();
 
-                    // Rebuild polyline points
-                    currentPolyline.Points.Clear();
-                    var committedPoints = new List<Point>();
-                    var committedGeoPoints = new List<(double lat, double lon)>();
-
-                    for (int i = 0; i < _polylineCommittedPointsCount; i++)
+                    if (_polylineVisualGroups.TryGetValue(currentPolyline, out var visualGroups))
                     {
-                        currentPolyline.Points.Add(polylinePoints[i]);
-                        committedPoints.Add(polylinePoints[i]);
-
-                        // Also restore geo points
-                        if (_polylineGeoPoints.TryGetValue(currentPolyline, out var geoList) && i < geoList.Count)
+                        foreach (var group in visualGroups.ToList())
                         {
-                            committedGeoPoints.Add(geoList[i]);
+                            if (TileCanvas.Children.Contains(group))
+                                TileCanvas.Children.Remove(group);
                         }
+
+                        visualGroups.Clear();
                     }
 
-                    // Update geo points list to only committed points
-                    if (_polylineGeoPoints.ContainsKey(currentPolyline))
+                    var committedPoints = polylinePoints
+                        .Take(_polylineCommittedPointsCount)
+                        .ToList();
+
+                    currentPolyline.Points.Clear();
+
+                    foreach (var point in committedPoints)
+                        currentPolyline.Points.Add(point);
+
+                    if (_polylineGeoPoints.TryGetValue(currentPolyline, out var geoPoints))
                     {
+                        var committedGeoPoints = geoPoints
+                            .Take(_polylineCommittedPointsCount)
+                            .ToList();
+
                         _polylineGeoPoints[currentPolyline] = committedGeoPoints;
                     }
 
-                    // Rebuild the zone with the committed points only
-                    double mpp = MetersPerPixel(latitude, zoom);
-                    double halfWidthPx = (_polylineZoneWidthMeters / 2.0) / mpp;
+                    var rebuiltPoints = currentPolyline.Points.ToList();
 
-                    if (committedPoints.Count >= 2)
+                    if (_polylineToSegmentZones.TryGetValue(
+                            currentPolyline,
+                            out var remainingSegments) &&
+                        remainingSegments.Count > 0)
                     {
-                        RebuildPolylineZone(currentPolyline, committedPoints, halfWidthPx);
+                        RebuildPolylineZoneWithVariableWidths(
+                            currentPolyline,
+                            rebuiltPoints);
+                    }
+                    else
+                    {
+                        double mpp = MetersPerPixel(latitude, zoom);
+                        double halfWidthPx =
+                            (_polylineZoneWidthMeters / 2.0) / mpp;
+
+                        RebuildPolylineZone(
+                            currentPolyline,
+                            rebuiltPoints,
+                            halfWidthPx);
                     }
 
-                    // Restore it as finalized
+                    UpdatePolylineDirectionArrows(
+                        currentPolyline,
+                        rebuiltPoints);
+
                     if (!mapRectangles.Any(mr => mr.Shape == currentPolyline))
                         mapRectangles.Add(new MapRectangle(currentPolyline));
 
-                    Console.WriteLine($"[POLYLINE] Restored polyline with {currentPolyline.Points.Count} points and zone shapes");
+                    Console.WriteLine(
+                        $"[POLYLINE] Restored polyline with " +
+                        $"{currentPolyline.Points.Count} points");
                 }
                 else
                 {
-                    // This was a NEW polyline (not a continuation) - delete everything
                     Console.WriteLine("[POLYLINE] Deleting new polyline completely");
 
+                    // Směrové šipky
+                    if (_polylineDirectionArrows.TryGetValue(
+                            currentPolyline,
+                            out var arrows))
+                    {
+                        foreach (var arrow in arrows.ToList())
+                        {
+                            if (TileCanvas.Children.Contains(arrow))
+                                TileCanvas.Children.Remove(arrow);
+                        }
+
+                        _polylineDirectionArrows.Remove(currentPolyline);
+                    }
+
+                    // Visual groups
+                    if (_polylineVisualGroups.TryGetValue(
+                            currentPolyline,
+                            out var groups))
+                    {
+                        foreach (var group in groups.ToList())
+                        {
+                            if (TileCanvas.Children.Contains(group))
+                                TileCanvas.Children.Remove(group);
+                        }
+
+                        _polylineVisualGroups.Remove(currentPolyline);
+                    }
+
+                    // Table segments
+                    if (_polylineToSegmentZones.TryGetValue(
+                            currentPolyline,
+                            out var tableSegments))
+                    {
+                        foreach (var segment in tableSegments.ToList())
+                        {
+                            segment.PropertyChanged -= ActivationZone_PropertyChanged;
+
+                            _polylineRows.Remove(segment);
+
+                            if (ActivationZonesCollection.Contains(segment))
+                                ActivationZonesCollection.Remove(segment);
+
+                            if (PolylineZonesCollection.Contains(segment))
+                                PolylineZonesCollection.Remove(segment);
+
+                            _segmentToVisualPath.Remove(segment);
+                            _segmentToCircles.Remove(segment);
+                        }
+
+                        _polylineToSegmentZones.Remove(currentPolyline);
+                    }
+
+                    // Main polyline
                     if (TileCanvas.Children.Contains(currentPolyline))
                         TileCanvas.Children.Remove(currentPolyline);
 
-                    foreach (var dot in polylineVertexDots)
+                    // Vertex dots + circles
+                    foreach (var dot in polylineVertexDots.ToList())
                     {
                         if (TileCanvas.Children.Contains(dot))
                             TileCanvas.Children.Remove(dot);
-                        _polylineVertexMap.Remove(dot);
-                        _polylineVertexToCircle.Remove(dot);
-                    }
 
-                    foreach (var c in _currentPolylineCircles)
-                    {
-                        if (TileCanvas.Children.Contains(c))
-                            TileCanvas.Children.Remove(c);
-                    }
-
-                    foreach (var seg in _currentPolylineSegments)
-                    {
-                        if (TileCanvas.Children.Contains(seg))
-                            TileCanvas.Children.Remove(seg);
-                    }
-
-                    if (_polylineToSegments.TryGetValue(currentPolyline, out var segments))
-                    {
-                        foreach (var seg in segments)
+                        if (_polylineVertexToCircle.TryGetValue(dot, out var circle))
                         {
-                            if (TileCanvas.Children.Contains(seg))
-                                TileCanvas.Children.Remove(seg);
+                            if (TileCanvas.Children.Contains(circle))
+                                TileCanvas.Children.Remove(circle);
+
+                            _polylineVertexToCircle.Remove(dot);
                         }
+
+                        _polylineVertexMap.Remove(dot);
                     }
 
-                    _polylineToSegments.Remove(currentPolyline);
-                    _polylineGeoPoints.Remove(currentPolyline);
-                }
-
-                // OPRAVA 2: Smazat také směrové šipky při zrušení polyline
-                if (currentPolyline != null && _polylineDirectionArrows.ContainsKey(currentPolyline))
-                {
-                    var arrows = _polylineDirectionArrows[currentPolyline];
-                    foreach (var arrow in arrows)
+                    foreach (var circle in _currentPolylineCircles.ToList())
                     {
-                        if (TileCanvas.Children.Contains(arrow))
-                            TileCanvas.Children.Remove(arrow);
+                        if (TileCanvas.Children.Contains(circle))
+                            TileCanvas.Children.Remove(circle);
                     }
-                    _polylineDirectionArrows.Remove(currentPolyline);
-                    Console.WriteLine("[POLYLINE] Removed direction arrows");
+
+                    // Segment paths
+                    if (_polylineToSegments.TryGetValue(
+                            currentPolyline,
+                            out var segments))
+                    {
+                        foreach (var segmentPath in segments.ToList())
+                        {
+                            if (TileCanvas.Children.Contains(segmentPath))
+                                TileCanvas.Children.Remove(segmentPath);
+                        }
+
+                        _polylineToSegments.Remove(currentPolyline);
+                    }
+
+                    _polylineGeoPoints.Remove(currentPolyline);
+
+                    var mapRect = mapRectangles
+                        .FirstOrDefault(mr => mr.Shape == currentPolyline);
+
+                    if (mapRect != null)
+                        mapRectangles.Remove(mapRect);
                 }
 
                 currentPolyline = null;
+
                 polylinePoints.Clear();
                 polylineVertexDots.Clear();
                 _currentPolylineCircles.Clear();
                 _currentPolylineSegments.Clear();
+                _currentPolylineCircleGeoPoints.Clear();
+
                 _isDrawingPolyline = false;
                 isDrawing = false;
                 _polylineCommittedPointsCount = 0;
+
                 didSomething = true;
             }
 
@@ -6386,7 +6522,8 @@ namespace V2XController
                 didSomething = true;
             }
 
-            if (dimensionTextBlock != null && dimensionTextBlock.Visibility == Visibility.Visible)
+            if (dimensionTextBlock != null &&
+                dimensionTextBlock.Visibility == Visibility.Visible)
             {
                 dimensionTextBlock.Visibility = Visibility.Collapsed;
                 didSomething = true;
@@ -6397,15 +6534,18 @@ namespace V2XController
                 DeselectElement();
                 didSomething = true;
             }
+
             TileCanvas.Cursor = Cursors.Arrow;
 
-            if (PolylineWidthPanel != null && PolylineWidthPanel.Visibility == Visibility.Visible)
+            if (PolylineWidthPanel != null &&
+                PolylineWidthPanel.Visibility == Visibility.Visible)
             {
                 PolylineWidthPanel.Visibility = Visibility.Collapsed;
                 didSomething = true;
             }
 
             SetSelectionMode();
+
             return didSomething;
         }
 
@@ -6476,7 +6616,7 @@ namespace V2XController
                 arrow.Opacity = 1.0;
             }
 
-            rect.StrokeThickness = 
+            rect.StrokeThickness =
                 Math.Max(1.0, _highlightedRectOldThickness) + 1.5;
         }
 
@@ -8464,7 +8604,7 @@ namespace V2XController
         //                try { rawLine = await ReadLineAsync(serialPort).ConfigureAwait(false); }
         //                catch { break; }
 
-                        
+
         //            }
         //        }
         //        catch (Exception loopEx)
@@ -13053,7 +13193,7 @@ namespace V2XController
                     if (textBlock.Tag == null ||
                         (textBlock.Tag.ToString() != "Tram" &&
                          textBlock.Tag.ToString() != "Srv" &&
-                         textBlock.Tag.ToString() != "Stop" && 
+                         textBlock.Tag.ToString() != "Stop" &&
                          textBlock.Tag.ToString() != "Signal"))
                     {
                         elementsToRemove.Add(child);
@@ -13610,7 +13750,7 @@ namespace V2XController
             RefreshComPorts?.SetValue(
                 IsEnabledProperty,
                 !_isConnected);
-        
+
             // Connected-gated (serial)
             Disconnect?.SetValue(IsEnabledProperty, _isConnected);
             SendSrv?.SetValue(IsEnabledProperty, _isConnected);
@@ -17893,7 +18033,7 @@ namespace V2XController
         }
 
 
-        private void SetPolylineZonesLiveSorting(bool enabled) 
+        private void SetPolylineZonesLiveSorting(bool enabled)
         {
             var view = CollectionViewSource.GetDefaultView(PolylineZonesCollection);
             if (view is ICollectionViewLiveShaping live)
@@ -18802,7 +18942,7 @@ namespace V2XController
         {
             tb.Effect = new DropShadowEffect
             {
-                
+
                 Color = Colors.White,
                 BlurRadius = 12,
                 ShadowDepth = 0,
@@ -18931,7 +19071,7 @@ public class PolylinePointData
     public Point CanvasPosition { get; set; }
     public double Latitude { get; set; }
     public double Longitude { get; set; }
-    public DateTime Timestamp { get; set; } 
+    public DateTime Timestamp { get; set; }
 }
 
 public class PolylineData

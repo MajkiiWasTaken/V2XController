@@ -88,13 +88,12 @@
 
         <!-- Serial fields (kept but hidden for tunnel; shown only for "Serial port") -->
         <Grid x:Name="SerialFields"
-              Margin="42,190,42,0"
-              VerticalAlignment="Top"
-              Panel.ZIndex="10"
-              Visibility="Collapsed">
+      Margin="42,190,42,0"
+      VerticalAlignment="Top"
+      Panel.ZIndex="10"
+      Visibility="Collapsed">
+
             <Grid.RowDefinitions>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="6"/>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="6"/>
                 <RowDefinition Height="Auto"/>
@@ -106,29 +105,122 @@
                 <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
 
-            <StackPanel Orientation="Horizontal">
-                <TextBlock Text="Port:" Width="90" VerticalAlignment="Center"/>
-                <TextBox x:Name="SerialPortTextBox" Height="24" Width="160"/>
+            <!-- COM PORT -->
+            <StackPanel Grid.Row="0"
+                Orientation="Horizontal">
+
+                <TextBlock Text="Port:"
+                   Width="90"
+                   VerticalAlignment="Center"/>
+
+                <ComboBox x:Name="SerialPortComboBox"
+                  Width="160"
+                  Height="24"
+                  VerticalContentAlignment="Center"
+                  SelectionChanged="SerialSettingComboBox_SelectionChanged"/>
             </StackPanel>
 
-            <StackPanel Grid.Row="2" Orientation="Horizontal">
-                <TextBlock Text="Baudrate:" Width="90" VerticalAlignment="Center"/>
-                <TextBox x:Name="SerialBaudTextBox" Height="24" Width="160"/>
+            <!-- BAUDRATE -->
+            <StackPanel Grid.Row="2"
+                Orientation="Horizontal">
+
+                <TextBlock Text="Baudrate:"
+                   Width="90"
+                   VerticalAlignment="Center"/>
+
+                <StackPanel>
+                    <ComboBox x:Name="SerialBaudComboBox"
+                      Width="160"
+                      Height="24"
+                      VerticalContentAlignment="Center"
+                      SelectionChanged="SerialBaudComboBox_SelectionChanged">
+
+                        <ComboBoxItem Content="256000"/>
+                        <ComboBoxItem Content="128000"/>
+                        <ComboBoxItem Content="115200"/>
+                        <ComboBoxItem Content="57600"/>
+                        <ComboBoxItem Content="56000"/>
+                        <ComboBoxItem Content="38400"/>
+                        <ComboBoxItem Content="28800"/>
+                        <ComboBoxItem Content="19200"/>
+                        <ComboBoxItem Content="14400"/>
+                        <ComboBoxItem Content="9600"/>
+                        <ComboBoxItem Content="Custom"/>
+                    </ComboBox>
+
+                    <TextBox x:Name="SerialCustomBaudTextBox"
+                     Width="160"
+                     Height="24"
+                     Margin="0,4,0,0"
+                     Visibility="Collapsed"
+                     TextChanged="SerialCustomBaudTextBox_TextChanged"/>
+                </StackPanel>
             </StackPanel>
 
-            <StackPanel Grid.Row="4" Orientation="Horizontal">
-                <TextBlock Text="Data bits:" Width="90" VerticalAlignment="Center"/>
-                <TextBox x:Name="SerialDataBitsTextBox" Height="24" Width="160"/>
+            <!-- DATA BITS -->
+            <StackPanel Grid.Row="4"
+                Orientation="Horizontal">
+
+                <TextBlock Text="Data bits:"
+                   Width="90"
+                   VerticalAlignment="Center"/>
+
+                <ComboBox x:Name="SerialDataBitsComboBox"
+                  Width="160"
+                  Height="24"
+                  VerticalContentAlignment="Center"
+                  SelectedIndex="0"
+                  SelectionChanged="SerialSettingComboBox_SelectionChanged">
+
+                    <ComboBoxItem Content="8"/>
+                    <ComboBoxItem Content="7"/>
+                    <ComboBoxItem Content="6"/>
+                    <ComboBoxItem Content="5"/>
+                </ComboBox>
             </StackPanel>
 
-            <StackPanel Grid.Row="6" Orientation="Horizontal">
-                <TextBlock Text="Parity:" Width="90" VerticalAlignment="Center"/>
-                <TextBox x:Name="SerialParityTextBox" Height="24" Width="160"/>
+            <!-- PARITY -->
+            <StackPanel Grid.Row="6"
+                Orientation="Horizontal">
+
+                <TextBlock Text="Parity:"
+                   Width="90"
+                   VerticalAlignment="Center"/>
+
+                <ComboBox x:Name="SerialParityComboBox"
+                  Width="160"
+                  Height="24"
+                  VerticalContentAlignment="Center"
+                  SelectedIndex="0"
+                  SelectionChanged="SerialSettingComboBox_SelectionChanged">
+
+                    <ComboBoxItem Content="None"/>
+                    <ComboBoxItem Content="Even"/>
+                    <ComboBoxItem Content="Odd"/>
+                    <ComboBoxItem Content="Mark"/>
+                    <ComboBoxItem Content="Space"/>
+                </ComboBox>
             </StackPanel>
 
-            <StackPanel Grid.Row="8" Orientation="Horizontal">
-                <TextBlock Text="Stop bits:" Width="90" VerticalAlignment="Center"/>
-                <TextBox x:Name="SerialStopBitsTextBox" Height="24" Width="160"/>
+            <!-- STOP BITS -->
+            <StackPanel Grid.Row="8"
+                Orientation="Horizontal">
+
+                <TextBlock Text="Stop bits:"
+                   Width="90"
+                   VerticalAlignment="Center"/>
+
+                <ComboBox x:Name="SerialStopBitsComboBox"
+                  Width="160"
+                  Height="24"
+                  VerticalContentAlignment="Center"
+                  SelectedIndex="1"
+                  SelectionChanged="SerialSettingComboBox_SelectionChanged">
+
+                    <ComboBoxItem Content="2"/>
+                    <ComboBoxItem Content="1.5"/>
+                    <ComboBoxItem Content="1"/>
+                </ComboBox>
             </StackPanel>
 
         </Grid>

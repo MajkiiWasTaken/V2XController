@@ -38,36 +38,62 @@ namespace V2XController
         // Capture values directly from the window controls
         public static ExportSettings FromWindow(ExportWindow win)
         {
-            if (win is null) throw new ArgumentNullException(nameof(win));
+            if (win is null)
+                throw new ArgumentNullException(nameof(win));
 
-            var selected = (win.ConnectionComboBox.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content?.ToString();
-            bool isTcp = string.Equals(selected, "Modbus TCP", StringComparison.OrdinalIgnoreCase);
-            bool isTunnel = string.Equals(selected, "Serial tunnel", StringComparison.OrdinalIgnoreCase);
+            var selected =
+                (win.ConnectionComboBox.SelectedItem
+                    as System.Windows.Controls.ComboBoxItem)
+                ?.Content
+                ?.ToString();
+
+            bool isTcp =
+                string.Equals(
+                    selected,
+                    "Modbus TCP",
+                    StringComparison.OrdinalIgnoreCase);
+
+            bool isTunnel =
+                string.Equals(
+                    selected,
+                    "Serial tunnel",
+                    StringComparison.OrdinalIgnoreCase);
 
             var s = new ExportSettings
             {
                 IsTcpSelected = isTcp || isTunnel,
-                // modem
                 ModemRaw = Normalize(win.ModemTextBox?.Text)
             };
-            if (TryParseDecOrHex(s.ModemRaw, out var modemVal))
+
+            if (TryParseDecOrHex(
+                s.ModemRaw,
+                out var modemVal))
             {
                 s.ModemDec = modemVal;
-                s.ModemHex = "0x" + modemVal.ToString("X");
+                s.ModemHex =
+                    "0x" + modemVal.ToString("X");
             }
 
             if (isTunnel)
             {
-                // store tunnel remote endpoint so it can be saved/remembered
-                s.TunnelRemoteHost = Normalize(win.TunnelRemoteHostTextBox?.Text);
-                s.TunnelRemotePort = TryParseInt(Normalize(win.TunnelRemotePortTextBox?.Text), out var tport) ? tport : null;
+                s.TunnelRemoteHost =
+                    Normalize(
+                        win.TunnelRemoteHostTextBox?.Text);
 
-                // keep IsTcpSelected as-is (UI selection is Tunnel); callers may override TCP routing at runtime
-                // also populate TcpHost/Port for convenience (some flows use TcpHost/TcpPort when Tunnel is active)
-                s.TcpHost = s.TunnelRemoteHost;
-                s.TcpPort = s.TunnelRemotePort;
+                s.TunnelRemotePort =
+                    TryParseInt(
+                        Normalize(
+                            win.TunnelRemotePortTextBox?.Text),
+                        out var tport)
+                            ? tport
+                            : null;
 
-                // clear serial explicit fields (we're tunnelling remotely)
+                s.TcpHost =
+                    s.TunnelRemoteHost;
+
+                s.TcpPort =
+                    s.TunnelRemotePort;
+
                 s.SerialPortName = null;
                 s.SerialBaudrate = null;
                 s.SerialDataBits = null;
@@ -77,10 +103,18 @@ namespace V2XController
             }
             else if (isTcp)
             {
-                s.TcpHost = Normalize(win.TcpHostTextBox?.Text);
-                s.TcpPort = TryParseInt(Normalize(win.TcpPortTextBox?.Text), out var port) ? port : null;
+                s.TcpHost =
+                    Normalize(
+                        win.TcpHostTextBox?.Text);
 
-                // clear serial
+                s.TcpPort =
+                    TryParseInt(
+                        Normalize(
+                            win.TcpPortTextBox?.Text),
+                        out var port)
+                            ? port
+                            : null;
+
                 s.SerialPortName = null;
                 s.SerialBaudrate = null;
                 s.SerialDataBits = null;
@@ -90,14 +124,57 @@ namespace V2XController
             }
             else
             {
-                s.SerialPortName = Normalize(win.SerialPortTextBox?.Text);
-                s.SerialBaudrate = TryParseInt(Normalize(win.SerialBaudTextBox?.Text), out var baud) ? baud : null;
-                s.SerialDataBits = TryParseInt(Normalize(win.SerialDataBitsTextBox?.Text), out var db) ? db : null;
-                s.SerialParity = Normalize(win.SerialParityTextBox?.Text);
-                s.SerialStopBits = Normalize(win.SerialStopBitsTextBox?.Text);
-                s.SerialHandshake = "None";             // not in UI
+                s.SerialPortName =
+                    Normalize(
+                        win.SerialPortComboBox
+                            ?.SelectedItem
+                            ?.ToString());
 
-                // clear tcp/tunnel
+                string? baudText =
+                    GetComboBoxValue(
+                        win.SerialBaudComboBox);
+
+                if (string.Equals(
+                    baudText,
+                    "Custom",
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    baudText =
+                        Normalize(
+                            win.SerialCustomBaudTextBox
+                                ?.Text);
+                }
+
+                s.SerialBaudrate =
+                    TryParseInt(
+                        baudText,
+                        out var baud)
+                            ? baud
+                            : null;
+
+                string? dataBitsText =
+                    GetComboBoxValue(
+                        win.SerialDataBitsComboBox);
+
+                s.SerialDataBits =
+                    TryParseInt(
+                        dataBitsText,
+                        out var db)
+                            ? db
+                            : null;
+
+                s.SerialParity =
+                    Normalize(
+                        GetComboBoxValue(
+                            win.SerialParityComboBox));
+
+                s.SerialStopBits =
+                    Normalize(
+                        GetComboBoxValue(
+                            win.SerialStopBitsComboBox));
+
+                s.SerialHandshake = "None";
+
                 s.TcpHost = null;
                 s.TcpPort = null;
                 s.TunnelRemoteHost = null;
@@ -105,6 +182,23 @@ namespace V2XController
             }
 
             return s;
+        }
+
+        private static string? GetComboBoxValue(
+    System.Windows.Controls.ComboBox? comboBox)
+        {
+            if (comboBox == null)
+                return null;
+
+            if (comboBox.SelectedItem is
+                System.Windows.Controls.ComboBoxItem item)
+            {
+                return Normalize(
+                    item.Content?.ToString());
+            }
+
+            return Normalize(
+                comboBox.SelectedItem?.ToString());
         }
 
         private static string? Normalize(string? s)
