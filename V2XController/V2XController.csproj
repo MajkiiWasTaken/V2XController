@@ -1,15 +1,25 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <OutputType>WinExe</OutputType>
-    <TargetFramework>net8.0-windows8.0</TargetFramework>
-    <Nullable>enable</Nullable>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <UseWPF>true</UseWPF>
-    <Configurations>Debug;Release;V2XController-Debug</Configurations>
-	<RuntimeIdentifier>win-x64</RuntimeIdentifier>
-	<ApplicationIcon>V2x icon.ico</ApplicationIcon>
-  </PropertyGroup>
+  	<OutputType>WinExe</OutputType>
+  	<TargetFramework>net8.0-windows8.0</TargetFramework>
+  	<Nullable>enable</Nullable>
+ 	 <ImplicitUsings>enable</ImplicitUsings>
+  	<UseWPF>true</UseWPF>
+  <AssemblyVersion>3.2.0.0</AssemblyVersion>
+  <GenerateAssemblyFileVersionAttribute>false</GenerateAssemblyFileVersionAttribute>
+  <GenerateAssemblyInformationalVersionAttribute>false</GenerateAssemblyInformationalVersionAttribute>
+</PropertyGroup>
+
+<Target Name="IncrementBuildNumber"
+        BeforeTargets="PrepareForBuild"
+        Condition="'$(DesignTimeBuild)' != 'true'
+                   AND '$(MSBuildProjectName)' == 'V2XController'">
+
+  <Exec
+    Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(ProjectDir)IncrementBuild.ps1&quot;" />
+
+</Target>
 
   <ItemGroup>
     <Content Include="V2x icon.ico" />
@@ -36,5 +46,25 @@
       <HintPath>..\..\..\..\Downloads\ModbusLib\ModbusNewLib.dll</HintPath>
     </Reference>
   </ItemGroup>
+
+  <Target Name="IncrementBuildNumber" BeforeTargets="GenerateAssemblyInfo">
+
+    <Exec
+      Command="powershell -ExecutionPolicy Bypass -File &quot;$(ProjectDir)IncrementBuild.ps1&quot;" />
+
+    <ReadLinesFromFile File="$(ProjectDir)build.txt">
+      <Output TaskParameter="Lines" PropertyName="BuildNumber" />
+    </ReadLinesFromFile>
+
+    <PropertyGroup>
+      <FileVersion>$(BuildNumber)</FileVersion>
+      <InformationalVersion>$(BuildNumber)</InformationalVersion>
+    </PropertyGroup>
+
+    <Message
+      Text="V2XController build version: $(BuildNumber)"
+      Importance="high" />
+
+  </Target>
 
 </Project>

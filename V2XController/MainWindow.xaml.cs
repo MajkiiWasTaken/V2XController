@@ -1,4 +1,6 @@
 ﻿using Google.Protobuf.WellKnownTypes;
+using System.Diagnostics;
+using System.Reflection;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
@@ -623,6 +625,13 @@ namespace V2XController
         public MainWindow()
         {
             InitializeComponent();
+            var assembly = Assembly.GetExecutingAssembly();
+            var fileVersion = FileVersionInfo
+                .GetVersionInfo(assembly.Location)
+                .FileVersion;
+
+            BuildVersionLabel.Content = $"Build version: {fileVersion}";
+
             tempHeightLine = new Line();
             tempWidthLine = new Line();
             previewRect = new Polygon();
@@ -2724,7 +2733,6 @@ namespace V2XController
                 }
             }
 
-            // ✅ Move zone arrows - changed from simple move to recalculation
             // This ensures arrows stay correctly positioned and scaled
             foreach (var kvp in activationZones.ToArray())
             {
@@ -17009,7 +17017,6 @@ namespace V2XController
                 new Point(0, arrowH * 0.86)
             };
 
-            // ✅ Calculate arrow position relative to rectangle's unrotated position
             double arrowLeft = left + (w - arrowW) / 2.0;
             double arrowTop = top + Math.Max(4.0, h * 0.06);
 
@@ -17017,7 +17024,6 @@ namespace V2XController
             arrow.Fill = brush;
             arrow.Stroke = brush;
 
-            // ✅ Apply the same rotation as the rectangle, but adjust the center point
             // The arrow should rotate around the same center as the rectangle (bottom center of rect)
             double rectCenterX = left + w / 2.0;
             double rectCenterY = top + h;
@@ -17066,7 +17072,6 @@ namespace V2XController
 
                         if (zone.Rectangle != null)
                         {
-                            // ✅ Remove arrow before removing rectangle
                             RemoveZoneArrow(zone.Rectangle);
 
                             if (TileCanvas.Children.Contains(zone.Rectangle))
@@ -18949,3 +18954,10 @@ public class PolylineSegmentData
     public double WidthMeters { get; set; }
     public string SegmentType { get; set; } = "";
 }
+
+
+
+
+
+
+

@@ -33,6 +33,9 @@
         WindowStyle="SingleBorderWindow">
 
     <Grid Margin="10">
+
+        <Label x:Name="BuildVersionLabel" Content="Build Version: " FontWeight="Bold" HorizontalAlignment="Left" Height="26" Margin="0,930,0,0" VerticalAlignment="Top" Width="197"/>
+
         <!-- Left Panel -->
         <StackPanel HorizontalAlignment="Left" Width="320" Margin="0,0,0,0" VerticalAlignment="Top" Height="693">
 
@@ -536,7 +539,6 @@
                 </Style>
             </Button.Style>
         </Button>
-        <Label Content="Build Version: 3.2.2" FontWeight="Bold" HorizontalAlignment="Left" Height="26" Margin="0,930,0,0" VerticalAlignment="Top" Width="125"/>
 
     </Grid>
 </Window>
