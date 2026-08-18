@@ -2005,7 +2005,6 @@ namespace V2XController
             catch { }
 
             // Serial fields
-            // Serial fields
             try
             {
                 RefreshSerialPorts(s.SerialPortName);
